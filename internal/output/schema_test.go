@@ -1,0 +1,505 @@
+package output
+
+import (
+	"bytes"
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+
+	"github.com/santhosh-tekuri/jsonschema/v5"
+)
+
+const defaultSchemaPath = "../../schemas/golink-output.schema.json"
+
+// CompileSchema loads and compiles the shared strict JSON schema.
+func CompileSchema(schemaPath string) (*jsonschema.Schema, error) {
+	schemaData, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return nil, err
+	}
+
+	c := jsonschema.NewCompiler()
+	if err := c.AddResource(schemaPath, bytes.NewReader(schemaData)); err != nil {
+		return nil, err
+	}
+	return c.Compile(schemaPath)
+}
+
+// ValidateEnvelopeRoundTrip validates JSON payload against schema and validates JSON round-trip.
+func ValidateEnvelopeRoundTrip(t *testing.T, schemaPath string, payload []byte) {
+	t.Helper()
+
+	if !filepath.IsAbs(schemaPath) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("failed to resolve working directory: %v", err)
+		}
+		schemaPath = filepath.Clean(filepath.Join(cwd, schemaPath))
+	}
+
+	schema, err := CompileSchema(schemaPath)
+	if err != nil {
+		t.Fatalf("compile schema: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("payload must be valid JSON: %v", err)
+	}
+
+	if err := schema.Validate(decoded); err != nil {
+		if verr, ok := err.(*jsonschema.ValidationError); ok {
+			t.Fatalf("schema validation failed: %s at %s", verr.Message, verr.InstanceLocation)
+		}
+		t.Fatalf("schema validation failed: %v", err)
+	}
+
+	roundTrip, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var decodedAgain map[string]any
+	if err := json.Unmarshal(roundTrip, &decodedAgain); err != nil {
+		t.Fatalf("round-trip unmarshal failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(decoded, decodedAgain) {
+		t.Fatalf("round-trip mismatch\ninput: %#v\noutput: %#v", decoded, decodedAgain)
+	}
+}
+
+// Test fixtures for every command output and error envelope shape described in PROMPT_golink.md v3.
+type schemaFixture struct {
+	name    string
+	payload []byte
+}
+
+func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
+	fixtures := []schemaFixture{
+		{
+			name: "auth status",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_auth_status_01",
+				"command": "auth status",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:00:00Z",
+				"data": {
+					"is_authenticated": true,
+					"profile": "default",
+					"transport": "official",
+					"scopes": ["openid", "profile", "email", "w_member_social"],
+					"expires_at": "2026-04-16T11:00:00Z",
+					"auth_flow": "pkce"
+				}
+			}`),
+		},
+		{
+			name: "auth login",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_auth_login_01",
+				"command": "auth login",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:00:00Z",
+				"data": {
+					"url": "https://www.linkedin.com/oauth/native-pkce/authorization?client_id=abc",
+					"profile": "default",
+					"transport": "official",
+					"timeout_ms": 120000
+				}
+			}`),
+		},
+		{
+			name: "auth login result",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_auth_login_result_01",
+				"command": "auth login",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:05:00Z",
+				"data": {
+					"status": "success",
+					"profile": "default",
+					"transport": "official",
+					"connected_at": "2026-04-16T10:05:00Z",
+					"scopes_granted": ["openid", "profile", "email", "w_member_social"]
+				}
+			}`),
+		},
+		{
+			name: "auth logout",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_auth_logout_01",
+				"command": "auth logout",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:10:00Z",
+				"data": {
+					"status": "ok",
+					"profile": "default",
+					"transport": "official",
+					"cleared": true
+				}
+			}`),
+		},
+		{
+			name: "profile me",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_profile_me_01",
+				"command": "profile me",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:11:00Z",
+				"data": {
+					"sub": "urn:li:person:abc123",
+					"name": "Ion Mudreac",
+					"email": "ion@example.com",
+					"picture": "https://media.licdn.com/example.jpg",
+					"locale": {
+						"country": "MY",
+						"language": "en"
+					},
+					"profile_id": "abc123"
+				}
+			}`),
+		},
+		{
+			name: "post create",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_post_create_01",
+				"command": "post create",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:20:00Z",
+				"data": {
+					"id": "urn:li:share:7123456789",
+					"created_at": "2026-04-16T10:20:00Z",
+					"text": "Hello world",
+					"visibility": "PUBLIC",
+					"url": "https://www.linkedin.com/feed/update/urn:li:share:7123456789",
+					"author_urn": "urn:li:person:abc123"
+				}
+			}`),
+		},
+		{
+			name: "post create dry run",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_post_create_dryrun_01",
+				"command": "post create",
+				"transport": "official",
+				"mode": "dry_run",
+				"generated_at": "2026-04-16T10:21:00Z",
+				"data": {
+					"would_post": {
+						"endpoint": "POST /rest/posts",
+						"text": "Hello",
+						"visibility": "PUBLIC"
+					},
+					"mode": "dry_run"
+				}
+			}`),
+		},
+		{
+			name: "post list",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_post_list_01",
+				"command": "post list",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:22:00Z",
+				"data": {
+					"owner_urn": "urn:li:person:abc123",
+					"count": 2,
+					"start": 0,
+					"items": [
+						{
+							"id": "urn:li:share:1",
+							"created_at": "2026-04-16T09:00:00Z",
+							"text": "first post",
+							"visibility": "PUBLIC",
+							"url": "https://www.linkedin.com/feed/update/urn:li:share:1",
+							"author_urn": "urn:li:person:abc123",
+							"like_count": 1,
+							"comment_count": 2
+						},
+						{
+							"id": "urn:li:share:2",
+							"created_at": "2026-04-16T09:05:00Z",
+							"text": "second post",
+							"visibility": "CONNECTIONS",
+							"url": "https://www.linkedin.com/feed/update/urn:li:share:2",
+							"author_urn": "urn:li:person:abc123"
+						}
+					]
+				}
+			}`),
+		},
+		{
+			name: "post get",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_post_get_01",
+				"command": "post get",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:23:00Z",
+				"data": {
+					"id": "urn:li:share:1",
+					"created_at": "2026-04-16T09:00:00Z",
+					"text": "first post",
+					"visibility": "PUBLIC",
+					"url": "https://www.linkedin.com/feed/update/urn:li:share:1",
+					"author_urn": "urn:li:person:abc123",
+					"like_count": 3,
+					"comment_count": 0,
+					"publish_time": 1713254400
+				}
+			}`),
+		},
+		{
+			name: "post delete",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_post_delete_01",
+				"command": "post delete",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:24:00Z",
+				"data": {
+					"id": "urn:li:share:2",
+					"deleted": true,
+					"revisions": 1
+				}
+			}`),
+		},
+		{
+			name: "comment add",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_comment_add_01",
+				"command": "comment add",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:25:00Z",
+				"data": {
+					"id": "urn:li:comment:123",
+					"post_urn": "urn:li:share:1",
+					"author": "urn:li:person:abc123",
+					"text": "Nice post!",
+					"created_at": "2026-04-16T10:25:00Z",
+					"likeable": true
+				}
+			}`),
+		},
+		{
+			name: "comment list",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_comment_list_01",
+				"command": "comment list",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:26:00Z",
+				"data": {
+					"post_urn": "urn:li:share:1",
+					"items": [
+						{
+							"id": "urn:li:comment:123",
+							"post_urn": "urn:li:share:1",
+							"author": "urn:li:person:abc123",
+							"text": "Great",
+							"created_at": "2026-04-16T10:25:00Z",
+							"likeable": false
+						}
+					],
+					"count": 1,
+					"start": 0
+				}
+			}`),
+		},
+		{
+			name: "reaction add",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_reaction_add_01",
+				"command": "react add",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:27:00Z",
+				"data": {
+					"post_urn": "urn:li:share:1",
+					"actor_urn": "urn:li:person:abc123",
+					"type": "LIKE",
+					"at": "2026-04-16T10:27:00Z",
+					"target_urn": "urn:li:share:1"
+				}
+			}`),
+		},
+		{
+			name: "reaction list",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_reaction_list_01",
+				"command": "react list",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:28:00Z",
+				"data": {
+					"post_urn": "urn:li:share:1",
+					"items": [
+						{"post_urn":"urn:li:share:1","actor_urn":"urn:li:person:abc123","type":"LIKE","at":"2026-04-16T10:27:00Z"},
+						{"post_urn":"urn:li:share:1","actor_urn":"urn:li:person:def456","type":"EMPATHY","at":"2026-04-16T10:28:00Z"}
+					],
+					"count": 2
+				}
+			}`),
+		},
+		{
+			name: "search people",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_search_people_01",
+				"command": "search people",
+				"transport": "unofficial",
+				"mode": "normal",
+				"generated_at": "2026-04-16T10:29:00Z",
+				"data": {
+					"query": "engineer in san jose",
+					"count": 1,
+					"start": 0,
+					"total_count": 1,
+					"people": [
+						{
+							"urn": "urn:li:person:def456",
+							"full_name": "Taylor Engineer",
+							"headline": "Platform Architect",
+							"location": "San Jose, CA",
+							"industry": "Technology",
+							"profile_picture": "https://media.licdn.com/person.jpg",
+							"skills": ["Go", "Distributed systems"]
+						}
+					]
+				}
+			}`),
+		},
+		{
+			name: "validation error",
+			payload: []byte(`{
+				"status": "validation_error",
+				"command_id": "cmd_validation_error_01",
+				"command": "post create",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:29:30Z",
+				"error": "missing required flag: --text",
+				"code": "VALIDATION_ERROR",
+				"details": "non-interactive mode requires --text"
+			}`),
+		},
+		{
+			name: "mcp tool",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_mcp_tool_01",
+				"command": "mcp serve",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:30:00Z",
+				"data": {
+					"tool": "golink_create_post",
+					"result_json": {"status":"ok","id":"urn:li:share:3"}
+				}
+			}`),
+		},
+		{
+			name: "version",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_version_01",
+				"command": "version",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:33:00Z",
+				"data": {
+					"version": "0.1.0",
+					"go_version": "go1.26.2",
+					"os": "darwin",
+					"arch": "arm64",
+					"commit": "abc1234",
+					"build_date": "2026-04-16"
+				}
+			}`),
+		},
+		{
+			name: "unsupported",
+			payload: []byte(`{
+				"status": "unsupported",
+				"command_id": "cmd_unsupported_01",
+				"command": "search people",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:31:00Z",
+				"data": {
+					"feature": "search people",
+					"reason": "not available through open self-serve LinkedIn consumer/community permissions",
+					"suggested_fallback": "--transport=unofficial"
+				}
+			}`),
+		},
+		{
+			name: "error",
+			payload: []byte(`{
+				"status": "error",
+				"command_id": "cmd_error_01",
+				"command": "profile me",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:32:00Z",
+				"error": "Token expired or invalid. Re-run: golink auth login",
+				"code": "UNAUTHORIZED",
+				"details": "token_expired"
+			}`),
+		},
+		{
+			name: "success with rate limit metadata",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_profile_me_02",
+				"command": "profile me",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:34:00Z",
+				"rate_limit": {
+					"remaining": 42,
+					"reset_at": "2026-04-16T11:00:00Z"
+				},
+				"data": {
+					"sub": "urn:li:person:abc123",
+					"name": "Ion Mudreac",
+					"email": "ion@example.com",
+					"picture": "https://media.licdn.com/example.jpg",
+					"locale": {
+						"country": "MY",
+						"language": "en"
+					}
+				}
+			}`),
+		},
+	}
+
+	for _, tc := range fixtures {
+		t.Run(tc.name, func(t *testing.T) {
+			ValidateEnvelopeRoundTrip(t, defaultSchemaPath, tc.payload)
+		})
+	}
+}
+
+// ensure default schema path exists and is an actual file at runtime
+func TestSchemaFileExists(t *testing.T) {
+	path := defaultSchemaPath
+	if !filepath.IsAbs(path) {
+		if cwd, err := os.Getwd(); err == nil {
+			path = filepath.Clean(filepath.Join(cwd, path))
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		if err, ok := err.(*fs.PathError); ok {
+			t.Fatalf("schema file missing: %v", err)
+		}
+		t.Fatalf("schema file check failed: %v", err)
+	}
+}

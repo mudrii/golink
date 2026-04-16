@@ -1,0 +1,592 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://golink.local/schemas/golink-output.schema.json",
+  "title": "golink Output Bundle Schema",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/authStatusOutput" },
+    { "$ref": "#/$defs/authLoginOutput" },
+    { "$ref": "#/$defs/authLoginResultOutput" },
+    { "$ref": "#/$defs/authLogoutOutput" },
+    { "$ref": "#/$defs/profileMeOutput" },
+    { "$ref": "#/$defs/postCreateOutput" },
+    { "$ref": "#/$defs/postCreateDryRunOutput" },
+    { "$ref": "#/$defs/postListOutput" },
+    { "$ref": "#/$defs/postGetOutput" },
+    { "$ref": "#/$defs/postDeleteOutput" },
+    { "$ref": "#/$defs/commentAddOutput" },
+    { "$ref": "#/$defs/commentListOutput" },
+    { "$ref": "#/$defs/reactionAddOutput" },
+    { "$ref": "#/$defs/reactionListOutput" },
+    { "$ref": "#/$defs/searchPeopleOutput" },
+    { "$ref": "#/$defs/mcpToolOutput" },
+    { "$ref": "#/$defs/versionOutput" },
+    { "$ref": "#/$defs/unsupportedOutput" },
+    { "$ref": "#/$defs/validationErrorOutput" },
+    { "$ref": "#/$defs/errorOutput" }
+  ],
+  "$defs": {
+    "commandStatus": {
+      "type": "string",
+      "enum": ["ok", "unsupported", "error", "validation_error"]
+    },
+    "errorCode": {
+      "type": "string",
+      "enum": [
+        "UNAUTHORIZED",
+        "FORBIDDEN",
+        "NOT_FOUND",
+        "CONFLICT",
+        "RATE_LIMITED",
+        "UNAVAILABLE",
+        "VALIDATION_ERROR",
+        "TRANSPORT_ERROR",
+        "UNSUPPORTED"
+      ]
+    },
+    "visibility": {
+      "type": "string",
+      "enum": ["PUBLIC", "CONNECTIONS", "LOGGED_IN"]
+    },
+    "reactionType": {
+      "type": "string",
+      "enum": ["LIKE", "PRAISE", "EMPATHY", "INTEREST", "APPRECIATION", "ENTERTAINMENT"]
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "rateLimitInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "remaining": { "type": "integer", "minimum": 0 },
+        "reset_at": { "type": "string" }
+      }
+    },
+    "baseEnvelopeProperties": {
+      "description": "Shared property definitions for all envelopes. Not used as a standalone schema — referenced via allOf in concrete envelopes.",
+      "type": "object",
+      "properties": {
+        "status": { "$ref": "#/$defs/commandStatus" },
+        "command_id": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "mode": { "type": "string", "enum": ["normal", "dry_run"] },
+        "request_id": { "type": "string" },
+        "generated_at": { "$ref": "#/$defs/dateTime" },
+        "rate_limit": { "$ref": "#/$defs/rateLimitInfo" }
+      },
+      "required": ["status", "command_id", "command", "transport", "generated_at"]
+    },
+    "unsupportedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature", "reason"],
+      "properties": {
+        "feature": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "suggested_fallback": { "type": "string" }
+      }
+    },
+    "authStatusData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["is_authenticated", "profile", "transport"],
+      "properties": {
+        "is_authenticated": { "type": "boolean" },
+        "profile": { "type": "string", "minLength": 1 },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "scopes": { "type": "array", "items": { "type": "string" } },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "auth_flow": { "type": "string" }
+      }
+    },
+    "authLoginData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "profile", "transport", "timeout_ms"],
+      "properties": {
+        "url": { "type": "string", "format": "uri" },
+        "profile": { "type": "string" },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "timeout_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "authLoginResultData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "profile", "transport", "connected_at"],
+      "properties": {
+        "status": { "type": "string", "enum": ["success", "login", "declined", "error"] },
+        "profile": { "type": "string" },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "connected_at": { "$ref": "#/$defs/dateTime" },
+        "scopes_granted": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "authLogoutData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "profile", "transport", "cleared"],
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "skipped"] },
+        "profile": { "type": "string", "minLength": 1 },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "cleared": { "type": "boolean" }
+      }
+    },
+    "locale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["country", "language"],
+      "properties": {
+        "country": { "type": "string", "minLength": 2, "maxLength": 2 },
+        "language": { "type": "string", "minLength": 2, "maxLength": 2 }
+      }
+    },
+    "profileData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sub", "locale"],
+      "properties": {
+        "sub": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "picture": { "type": "string", "format": "uri" },
+        "locale": { "$ref": "#/$defs/locale" },
+        "profile_id": { "type": "string" }
+      }
+    },
+    "postPayloadPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "text", "visibility"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1 },
+        "visibility": { "$ref": "#/$defs/visibility" },
+        "media": { "type": "string" }
+      }
+    },
+    "postSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "created_at", "text", "visibility", "url", "author_urn"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "text": { "type": "string", "minLength": 1 },
+        "visibility": { "$ref": "#/$defs/visibility" },
+        "url": { "type": "string", "format": "uri" },
+        "author_urn": { "type": "string", "pattern": "^urn:li:(person|organization):" }
+      }
+    },
+    "postListItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "created_at", "text", "visibility", "url", "author_urn"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "text": { "type": "string", "minLength": 1 },
+        "visibility": { "$ref": "#/$defs/visibility" },
+        "url": { "type": "string", "format": "uri" },
+        "author_urn": { "type": "string", "pattern": "^urn:li:(person|organization):" },
+        "like_count": { "type": "integer", "minimum": 0 },
+        "comment_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "postListData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner_urn", "count", "start", "items"],
+      "properties": {
+        "owner_urn": { "type": "string", "minLength": 1 },
+        "count": { "type": "integer", "minimum": 0 },
+        "start": { "type": "integer", "minimum": 0 },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/postListItem" } }
+      }
+    },
+    "postCreateData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "created_at", "text", "visibility", "url", "author_urn"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "text": { "type": "string", "minLength": 1 },
+        "visibility": { "$ref": "#/$defs/visibility" },
+        "url": { "type": "string", "format": "uri" },
+        "author_urn": { "type": "string", "pattern": "^urn:li:(person|organization):" },
+        "mode": { "type": "string" }
+      }
+    },
+    "postCreateDryRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["would_post", "mode"],
+      "properties": {
+        "would_post": { "$ref": "#/$defs/postPayloadPreview" },
+        "mode": { "const": "dry_run" }
+      }
+    },
+    "postGetData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "created_at", "text", "visibility", "url", "author_urn"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "text": { "type": "string", "minLength": 1 },
+        "visibility": { "$ref": "#/$defs/visibility" },
+        "url": { "type": "string", "format": "uri" },
+        "author_urn": { "type": "string", "pattern": "^urn:li:(person|organization):" },
+        "like_count": { "type": "integer", "minimum": 0 },
+        "comment_count": { "type": "integer", "minimum": 0 },
+        "publish_time": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "postDeleteData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "deleted"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "deleted": { "type": "boolean" },
+        "revisions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "commentData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "post_urn", "author", "text", "created_at"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "post_urn": { "type": "string", "minLength": 1 },
+        "author": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "likeable": { "type": "boolean" }
+      }
+    },
+    "commentListData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["post_urn", "items", "count", "start"],
+      "properties": {
+        "post_urn": { "type": "string", "minLength": 1 },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/commentData" } },
+        "count": { "type": "integer", "minimum": 0 },
+        "start": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "reactionData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["post_urn", "actor_urn", "type", "at"],
+      "properties": {
+        "post_urn": { "type": "string", "minLength": 1 },
+        "actor_urn": { "type": "string", "minLength": 1 },
+        "type": { "$ref": "#/$defs/reactionType" },
+        "at": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "reactionAddData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["post_urn", "actor_urn", "type", "at", "target_urn"],
+      "properties": {
+        "post_urn": { "type": "string", "minLength": 1 },
+        "actor_urn": { "type": "string", "minLength": 1 },
+        "type": { "$ref": "#/$defs/reactionType" },
+        "at": { "$ref": "#/$defs/dateTime" },
+        "target_urn": { "type": "string", "minLength": 1 }
+      }
+    },
+    "reactionListData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["post_urn", "items", "count"],
+      "properties": {
+        "post_urn": { "type": "string", "minLength": 1 },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/reactionData" } },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "person": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["urn"],
+      "properties": {
+        "urn": { "type": "string", "minLength": 1 },
+        "full_name": { "type": "string" },
+        "headline": { "type": "string" },
+        "location": { "type": "string" },
+        "industry": { "type": "string" },
+        "profile_picture": { "type": "string", "format": "uri" },
+        "skills": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "searchPeopleData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query", "count", "start", "total_count", "people"],
+      "properties": {
+        "query": { "type": "string", "minLength": 1 },
+        "count": { "type": "integer", "minimum": 0 },
+        "start": { "type": "integer", "minimum": 0 },
+        "total_count": { "type": "integer", "minimum": 0 },
+        "people": { "type": "array", "items": { "$ref": "#/$defs/person" } }
+      }
+    },
+    "mcpToolResultData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "result_json"],
+      "properties": {
+        "tool": { "type": "string", "minLength": 1 },
+        "result_json": { "description": "Embedded JSON value (object, array, etc.) — not a string-encoded blob" }
+      }
+    },
+    "versionData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "go_version", "os", "arch"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "go_version": { "type": "string", "minLength": 1 },
+        "os": { "type": "string", "minLength": 1 },
+        "arch": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string" },
+        "build_date": { "type": "string" }
+      }
+    },
+
+    "authStatusOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "auth status" },
+        "data": { "$ref": "#/$defs/authStatusData" }
+      }
+    },
+    "authLoginOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "auth login" },
+        "data": { "$ref": "#/$defs/authLoginData" }
+      }
+    },
+    "authLoginResultOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "auth login" },
+        "data": { "$ref": "#/$defs/authLoginResultData" }
+      }
+    },
+    "authLogoutOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "auth logout" },
+        "data": { "$ref": "#/$defs/authLogoutData" }
+      }
+    },
+    "profileMeOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "profile me" },
+        "data": { "$ref": "#/$defs/profileData" }
+      }
+    },
+    "postCreateOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post create" },
+        "data": { "$ref": "#/$defs/postCreateData" }
+      }
+    },
+    "postCreateDryRunOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post create" },
+        "mode": { "const": "dry_run" },
+        "data": { "$ref": "#/$defs/postCreateDryRunData" }
+      }
+    },
+    "postListOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post list" },
+        "data": { "$ref": "#/$defs/postListData" }
+      }
+    },
+    "postGetOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post get" },
+        "data": { "$ref": "#/$defs/postGetData" }
+      }
+    },
+    "postDeleteOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post delete" },
+        "data": { "$ref": "#/$defs/postDeleteData" }
+      }
+    },
+    "commentAddOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "comment add" },
+        "data": { "$ref": "#/$defs/commentData" }
+      }
+    },
+    "commentListOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "comment list" },
+        "data": { "$ref": "#/$defs/commentListData" }
+      }
+    },
+    "reactionAddOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "react add" },
+        "data": { "$ref": "#/$defs/reactionAddData" }
+      }
+    },
+    "reactionListOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "react list" },
+        "data": { "$ref": "#/$defs/reactionListData" }
+      }
+    },
+    "searchPeopleOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "search people" },
+        "data": { "$ref": "#/$defs/searchPeopleData" }
+      }
+    },
+    "mcpToolOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "mcp serve" },
+        "data": { "$ref": "#/$defs/mcpToolResultData" }
+      }
+    },
+    "versionOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "version" },
+        "data": { "$ref": "#/$defs/versionData" }
+      }
+    },
+    "unsupportedOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "unsupported" },
+        "data": { "$ref": "#/$defs/unsupportedPayload" }
+      }
+    },
+    "errorOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "error", "code"],
+      "properties": {
+        "status": { "const": "error" },
+        "error": { "type": "string", "minLength": 1 },
+        "code": { "$ref": "#/$defs/errorCode" },
+        "details": { "type": "string" }
+      }
+    },
+    "validationErrorOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "error", "code"],
+      "properties": {
+        "status": { "const": "validation_error" },
+        "error": { "type": "string", "minLength": 1 },
+        "code": { "const": "VALIDATION_ERROR" },
+        "details": { "type": "string" }
+      }
+    }
+  }
+}
