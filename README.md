@@ -390,7 +390,7 @@ golink doctor
 ```
 Environment
   GOLINK_CLIENT_ID   set
-  GOLINK_API_VERSION not set (default: 202504)
+  GOLINK_API_VERSION not set (default: 202604)
   GOLINK_TRANSPORT   not set (default: official)
   GOLINK_AUDIT       not set (default: on)
   GOLINK_AUDIT_PATH  not set

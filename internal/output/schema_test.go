@@ -403,10 +403,10 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 				"transport": "official",
 				"generated_at": "2026-04-17T12:00:00Z",
 				"data": {
-					"api_version": "202504",
+					"api_version": "202604",
 					"environment": {
 						"golink_client_id_set": true,
-						"golink_api_version": "202504",
+						"golink_api_version": "202604",
 						"config_loaded": false
 					},
 					"session": {
