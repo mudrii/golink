@@ -31,7 +31,26 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 					"transport": "official",
 					"scopes": ["openid", "profile", "email", "w_member_social"],
 					"expires_at": "2026-04-16T11:00:00Z",
+					"refresh_expires_at": "2027-04-16T10:00:00Z",
 					"auth_flow": "pkce"
+				}
+			}`),
+		},
+		{
+			name: "auth refresh",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_auth_refresh_01",
+				"command": "auth refresh",
+				"transport": "official",
+				"generated_at": "2026-04-16T10:05:00Z",
+				"data": {
+					"profile": "default",
+					"transport": "official",
+					"refreshed_at": "2026-04-16T10:05:00Z",
+					"expires_at": "2026-06-15T10:05:00Z",
+					"refresh_expires_at": "2027-04-16T10:00:00Z",
+					"scopes_granted": ["openid", "profile", "email", "w_member_social"]
 				}
 			}`),
 		},

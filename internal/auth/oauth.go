@@ -51,9 +51,11 @@ type CallbackResult struct {
 
 // TokenResponse contains the OAuth token response fields used by golink.
 type TokenResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresIn   int    `json:"expires_in"`
-	Scope       string `json:"scope"`
+	AccessToken           string `json:"access_token"`
+	ExpiresIn             int    `json:"expires_in"`
+	Scope                 string `json:"scope"`
+	RefreshToken          string `json:"refresh_token,omitempty"`
+	RefreshTokenExpiresIn int    `json:"refresh_token_expires_in,omitempty"`
 }
 
 // UserInfo contains the userinfo fields consumed by golink.
@@ -185,6 +187,12 @@ func CompleteLogin(
 	if token.ExpiresIn > 0 {
 		session.ExpiresAt = now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
+	if token.RefreshToken != "" {
+		session.RefreshToken = token.RefreshToken
+		if token.RefreshTokenExpiresIn > 0 {
+			session.RefreshExpiresAt = now().UTC().Add(time.Duration(token.RefreshTokenExpiresIn) * time.Second)
+		}
+	}
 	if len(session.Scopes) == 0 {
 		session.Scopes = []string{"openid", "profile", "email", "w_member_social"}
 	}
@@ -312,6 +320,53 @@ func ExchangeAuthorizationCode(
 	form.Set("client_id", requestClientID(request.URL))
 	form.Set("redirect_uri", request.RedirectURI)
 	form.Set("code_verifier", request.CodeVerifier)
+
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	httpRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	response, err := httpClient.Do(httpRequest)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("token endpoint returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var token TokenResponse
+	if err := json.Unmarshal(body, &token); err != nil {
+		return nil, err
+	}
+	if token.AccessToken == "" {
+		return nil, fmt.Errorf("token response missing access_token")
+	}
+
+	return &token, nil
+}
+
+// RefreshAccessToken exchanges a refresh token for a new access token.
+// Returns the full token response so the caller can persist a rotated refresh
+// token if one is returned. A 4xx response (e.g. invalid_grant) is returned as
+// a non-nil error with the HTTP status embedded; a 5xx or network error is also
+// returned as a non-nil error.
+func RefreshAccessToken(ctx context.Context, httpClient *http.Client, tokenURL, clientID, refreshToken string) (*TokenResponse, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+	form.Set("client_id", clientID)
 
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {

@@ -5,6 +5,7 @@
   "type": "object",
   "oneOf": [
     { "$ref": "#/$defs/authStatusOutput" },
+    { "$ref": "#/$defs/authRefreshOutput" },
     { "$ref": "#/$defs/authLoginOutput" },
     { "$ref": "#/$defs/authLoginResultOutput" },
     { "$ref": "#/$defs/authLogoutOutput" },
@@ -101,7 +102,21 @@
         "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
         "scopes": { "type": "array", "items": { "type": "string" } },
         "expires_at": { "type": "string", "format": "date-time" },
+        "refresh_expires_at": { "$ref": "#/$defs/dateTime" },
         "auth_flow": { "type": "string" }
+      }
+    },
+    "authRefreshData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "transport", "refreshed_at", "expires_at"],
+      "properties": {
+        "profile": { "type": "string", "minLength": 1 },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "refreshed_at": { "$ref": "#/$defs/dateTime" },
+        "expires_at": { "$ref": "#/$defs/dateTime" },
+        "refresh_expires_at": { "$ref": "#/$defs/dateTime" },
+        "scopes_granted": { "type": "array", "items": { "type": "string" } }
       }
     },
     "authLoginData": {
@@ -424,6 +439,17 @@
         "status": { "const": "ok" },
         "command": { "const": "auth status" },
         "data": { "$ref": "#/$defs/authStatusData" }
+      }
+    },
+    "authRefreshOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "auth refresh" },
+        "data": { "$ref": "#/$defs/authRefreshData" }
       }
     },
     "authLoginOutput": {

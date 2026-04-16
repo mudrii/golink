@@ -49,6 +49,9 @@ type Dependencies struct {
 	SessionStore     auth.Store
 	IsInteractive    func() bool
 	TransportFactory TransportFactory
+	// TokenURL overrides the LinkedIn token endpoint; defaults to auth.TokenURL.
+	// Set in tests to point at a local httptest server.
+	TokenURL string
 }
 
 type app struct {
@@ -163,6 +166,9 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 	}
 	if deps.TransportFactory == nil {
 		deps.TransportFactory = defaultTransportFactory(deps)
+	}
+	if deps.TokenURL == "" {
+		deps.TokenURL = auth.TokenURL
 	}
 
 	return deps
@@ -350,8 +356,50 @@ func (a *app) resolveSession(cmd *cobra.Command) (auth.Session, error) {
 	return *session, nil
 }
 
-// resolveTransport returns the Transport for the active settings and session.
+// maybeRefreshSession silently attempts to refresh the access token when it is
+// within 5 minutes of expiry and a refresh token is available. On success the
+// updated session is persisted and returned. On failure the original session is
+// returned unchanged and the error is logged at WARN so the caller can fall
+// through to existing 401 handling.
+func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) auth.Session {
+	if session.RefreshToken == "" {
+		return session
+	}
+	if session.ExpiresAt.Sub(a.deps.Now()) >= 5*time.Minute {
+		return session
+	}
+
+	token, err := auth.RefreshAccessToken(ctx, a.deps.HTTPClient, a.deps.TokenURL, a.settings.ClientID, session.RefreshToken)
+	if err != nil {
+		a.logger.Warn("auto-refresh failed; proceeding with existing session", "error", err)
+		return session
+	}
+
+	session.AccessToken = token.AccessToken
+	if token.ExpiresIn > 0 {
+		session.ExpiresAt = a.deps.Now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second)
+	}
+	if token.Scope != "" {
+		session.Scopes = strings.Fields(token.Scope)
+	}
+	if token.RefreshToken != "" {
+		session.RefreshToken = token.RefreshToken
+		if token.RefreshTokenExpiresIn > 0 {
+			session.RefreshExpiresAt = a.deps.Now().UTC().Add(time.Duration(token.RefreshTokenExpiresIn) * time.Second)
+		}
+	}
+
+	if err := a.deps.SessionStore.SaveSession(ctx, session); err != nil {
+		a.logger.Warn("auto-refresh: failed to persist refreshed session", "error", err)
+	}
+
+	return session
+}
+
+// resolveTransport returns the Transport for the active settings and session,
+// auto-refreshing the access token when near expiry.
 func (a *app) resolveTransport(ctx context.Context, session auth.Session) (api.Transport, error) {
+	session = a.maybeRefreshSession(ctx, session)
 	return a.deps.TransportFactory(ctx, a.settings, session, a.logger)
 }
 

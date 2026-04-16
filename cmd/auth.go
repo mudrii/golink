@@ -24,6 +24,7 @@ func newAuthCommand(a *app) *cobra.Command {
 		newAuthLoginCommand(a),
 		newAuthStatusCommand(a),
 		newAuthLogoutCommand(a),
+		newAuthRefreshCommand(a),
 	)
 
 	return authCmd
@@ -122,6 +123,9 @@ func newAuthStatusCommand(a *app) *cobra.Command {
 			if !session.ExpiresAt.IsZero() {
 				data.ExpiresAt = session.ExpiresAt.UTC().Format(time.RFC3339)
 			}
+			if !session.RefreshExpiresAt.IsZero() {
+				data.RefreshExpiresAt = session.RefreshExpiresAt.UTC().Format(time.RFC3339)
+			}
 
 			if !authenticated {
 				return a.writeSuccess(cmd, data, fmt.Sprintf("not authenticated for profile %s", session.Profile))
@@ -163,6 +167,90 @@ func (a *app) writeAuthLoginResult(cmd *cobra.Command, data output.AuthLoginResu
 		return fmt.Errorf("write stdout: %w", err)
 	}
 
+	return nil
+}
+
+func newAuthRefreshCommand(a *app) *cobra.Command {
+	return &cobra.Command{
+		Use:   "refresh",
+		Short: "Refresh the access token without re-authorizing",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			refreshCtx, cancel := context.WithTimeout(cmd.Context(), a.settings.Timeout)
+			defer cancel()
+
+			session, err := a.deps.SessionStore.LoadSession(refreshCtx, a.settings.Profile)
+			if err != nil {
+				if errors.Is(err, auth.ErrSessionNotFound) {
+					return a.validationFailure(cmd,
+						fmt.Sprintf("no session for profile %s; run: golink auth login", a.settings.Profile),
+						"session not found")
+				}
+				return a.transportFailure(cmd, "failed to load session", err.Error())
+			}
+
+			if session.RefreshToken == "" {
+				return a.authFailure(cmd,
+					"refresh tokens unavailable for this app (apply for LinkedIn programmatic refresh-token enablement or re-run auth login)",
+					"no refresh token stored")
+			}
+
+			if a.settings.ClientID == "" {
+				return a.validationFailure(cmd, "missing required environment variable: GOLINK_CLIENT_ID", "auth refresh requires a LinkedIn app client ID")
+			}
+
+			token, err := auth.RefreshAccessToken(refreshCtx, a.deps.HTTPClient, a.deps.TokenURL, a.settings.ClientID, session.RefreshToken)
+			if err != nil {
+				return a.authFailure(cmd, "refresh token expired; re-run: golink auth login", err.Error())
+			}
+
+			now := a.deps.Now().UTC()
+			session.AccessToken = token.AccessToken
+			if token.ExpiresIn > 0 {
+				session.ExpiresAt = now.Add(time.Duration(token.ExpiresIn) * time.Second)
+			}
+			if token.Scope != "" {
+				session.Scopes = strings.Fields(token.Scope)
+			}
+			if token.RefreshToken != "" {
+				session.RefreshToken = token.RefreshToken
+				if token.RefreshTokenExpiresIn > 0 {
+					session.RefreshExpiresAt = now.Add(time.Duration(token.RefreshTokenExpiresIn) * time.Second)
+				}
+			}
+
+			if err := a.deps.SessionStore.SaveSession(refreshCtx, *session); err != nil {
+				return a.transportFailure(cmd, "failed to persist refreshed session", err.Error())
+			}
+
+			data := output.AuthRefreshData{
+				Profile:       session.Profile,
+				Transport:     session.Transport,
+				RefreshedAt:   now.Format(time.RFC3339),
+				ExpiresAt:     session.ExpiresAt.UTC().Format(time.RFC3339),
+				ScopesGranted: append([]string(nil), session.Scopes...),
+			}
+			if !session.RefreshExpiresAt.IsZero() {
+				data.RefreshExpiresAt = session.RefreshExpiresAt.UTC().Format(time.RFC3339)
+			}
+
+			return a.writeAuthRefresh(cmd, data)
+		},
+	}
+}
+
+func (a *app) writeAuthRefresh(cmd *cobra.Command, data output.AuthRefreshData) error {
+	if a.settings.JSON {
+		envelope := output.Success(a.metadata(cmd, output.StatusOK), data)
+		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
+			return fmt.Errorf("write stdout: %w", err)
+		}
+		return nil
+	}
+
+	if _, err := fmt.Fprintf(a.deps.Stdout, "Refreshed token for profile %s; expires %s\n", data.Profile, data.ExpiresAt); err != nil {
+		return fmt.Errorf("write stdout: %w", err)
+	}
 	return nil
 }
 

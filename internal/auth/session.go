@@ -19,20 +19,22 @@ var ErrSessionNotFound = errors.New("session not found")
 
 // Session stores the authenticated state for a single profile.
 type Session struct {
-	Profile        string    `json:"profile"`
-	Transport      string    `json:"transport"`
-	AccessToken    string    `json:"access_token,omitempty"`
-	Scopes         []string  `json:"scopes,omitempty"`
-	ExpiresAt      time.Time `json:"expires_at,omitzero"`
-	ConnectedAt    time.Time `json:"connected_at,omitzero"`
-	AuthFlow       string    `json:"auth_flow,omitempty"`
-	MemberURN      string    `json:"member_urn,omitempty"`
-	ProfileID      string    `json:"profile_id,omitempty"`
-	Name           string    `json:"name,omitempty"`
-	Email          string    `json:"email,omitempty"`
-	Picture        string    `json:"picture,omitempty"`
-	LocaleCountry  string    `json:"locale_country,omitempty"`
-	LocaleLanguage string    `json:"locale_language,omitempty"`
+	Profile          string    `json:"profile"`
+	Transport        string    `json:"transport"`
+	AccessToken      string    `json:"access_token,omitempty"`
+	Scopes           []string  `json:"scopes,omitempty"`
+	ExpiresAt        time.Time `json:"expires_at,omitzero"`
+	ConnectedAt      time.Time `json:"connected_at,omitzero"`
+	AuthFlow         string    `json:"auth_flow,omitempty"`
+	MemberURN        string    `json:"member_urn,omitempty"`
+	ProfileID        string    `json:"profile_id,omitempty"`
+	Name             string    `json:"name,omitempty"`
+	Email            string    `json:"email,omitempty"`
+	Picture          string    `json:"picture,omitempty"`
+	LocaleCountry    string    `json:"locale_country,omitempty"`
+	LocaleLanguage   string    `json:"locale_language,omitempty"`
+	RefreshToken     string    `json:"refresh_token,omitempty"`
+	RefreshExpiresAt time.Time `json:"refresh_expires_at,omitzero"`
 }
 
 // Store persists and resolves profile sessions.

@@ -97,12 +97,23 @@ type RateLimitInfo struct {
 
 // AuthStatusData is returned by auth status.
 type AuthStatusData struct {
-	IsAuthenticated bool     `json:"is_authenticated"`
-	Profile         string   `json:"profile"`
-	Transport       string   `json:"transport"`
-	Scopes          []string `json:"scopes,omitempty"`
-	ExpiresAt       string   `json:"expires_at,omitempty"`
-	AuthFlow        string   `json:"auth_flow,omitempty"`
+	IsAuthenticated  bool     `json:"is_authenticated"`
+	Profile          string   `json:"profile"`
+	Transport        string   `json:"transport"`
+	Scopes           []string `json:"scopes,omitempty"`
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	RefreshExpiresAt string   `json:"refresh_expires_at,omitempty"`
+	AuthFlow         string   `json:"auth_flow,omitempty"`
+}
+
+// AuthRefreshData is returned by auth refresh.
+type AuthRefreshData struct {
+	Profile          string   `json:"profile"`
+	Transport        string   `json:"transport"`
+	RefreshedAt      string   `json:"refreshed_at"`
+	ExpiresAt        string   `json:"expires_at"`
+	RefreshExpiresAt string   `json:"refresh_expires_at,omitempty"`
+	ScopesGranted    []string `json:"scopes_granted,omitempty"`
 }
 
 // AuthLoginData contains the login URL and flow metadata.
@@ -344,6 +355,9 @@ type VersionData struct {
 
 // AuthStatusOutput is the schema-aligned auth status envelope.
 type AuthStatusOutput = SuccessEnvelope[AuthStatusData]
+
+// AuthRefreshOutput is the schema-aligned auth refresh envelope.
+type AuthRefreshOutput = SuccessEnvelope[AuthRefreshData]
 
 // AuthLoginOutput is the schema-aligned auth login envelope.
 type AuthLoginOutput = SuccessEnvelope[AuthLoginData]

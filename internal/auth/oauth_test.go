@@ -78,6 +78,83 @@ func TestWaitForOAuthCallback(t *testing.T) {
 	}
 }
 
+func TestRefreshAccessToken_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if got := r.Form.Get("grant_type"); got != "refresh_token" {
+			t.Errorf("unexpected grant_type: %q", got)
+		}
+		if got := r.Form.Get("refresh_token"); got != "old-refresh" {
+			t.Errorf("unexpected refresh_token: %q", got)
+		}
+		if got := r.Form.Get("client_id"); got != "client-abc" {
+			t.Errorf("unexpected client_id: %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken:           "new-access",
+			ExpiresIn:             3600,
+			Scope:                 "openid profile",
+			RefreshToken:          "new-refresh",
+			RefreshTokenExpiresIn: 31536000,
+		})
+	}))
+	defer server.Close()
+
+	token, err := RefreshAccessToken(t.Context(), server.Client(), server.URL, "client-abc", "old-refresh")
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if token.AccessToken != "new-access" {
+		t.Errorf("unexpected access token: %q", token.AccessToken)
+	}
+	if token.RefreshToken != "new-refresh" {
+		t.Errorf("unexpected refresh token: %q", token.RefreshToken)
+	}
+	if token.RefreshTokenExpiresIn != 31536000 {
+		t.Errorf("unexpected refresh_token_expires_in: %d", token.RefreshTokenExpiresIn)
+	}
+	if token.ExpiresIn != 3600 {
+		t.Errorf("unexpected expires_in: %d", token.ExpiresIn)
+	}
+}
+
+func TestRefreshAccessToken_InvalidGrant(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"token expired"}`)
+	}))
+	defer server.Close()
+
+	_, err := RefreshAccessToken(t.Context(), server.Client(), server.URL, "client-abc", "expired-refresh")
+	if err == nil {
+		t.Fatal("expected error for 400 invalid_grant")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("expected 400 in error, got: %v", err)
+	}
+}
+
+func TestRefreshAccessToken_Server5xx(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprint(w, "internal server error")
+	}))
+	defer server.Close()
+
+	_, err := RefreshAccessToken(t.Context(), server.Client(), server.URL, "client-abc", "some-refresh")
+	if err == nil {
+		t.Fatal("expected error for 500")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("expected 500 in error, got: %v", err)
+	}
+}
+
 func TestCompleteLogin(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {

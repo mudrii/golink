@@ -4,7 +4,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ## Architecture
 
-- **CLI**: cobra (`github.com/spf13/cobra`)
+- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`
 - **Transport seam**: `internal/api/transport.go` (interface) → `official.go` (live LinkedIn adapter) / `noop.go` (fallback). Every CLI command goes through `Transport`.
 - **HTTP**: `internal/api/client.go` — `go-retryablehttp`, 429/5xx retry, `Linkedin-Version` + `X-Restli-Protocol-Version` headers, rate-limit parsing, typed `api.Error`
 - **Auth**: native PKCE OAuth (`internal/auth/oauth.go`) + `go-keyring` session store — tokens never touch disk or logs

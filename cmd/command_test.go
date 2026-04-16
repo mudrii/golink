@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -305,6 +308,161 @@ func TestAuthStatusRejectsMalformedSession(t *testing.T) {
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
+func TestAuthRefreshNoSession(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "refresh"}, testDepsOptions{})
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
+func TestAuthRefreshNoRefreshToken(t *testing.T) {
+	store := auth.NewMemoryStore()
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:     "default",
+		Transport:   "official",
+		AccessToken: "token",
+		ExpiresAt:   time.Date(2026, 4, 16, 13, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "refresh"}, testDepsOptions{store: store})
+	if code != 4 {
+		t.Fatalf("expected exit code 4, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
+func TestAuthRefreshSuccess(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":5184000,"scope":"openid profile email w_member_social"}`)
+	}))
+	defer tokenServer.Close()
+
+	store := auth.NewMemoryStore()
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:      "default",
+		Transport:    "official",
+		AccessToken:  "old-token",
+		ExpiresAt:    time.Date(2026, 4, 16, 12, 4, 0, 0, time.UTC),
+		RefreshToken: "refresh-token",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+
+	code, stdout, stderr := executeTestCommandWithHTTP(t, []string{"--json", "auth", "refresh"}, testDepsOptions{
+		store: store,
+	}, tokenServer)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %s", stderr)
+	}
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+
+	var payload struct {
+		Command string `json:"command"`
+		Data    struct {
+			Profile   string `json:"profile"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Command != "auth refresh" {
+		t.Errorf("expected command auth refresh, got %q", payload.Command)
+	}
+	if payload.Data.Profile != "default" {
+		t.Errorf("expected default profile, got %q", payload.Data.Profile)
+	}
+}
+
+func TestResolveTransportAutoRefreshNearExpiry(t *testing.T) {
+	refreshed := false
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshed = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":5184000,"scope":"openid profile"}`)
+	}))
+	defer tokenServer.Close()
+
+	store := auth.NewMemoryStore()
+	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	// Session expires in 2 minutes (< 5 min threshold) — auto-refresh should fire.
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:      "default",
+		Transport:    "official",
+		AccessToken:  "old-token",
+		ExpiresAt:    now.Add(2 * time.Minute),
+		RefreshToken: "refresh-token",
+		MemberURN:    "urn:li:person:abc123",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+
+	// post list triggers resolveSession + resolveTransport; noop transport returns unsupported (exit 0).
+	executeTestCommandWithHTTP(t, []string{"--json", "post", "list"}, testDepsOptions{
+		store: store,
+	}, tokenServer)
+
+	if !refreshed {
+		t.Error("expected auto-refresh to be attempted when token near expiry")
+	}
+}
+
+func TestResolveTransportNoRefreshWhenTokenFresh(t *testing.T) {
+	refreshCalled := false
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":5184000}`)
+	}))
+	defer tokenServer.Close()
+
+	store := auth.NewMemoryStore()
+	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	// Session expires in 60 minutes (> 5 min threshold) — no refresh expected.
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:      "default",
+		Transport:    "official",
+		AccessToken:  "valid-token",
+		ExpiresAt:    now.Add(60 * time.Minute),
+		RefreshToken: "refresh-token",
+		MemberURN:    "urn:li:person:abc123",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+
+	// post list triggers resolveSession + resolveTransport; noop transport returns unsupported (exit 0).
+	executeTestCommandWithHTTP(t, []string{"--json", "post", "list"}, testDepsOptions{
+		store: store,
+	}, tokenServer)
+
+	if refreshCalled {
+		t.Error("expected no auto-refresh when token is fresh")
+	}
+}
+
 type testDepsOptions struct {
 	store            auth.Store
 	loginRunner      func(context.Context, *auth.LoginRequest, string, string, auth.LoginFlowOptions) (*auth.Session, error)
@@ -325,6 +483,37 @@ func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int,
 		Stdout:           stdout,
 		Stderr:           stderr,
 		LoginRunner:      opts.loginRunner,
+		Now:              func() time.Time { return time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC) },
+		SessionStore:     store,
+		IsInteractive:    func() bool { return false },
+		TransportFactory: opts.transportFactory,
+	}, BuildInfo{
+		Version:   "test",
+		Commit:    "abc123",
+		BuildDate: "2026-04-16T12:00:00Z",
+	})
+
+	return code, stdout, stderr
+}
+
+// executeTestCommandWithHTTP runs the command wiring the provided httptest.Server
+// as both the HTTP client and token URL so that auth.RefreshAccessToken calls hit it.
+func executeTestCommandWithHTTP(t *testing.T, args []string, opts testDepsOptions, tokenServer *httptest.Server) (int, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	store := opts.store
+	if store == nil {
+		store = auth.NewMemoryStore()
+	}
+
+	code := ExecuteContext(context.Background(), args, Dependencies{
+		Stdout:           stdout,
+		Stderr:           stderr,
+		LoginRunner:      opts.loginRunner,
+		HTTPClient:       tokenServer.Client(),
+		TokenURL:         tokenServer.URL,
 		Now:              func() time.Time { return time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC) },
 		SessionStore:     store,
 		IsInteractive:    func() bool { return false },

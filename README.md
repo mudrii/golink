@@ -13,8 +13,9 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | Command | Implemented | Live-tested | Notes |
 |---|---|---|---|
 | `auth login` | ✅ | via httptest | Native PKCE S256 with loopback callback |
-| `auth status` | ✅ | ✅ | Reports unauthenticated when token is missing or expired |
+| `auth status` | ✅ | ✅ | Reports unauthenticated when token is missing or expired; shows refresh expiry when available |
 | `auth logout` | ✅ | ✅ | Clears the keyring entry |
+| `auth refresh` | ✅ | via httptest | Exchanges refresh token for new access token; silently auto-runs within 5 min of expiry |
 | `profile me` | ✅ | ✅ | Reads cached OIDC claims from the session |
 | `post create` | ✅ | httptest | `--dry-run` previews the exact payload |
 | `post create --dry-run` | ✅ | ✅ | Schema-validated envelope, no network |
@@ -49,6 +50,7 @@ golink auth login
 
 # Everything works in JSON mode for scripts and agents
 golink --json auth status
+golink --json auth refresh   # manually exchange a refresh token for a new access token
 golink --json profile me
 golink --json post create --text "Hello from golink" --visibility PUBLIC
 golink --json post list --count 5
@@ -88,7 +90,7 @@ Use `--dry-run` to preview the exact request payload without sending it. Support
 
 | Variable | Required | Description |
 |---|---|---|
-| `GOLINK_CLIENT_ID` | Yes | LinkedIn app client ID |
+| `GOLINK_CLIENT_ID` | Yes | LinkedIn app client ID (used for `auth login` and `auth refresh`) |
 | `GOLINK_API_VERSION` | No | `Linkedin-Version` header, e.g. `202604` |
 | `GOLINK_REDIRECT_PORT` | No | Preferred OAuth loopback port; `0` picks any free port |
 | `GOLINK_JSON`, `GOLINK_TRANSPORT` | No | Preflight overrides for `--json` / `--transport` |
