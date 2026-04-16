@@ -32,7 +32,8 @@
     { "$ref": "#/$defs/approvalPendingOutput" },
     { "$ref": "#/$defs/approvalListOutput" },
     { "$ref": "#/$defs/approvalShowOutput" },
-    { "$ref": "#/$defs/approvalStateChangeOutput" }
+    { "$ref": "#/$defs/approvalStateChangeOutput" },
+    { "$ref": "#/$defs/socialMetadataOutput" }
   ],
   "$defs": {
     "commandStatus": {
@@ -934,6 +935,44 @@
         "status": { "const": "ok" },
         "command": { "const": "batch" },
         "data": { "$ref": "#/$defs/batchOpResultData" }
+      }
+    },
+    "socialMetadataItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["post_urn", "like_count", "comment_count", "reaction_count"],
+      "properties": {
+        "post_urn": { "type": "string", "minLength": 1 },
+        "like_count": { "type": "integer", "minimum": 0 },
+        "comment_count": { "type": "integer", "minimum": 0 },
+        "all_comment_count": { "type": "integer", "minimum": 0 },
+        "reaction_count": { "type": "integer", "minimum": 0 },
+        "reaction_counts": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "comments_state": { "type": "string", "enum": ["ENABLED", "CLOSED"] },
+        "error": { "type": "string" }
+      }
+    },
+    "socialMetadataData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "count"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/socialMetadataItem" } },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "socialMetadataOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "social metadata" },
+        "data": { "$ref": "#/$defs/socialMetadataData" }
       }
     }
   }

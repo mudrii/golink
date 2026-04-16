@@ -37,6 +37,7 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `approval run <id>` | ✅ | unit | Execute an approved entry via transport |
 | `approval cancel <id>` | ✅ | unit | Remove a pending entry |
 | `--require-approval` | ✅ | unit | Stage any mutating command for review (exits 3) |
+| `social metadata <urn>...` | ✅ | httptest | Batch engagement read: comment count, reaction totals per type, comments-state for up to 100 post URNs in one call |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
 

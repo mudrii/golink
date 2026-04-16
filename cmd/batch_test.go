@@ -69,6 +69,9 @@ func (c *countingTransport) ListReactions(ctx context.Context, p string) (*outpu
 func (c *countingTransport) SearchPeople(ctx context.Context, req api.SearchPeopleRequest) (*output.SearchPeopleData, error) {
 	return c.inner.SearchPeople(ctx, req)
 }
+func (c *countingTransport) SocialMetadata(ctx context.Context, urns []string) (*output.SocialMetadataData, error) {
+	return c.inner.SocialMetadata(ctx, urns)
+}
 
 func writeOpsFile(t *testing.T, lines []string) string {
 	t.Helper()

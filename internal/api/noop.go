@@ -87,3 +87,8 @@ func (t *NoopTransport) ListReactions(_ context.Context, _ string) (*output.Reac
 func (t *NoopTransport) SearchPeople(_ context.Context, _ SearchPeopleRequest) (*output.SearchPeopleData, error) {
 	return nil, t.unavailable("search people")
 }
+
+// SocialMetadata returns ErrFeatureUnavailable.
+func (t *NoopTransport) SocialMetadata(_ context.Context, _ []string) (*output.SocialMetadataData, error) {
+	return nil, t.unavailable("social metadata")
+}

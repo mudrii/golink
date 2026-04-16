@@ -420,9 +420,10 @@ func TestResolveTransportAutoRefreshNearExpiry(t *testing.T) {
 
 	t.Setenv("GOLINK_CLIENT_ID", "client-123")
 
-	// post list triggers resolveSession + resolveTransport; noop transport returns unsupported (exit 0).
+	// post list triggers resolveSession + resolveTransport; fake transport prevents real network.
 	executeTestCommandWithHTTP(t, []string{"--json", "post", "list"}, testDepsOptions{
-		store: store,
+		store:            store,
+		transportFactory: factoryReturning(&fakeTransport{name: "official"}),
 	}, tokenServer)
 
 	if !refreshed {
@@ -455,9 +456,10 @@ func TestResolveTransportNoRefreshWhenTokenFresh(t *testing.T) {
 
 	t.Setenv("GOLINK_CLIENT_ID", "client-123")
 
-	// post list triggers resolveSession + resolveTransport; noop transport returns unsupported (exit 0).
+	// post list triggers resolveSession + resolveTransport; fake transport prevents real network.
 	executeTestCommandWithHTTP(t, []string{"--json", "post", "list"}, testDepsOptions{
-		store: store,
+		store:            store,
+		transportFactory: factoryReturning(&fakeTransport{name: "official"}),
 	}, tokenServer)
 
 	if refreshCalled {

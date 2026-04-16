@@ -411,6 +411,27 @@ type UnsupportedOutput = SuccessEnvelope[UnsupportedPayload]
 // VersionOutput is the schema-aligned version envelope.
 type VersionOutput = SuccessEnvelope[VersionData]
 
+// SocialMetadataItem holds engagement metrics for a single post URN.
+type SocialMetadataItem struct {
+	PostURN         string         `json:"post_urn"`
+	LikeCount       int            `json:"like_count"`
+	CommentCount    int            `json:"comment_count"`
+	AllCommentCount int            `json:"all_comment_count,omitempty"`
+	ReactionCount   int            `json:"reaction_count"`
+	ReactionCounts  map[string]int `json:"reaction_counts,omitempty"`
+	CommentsState   string         `json:"comments_state,omitempty"`
+	Error           string         `json:"error,omitempty"`
+}
+
+// SocialMetadataData is the payload returned by social metadata.
+type SocialMetadataData struct {
+	Items []SocialMetadataItem `json:"items"`
+	Count int                  `json:"count"`
+}
+
+// SocialMetadataOutput is the schema-aligned social metadata envelope.
+type SocialMetadataOutput = SuccessEnvelope[SocialMetadataData]
+
 // DoctorEnvironment describes the observed environment variable state.
 type DoctorEnvironment struct {
 	GOLINKClientID   bool   `json:"golink_client_id_set"`
@@ -618,6 +639,31 @@ func (d ReactionListData) Rows() [][]string {
 			item.Actor,
 			string(item.Type),
 			item.At.UTC().Format(time.DateOnly),
+		})
+	}
+	return rows
+}
+
+// Headers implements TabularData for SocialMetadataData.
+func (d SocialMetadataData) Headers() []string {
+	return []string{"URN", "POST", "COMMENTS", "LIKES", "REACTIONS", "STATE"}
+}
+
+// Rows implements TabularData for SocialMetadataData.
+func (d SocialMetadataData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.Items))
+	for _, item := range d.Items {
+		urn := item.PostURN
+		if len(urn) > 15 {
+			urn = "..." + urn[len(urn)-12:]
+		}
+		rows = append(rows, []string{
+			urn,
+			item.PostURN,
+			strconv.Itoa(item.CommentCount),
+			strconv.Itoa(item.LikeCount),
+			strconv.Itoa(item.ReactionCount),
+			item.CommentsState,
 		})
 	}
 	return rows

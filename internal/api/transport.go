@@ -32,6 +32,8 @@ type Transport interface {
 	ListReactions(ctx context.Context, postURN string) (*output.ReactionListData, error)
 
 	SearchPeople(ctx context.Context, req SearchPeopleRequest) (*output.SearchPeopleData, error)
+
+	SocialMetadata(ctx context.Context, urns []string) (*output.SocialMetadataData, error)
 }
 
 // CreatePostRequest captures the inputs needed to publish a post via the

@@ -458,6 +458,91 @@ func (o *Official) ListReactions(ctx context.Context, postURN string) (*output.R
 	}, nil
 }
 
+// SocialMetadata fetches engagement metadata for a batch of post URNs via
+// LinkedIn's /rest/socialMetadata batch-get endpoint. Partial per-URN errors
+// from LinkedIn's errors block are surfaced in the matching item rather than
+// failing the whole call.
+func (o *Official) SocialMetadata(ctx context.Context, urns []string) (*output.SocialMetadataData, error) {
+	if len(urns) == 0 {
+		return nil, fmt.Errorf("at least one urn required")
+	}
+
+	encoded := make([]string, 0, len(urns))
+	for _, u := range urns {
+		enc, err := EncodeURN(u)
+		if err != nil {
+			return nil, fmt.Errorf("encode urn %q: %w", u, err)
+		}
+		encoded = append(encoded, enc)
+	}
+
+	path := "/rest/socialMetadata?ids=List(" + strings.Join(encoded, ",") + ")"
+	resp, err := o.do(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Results map[string]struct {
+			CommentsSummary struct {
+				TotalFirstLevelComments int `json:"totalFirstLevelComments"`
+				AggregatedTotalComments int `json:"aggregatedTotalComments"`
+			} `json:"commentsSummary"`
+			ReactionsSummary struct {
+				ReactionTypeCounts []struct {
+					ReactionType string `json:"reactionType"`
+					Count        int    `json:"count"`
+				} `json:"reactionTypeCounts"`
+				AggregatedTotalReactions int `json:"aggregatedTotalReactions"`
+			} `json:"reactionsSummary"`
+			CommentsState string `json:"commentsState"`
+		} `json:"results"`
+		Errors map[string]struct {
+			Status  int    `json:"status"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := resp.UnmarshalJSON(&raw); err != nil {
+		return nil, fmt.Errorf("decode social metadata: %w", err)
+	}
+
+	items := make([]output.SocialMetadataItem, 0, len(urns))
+	for _, urn := range urns {
+		item := output.SocialMetadataItem{PostURN: urn}
+
+		if apiErr, hasErr := raw.Errors[urn]; hasErr {
+			item.Error = fmt.Sprintf("status %d: %s", apiErr.Status, apiErr.Message)
+			items = append(items, item)
+			continue
+		}
+
+		if result, ok := raw.Results[urn]; ok {
+			item.CommentCount = result.CommentsSummary.TotalFirstLevelComments
+			item.AllCommentCount = result.CommentsSummary.AggregatedTotalComments
+			item.ReactionCount = result.ReactionsSummary.AggregatedTotalReactions
+			item.CommentsState = result.CommentsState
+
+			counts := make(map[string]int, len(result.ReactionsSummary.ReactionTypeCounts))
+			for _, rc := range result.ReactionsSummary.ReactionTypeCounts {
+				counts[rc.ReactionType] = rc.Count
+				if rc.ReactionType == string(output.ReactionLike) {
+					item.LikeCount = rc.Count
+				}
+			}
+			if len(counts) > 0 {
+				item.ReactionCounts = counts
+			}
+		}
+
+		items = append(items, item)
+	}
+
+	return &output.SocialMetadataData{
+		Items: items,
+		Count: len(items),
+	}, nil
+}
+
 // SearchPeople is not part of LinkedIn's open self-serve permissions, so the
 // official adapter always returns ErrFeatureUnavailable.
 func (o *Official) SearchPeople(_ context.Context, _ SearchPeopleRequest) (*output.SearchPeopleData, error) {

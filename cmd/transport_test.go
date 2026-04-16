@@ -108,6 +108,20 @@ func (f *fakeTransport) SearchPeople(_ context.Context, req api.SearchPeopleRequ
 	}
 }
 
+func (f *fakeTransport) SocialMetadata(_ context.Context, urns []string) (*output.SocialMetadataData, error) {
+	items := make([]output.SocialMetadataItem, 0, len(urns))
+	for _, u := range urns {
+		items = append(items, output.SocialMetadataItem{
+			PostURN:       u,
+			LikeCount:     5,
+			CommentCount:  2,
+			ReactionCount: 5,
+			CommentsState: "ENABLED",
+		})
+	}
+	return &output.SocialMetadataData{Items: items, Count: len(items)}, nil
+}
+
 func authenticatedStore(t *testing.T) auth.Store {
 	t.Helper()
 	store := auth.NewMemoryStore()
