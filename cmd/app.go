@@ -684,24 +684,22 @@ func (a *app) approvalPending(cmd *cobra.Command, cmdID string, payload any, ike
 		IdempotencyKey: ikey,
 	}
 
-	envelope := output.ApprovalPendingOutput{
-		BaseEnvelope: output.BaseEnvelope{
-			Status:      output.StatusPendingApproval,
-			CommandID:   cmdID,
-			Command:     commandName(cmd),
-			Transport:   a.settings.Transport,
-			GeneratedAt: now,
-		},
-		Data: data,
+	base := output.BaseEnvelope{
+		Status:      output.StatusPendingApproval,
+		CommandID:   cmdID,
+		Command:     commandName(cmd),
+		Transport:   a.settings.Transport,
+		GeneratedAt: now,
 	}
+	text := fmt.Sprintf("approval required: staged at %s", path)
 
 	mode := a.settings.Output
 	var writeErr error
-	switch mode {
-	case output.ModeJSON:
+	if mode == output.ModeJSON {
+		envelope := output.ApprovalPendingOutput{BaseEnvelope: base, Data: data}
 		writeErr = output.WriteJSON(a.deps.Stdout, envelope)
-	default:
-		writeErr = output.WriteJSON(a.deps.Stdout, envelope)
+	} else {
+		writeErr = output.RenderSuccess(a.deps.Stdout, mode, base, data, text)
 	}
 	if writeErr != nil {
 		return fmt.Errorf("write approval pending: %w", writeErr)
