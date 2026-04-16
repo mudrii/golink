@@ -24,6 +24,7 @@
     { "$ref": "#/$defs/reactionListOutput" },
     { "$ref": "#/$defs/searchPeopleOutput" },
     { "$ref": "#/$defs/versionOutput" },
+    { "$ref": "#/$defs/doctorOutput" },
     { "$ref": "#/$defs/unsupportedOutput" },
     { "$ref": "#/$defs/validationErrorOutput" },
     { "$ref": "#/$defs/errorOutput" }
@@ -652,6 +653,102 @@
         "status": { "const": "ok" },
         "command": { "const": "version" },
         "data": { "$ref": "#/$defs/versionData" }
+      }
+    },
+    "doctorEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["golink_client_id_set", "config_loaded"],
+      "properties": {
+        "golink_client_id_set": { "type": "boolean" },
+        "golink_api_version": { "type": "string" },
+        "golink_redirect_port": { "type": "string" },
+        "golink_json": { "type": "string" },
+        "golink_transport": { "type": "string" },
+        "golink_output": { "type": "string" },
+        "golink_audit": { "type": "string" },
+        "golink_audit_path": { "type": "string" },
+        "config_path": { "type": "string" },
+        "config_loaded": { "type": "boolean" }
+      }
+    },
+    "doctorSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "authenticated", "refresh_available"],
+      "properties": {
+        "profile": { "type": "string" },
+        "authenticated": { "type": "boolean" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "expires_in_hours": { "type": "integer" },
+        "refresh_available": { "type": "boolean" },
+        "refresh_expires_at": { "type": "string", "format": "date-time" },
+        "refresh_in_days": { "type": "integer" },
+        "scopes": { "type": "array", "items": { "type": "string" } },
+        "auth_flow": { "type": "string" },
+        "connected_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "doctorProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "attempted"],
+      "properties": {
+        "url": { "type": "string" },
+        "status": { "type": "integer" },
+        "member_urn": { "type": "string" },
+        "request_id": { "type": "string" },
+        "error": { "type": "string" },
+        "attempted": { "type": "boolean" }
+      }
+    },
+    "doctorFeature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "status"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["supported", "partial", "unsupported"] },
+        "reason": { "type": "string" }
+      }
+    },
+    "doctorAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "enabled", "exists"],
+      "properties": {
+        "path": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "exists": { "type": "boolean" },
+        "size": { "type": "integer", "minimum": 0 },
+        "modified_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "doctorData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["environment", "session", "probe", "features", "audit", "health"],
+      "properties": {
+        "api_version": { "type": "string" },
+        "environment": { "$ref": "#/$defs/doctorEnvironment" },
+        "session": { "$ref": "#/$defs/doctorSession" },
+        "probe": { "$ref": "#/$defs/doctorProbe" },
+        "features": { "type": "array", "items": { "$ref": "#/$defs/doctorFeature" } },
+        "audit": { "$ref": "#/$defs/doctorAudit" },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "health": { "type": "string", "enum": ["ok", "warnings", "error"] }
+      }
+    },
+    "doctorOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "doctor" },
+        "data": { "$ref": "#/$defs/doctorData" }
       }
     },
     "unsupportedOutput": {

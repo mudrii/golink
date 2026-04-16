@@ -54,6 +54,9 @@ type Dependencies struct {
 	// TokenURL overrides the LinkedIn token endpoint; defaults to auth.TokenURL.
 	// Set in tests to point at a local httptest server.
 	TokenURL string
+	// UserinfoURL overrides the LinkedIn userinfo endpoint used by doctor probe.
+	// Set in tests to point at a local httptest server.
+	UserinfoURL string
 }
 
 type app struct {

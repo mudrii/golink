@@ -4,7 +4,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ## Architecture
 
-- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`
+- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`; top-level: `doctor` (read-only, not audited), `version`
 - **Transport seam**: `internal/api/transport.go` (interface) → `official.go` (live LinkedIn adapter) / `noop.go` (fallback). Every CLI command goes through `Transport`.
 - **HTTP**: `internal/api/client.go` — `go-retryablehttp`, 429/5xx retry, `Linkedin-Version` + `X-Restli-Protocol-Version` headers, rate-limit parsing, typed `api.Error`
 - **Auth**: native PKCE OAuth (`internal/auth/oauth.go`) + `go-keyring` session store — tokens never touch disk or logs
@@ -14,7 +14,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ```
 main.go            entry point + signal handling
-cmd/               cobra commands (auth, post, comment, react, search, version)
+cmd/               cobra commands (auth, post, comment, react, search, doctor, version)
 internal/api/      Transport interface, official adapter, retry client, typed errors
 internal/audit/    append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
 internal/auth/     PKCE OAuth + keyring session store
@@ -119,7 +119,7 @@ Implementation:
 - **Config**: loaded and validated at startup via `internal/config.Loader`; no hardcoded runtime values
 - **HTTP**: all LinkedIn calls go through `internal/api.Client`; always close bodies (`errcheck` is enabled)
 - **Security**: `govulncheck` on dep changes and before release; gated by `make ci`
-- **Audit**: every mutating command's `RunE` must call `a.auditMutation(cmd, cmdID, status, mode, ...)` before returning. Opt-out via `GOLINK_AUDIT=off` or `audit: false` in config. Tokens/secrets must never appear in audit entries.
+- **Audit**: every mutating command's `RunE` must call `a.auditMutation(cmd, cmdID, status, mode, ...)` before returning. Opt-out via `GOLINK_AUDIT=off` or `audit: false` in config. Tokens/secrets must never appear in audit entries. `doctor` is read-only and is never audited.
 
 ## Review rejects (blocking)
 

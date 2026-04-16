@@ -69,6 +69,7 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 		newReactCommand(a),
 		newSearchCommand(a),
 		newVersionCommand(a),
+		newDoctorCommand(a),
 	)
 
 	return rootCmd, nil

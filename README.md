@@ -27,6 +27,7 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `react add <urn>` | ✅ | httptest | `--dry-run` supported |
 | `react list <urn>` | ✅ | httptest | |
 | `search people` | Official transport: `unsupported` | ✅ | Returns `ErrFeatureUnavailable` by design |
+| `doctor` | ✅ | ✅ | Env vars, session state, userinfo probe, feature map, audit log state |
 | `version` | ✅ | ✅ | Reports build metadata |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
@@ -150,6 +151,56 @@ The file is created with mode `0600` in a `0700` directory on first write.
 
 Audit-write failures are logged at WARN and never abort the command.
 
+## Diagnostics
+
+`golink doctor` reports the health of your environment in one shot — useful before filing a bug or after a new install.
+
+```sh
+golink doctor
+```
+
+```
+Environment
+  GOLINK_CLIENT_ID   set
+  GOLINK_API_VERSION not set (default: 202504)
+  GOLINK_TRANSPORT   not set (default: official)
+  GOLINK_AUDIT       not set (default: on)
+  GOLINK_AUDIT_PATH  not set
+
+Session
+  status     authenticated
+  profile    urn:li:member:12345678 (Ada Lovelace)
+  scopes     openid profile email w_member_social
+  expires_at 2026-04-24 12:00:00 UTC
+
+Probe: GET /v2/userinfo
+  status     ok (200)
+  latency    142ms
+
+Features
+  auth login      supported
+  auth refresh    supported
+  profile me      supported
+  post create     supported
+  post list       supported
+  post get        supported
+  post delete     supported
+  comment add     supported
+  comment list    supported
+  react add       supported
+  react list      supported
+  search people   unsupported
+
+Audit
+  enabled    true
+  path       /Users/ada/.local/state/golink/audit.jsonl
+  exists     true
+```
+
+Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CLIENT_ID`) as exit 2 and errors (probe failure, no active session) as exit 5. Without `--strict` the command always exits 0.
+
+`golink doctor` is read-only and is not audited.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -172,7 +223,7 @@ Audit-write failures are logged at WARN and never abort the command.
 
 ```
 main.go                    entry point + signal handling
-cmd/                       cobra commands (auth, post, comment, react, search, version)
+cmd/                       cobra commands (auth, post, comment, react, search, doctor, version)
 internal/api/              Transport interface + official LinkedIn adapter + NoopTransport
 internal/auth/             PKCE login, keyring-backed session store
 internal/config/           viper-backed settings with env/flag/file precedence

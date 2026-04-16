@@ -408,6 +408,91 @@ type UnsupportedOutput = SuccessEnvelope[UnsupportedPayload]
 // VersionOutput is the schema-aligned version envelope.
 type VersionOutput = SuccessEnvelope[VersionData]
 
+// DoctorEnvironment describes the observed environment variable state.
+type DoctorEnvironment struct {
+	GOLINKClientID   bool   `json:"golink_client_id_set"`
+	GOLINKAPIVersion string `json:"golink_api_version,omitempty"`
+	GOLINKRedirect   string `json:"golink_redirect_port,omitempty"`
+	GOLINKJSON       string `json:"golink_json,omitempty"`
+	GOLINKTransport  string `json:"golink_transport,omitempty"`
+	GOLINKOutput     string `json:"golink_output,omitempty"`
+	GOLINKAudit      string `json:"golink_audit,omitempty"`
+	GOLINKAuditPath  string `json:"golink_audit_path,omitempty"`
+	ConfigPath       string `json:"config_path,omitempty"`
+	ConfigLoaded     bool   `json:"config_loaded"`
+}
+
+// DoctorSession describes the active session state.
+type DoctorSession struct {
+	Profile          string   `json:"profile"`
+	Authenticated    bool     `json:"authenticated"`
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	ExpiresInHours   int      `json:"expires_in_hours,omitempty"`
+	RefreshAvailable bool     `json:"refresh_available"`
+	RefreshExpiresAt string   `json:"refresh_expires_at,omitempty"`
+	RefreshInDays    int      `json:"refresh_in_days,omitempty"`
+	Scopes           []string `json:"scopes,omitempty"`
+	AuthFlow         string   `json:"auth_flow,omitempty"`
+	ConnectedAt      string   `json:"connected_at,omitempty"`
+}
+
+// DoctorProbe holds the result of the /v2/userinfo connectivity check.
+type DoctorProbe struct {
+	URL       string `json:"url"`
+	Status    int    `json:"status,omitempty"`
+	Member    string `json:"member_urn,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Attempted bool   `json:"attempted"`
+}
+
+// DoctorFeature reports whether a command family is available given the
+// current scopes and transport.
+type DoctorFeature struct {
+	Command string `json:"command"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// DoctorAudit describes the audit log configuration and file state.
+type DoctorAudit struct {
+	Path       string `json:"path"`
+	Enabled    bool   `json:"enabled"`
+	Exists     bool   `json:"exists"`
+	Size       int64  `json:"size,omitempty"`
+	ModifiedAt string `json:"modified_at,omitempty"`
+}
+
+// DoctorData is the payload for the doctor command.
+type DoctorData struct {
+	APIVersion  string            `json:"api_version,omitempty"`
+	Environment DoctorEnvironment `json:"environment"`
+	Session     DoctorSession     `json:"session"`
+	Probe       DoctorProbe       `json:"probe"`
+	Features    []DoctorFeature   `json:"features"`
+	Audit       DoctorAudit       `json:"audit"`
+	Warnings    []string          `json:"warnings,omitempty"`
+	Errors      []string          `json:"errors,omitempty"`
+	Health      string            `json:"health"`
+}
+
+// DoctorOutput is the schema-aligned doctor envelope.
+type DoctorOutput = SuccessEnvelope[DoctorData]
+
+// Headers implements TabularData for DoctorData (renders the feature map).
+func (d DoctorData) Headers() []string {
+	return []string{"COMMAND", "STATUS", "REASON"}
+}
+
+// Rows implements TabularData for DoctorData.
+func (d DoctorData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.Features))
+	for _, f := range d.Features {
+		rows = append(rows, []string{f.Command, f.Status, f.Reason})
+	}
+	return rows
+}
+
 // Headers implements TabularData for PostListData.
 func (d PostListData) Headers() []string {
 	return []string{"URN", "VISIBILITY", "CREATED", "LIKES", "COMMENTS", "TEXT"}
