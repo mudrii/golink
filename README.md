@@ -192,9 +192,20 @@ golink --output=table react list urn:li:share:123
 | `GOLINK_CLIENT_ID` | Yes | LinkedIn app client ID (used for `auth login` and `auth refresh`) |
 | `GOLINK_API_VERSION` | No | `Linkedin-Version` header, e.g. `202604` |
 | `GOLINK_REDIRECT_PORT` | No | Preferred OAuth loopback port; `0` picks any free port |
-| `GOLINK_JSON`, `GOLINK_TRANSPORT` | No | Preflight overrides for `--json` / `--transport` |
+| `GOLINK_JSON`, `GOLINK_TRANSPORT`, `GOLINK_OUTPUT` | No | Preflight overrides for `--json` / `--transport` / `--output` |
+| `GOLINK_IDEMPOTENCY_PATH` | No | Override idempotency store path |
+| `GOLINK_AUDIT`, `GOLINK_AUDIT_PATH` | No | Disable audit or override path |
+| `GOLINK_APPROVAL_DIR`, `GOLINK_SCHEDULE_DIR` | No | Override approval / schedule store dirs |
+| `GOLINK_RECORD`, `GOLINK_REPLAY` | No | Record/replay HTTP exchanges to a JSONL cassette |
 
 Tokens are stored in the OS keyring — never on disk or in logs.
+
+> **Redirect URI gotcha.** LinkedIn matches OAuth redirects on the exact
+> registered URL including the port. Register `http://127.0.0.1:<port>/callback`
+> for whatever port `GOLINK_REDIRECT_PORT` resolves to; `0` only works if the
+> app is configured with every port you might fall through to (rare). The
+> login flow uses LinkedIn's undocumented `native-pkce/authorization` path
+> so no `client_secret` is required in token exchange.
 
 ## Idempotency keys
 

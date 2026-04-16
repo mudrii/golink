@@ -19,7 +19,13 @@ import (
 )
 
 const (
-	// AuthorizationURL is the LinkedIn native PKCE authorization endpoint.
+	// AuthorizationURL is LinkedIn's native-PKCE authorization endpoint used
+	// for the public-client flow — authorization + token exchange without a
+	// client_secret. This path is NOT in the public LinkedIn developer docs
+	// (which document only /oauth/v2/authorization + confidential-client
+	// PKCE). If LinkedIn retires native-PKCE, callers will need to register
+	// a confidential app and pass client_secret in token exchange. See
+	// README auth section for the empirical contract.
 	AuthorizationURL = "https://www.linkedin.com/oauth/native-pkce/authorization"
 	// TokenURL is the LinkedIn OAuth token endpoint.
 	TokenURL = "https://www.linkedin.com/oauth/v2/accessToken"
