@@ -1,22 +1,34 @@
 # golink
 
-Production-grade LinkedIn CLI for humans and LLM agents.
+LinkedIn CLI for humans and LLM agents.
+
+> **Status: alpha / requires LinkedIn app credentials.** The command tree, OAuth PKCE login, JSON envelope contract, retryable HTTP client, and LinkedIn REST adapter are implemented and tested. Live use requires a LinkedIn developer app with the documented scopes; without credentials you can still exercise every `--dry-run` and schema-validated envelope.
 
 ## Overview
 
-golink provides a command-line interface to LinkedIn's official APIs (Posts API, Community Management API) with optional unofficial transport for features not available through self-serve access. It supports both interactive (TTY) and non-interactive (agent/CI) modes with structured JSON output.
+golink talks to LinkedIn through a transport-pluggable architecture. The default **official** transport wraps LinkedIn's Posts API and Community Management API with retry + rate-limit awareness. An **unofficial** transport slot exists behind `--transport=unofficial` but ships as a typed `ErrFeatureUnavailable` no-op until wired; `--transport=auto` falls back transparently where the official adapter is out of scope.
 
-## Features
+## Capability matrix
 
-- **OAuth native PKCE** — browser-based login with loopback callback, no client secret required
-- **Post management** — create, list, get, delete posts via LinkedIn Posts API
-- **Social actions** — add/list comments and reactions
-- **People search** — via unofficial transport when official access is unavailable
-- **MCP server** — expose all operations as Model Context Protocol tools for LLM agents
-- **Dual transport** — official (default), unofficial (opt-in), or auto-fallback
-- **JSON-first** — every command produces strict, schema-validated JSON output with `--json`
-- **Dry-run** — preview exact API payloads without sending with `--dry-run`
-- **Secure** — tokens stored in OS keyring, never on disk or in logs
+| Command | Implemented | Live-tested | Notes |
+|---|---|---|---|
+| `auth login` | ✅ | via httptest | Native PKCE S256 with loopback callback |
+| `auth status` | ✅ | ✅ | Reports unauthenticated when token is missing or expired |
+| `auth logout` | ✅ | ✅ | Clears the keyring entry |
+| `profile me` | ✅ | ✅ | Reads cached OIDC claims from the session |
+| `post create` | ✅ | httptest | `--dry-run` previews the exact payload |
+| `post create --dry-run` | ✅ | ✅ | Schema-validated envelope, no network |
+| `post list` | ✅ | httptest | Defaults author to the session member URN |
+| `post get <urn>` | ✅ | httptest | Entitlement-gated by LinkedIn |
+| `post delete <urn>` | ✅ | httptest | `--dry-run` supported |
+| `comment add <urn>` | ✅ | httptest | `--dry-run` supported |
+| `comment list <urn>` | ✅ | httptest | |
+| `react add <urn>` | ✅ | httptest | `--dry-run` supported |
+| `react list <urn>` | ✅ | httptest | |
+| `search people` | Official transport: `unsupported` | ✅ | Returns `ErrFeatureUnavailable` by design |
+| `version` | ✅ | ✅ | Reports build metadata |
+
+"httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
 
 ## Installation
 
@@ -26,92 +38,103 @@ go install github.com/mudrii/golink@latest
 
 Requires Go 1.26.2+.
 
-## Quick Start
+## Quick start
 
 ```sh
 # Set your LinkedIn app client ID
 export GOLINK_CLIENT_ID=your_client_id
 
-# Authenticate (opens browser)
+# Authenticate (opens the system browser, waits on loopback)
 golink auth login
 
-# Check auth status
-golink auth status
-
-# View your profile
-golink profile me
-
-# Create a post
-golink post create --text "Hello from golink!"
-
-# List your recent posts
-golink post list
-
-# JSON mode for automation
+# Everything works in JSON mode for scripts and agents
+golink --json auth status
 golink --json profile me
-golink --json post create --text "Automated post" --visibility PUBLIC
+golink --json post create --text "Hello from golink" --visibility PUBLIC
+golink --json post list --count 5
 ```
 
-## Agent / Non-Interactive Mode
+## Non-interactive / agent mode
 
-When running without a TTY (CI, scripts, LLM agents), all interactive prompts are disabled. Required arguments must be passed as flags:
+Without a TTY, all interactive prompts are disabled and required inputs come from flags:
 
 ```sh
 golink --json post create --text "Hello" --visibility PUBLIC
-golink --json comment add urn:li:share:123 --text "Great post!"
+golink --json comment add urn:li:share:123 --text "nice"
 golink --json react add urn:li:share:123 --type LIKE
-golink --json search people --keywords "Go engineer"
+golink --json post list --count 10
 ```
 
-## MCP Server
+Use `--dry-run` to preview the exact request payload without sending it. Supported on `post create`, `post delete`, `comment add`, `react add`.
 
-Expose golink as an MCP tool server for LLM agent integration:
-
-```sh
-golink mcp serve
-```
-
-Registers 11 tools: `golink_profile_me`, `golink_create_post`, `golink_list_posts`, `golink_get_post`, `golink_delete_post`, `golink_add_comment`, `golink_list_comments`, `golink_add_reaction`, `golink_list_reactions`, `golink_search_people`, `golink_auth_status`.
-
-## Transport Modes
+## Transport modes
 
 | Mode | Flag | Behavior |
-|------|------|----------|
-| Official | `--transport=official` (default) | LinkedIn REST APIs with OAuth bearer token |
-| Unofficial | `--transport=unofficial` | Experimental web-adjacent endpoints (requires acknowledgement) |
-| Auto | `--transport=auto` | Official first, unofficial fallback for read-only features |
+|---|---|---|
+| Official | `--transport=official` (default) | LinkedIn REST APIs with OAuth bearer token, retry on 429/5xx, rate-limit header parsing |
+| Unofficial | `--transport=unofficial` | Stub until a concrete adapter lands; requires `--accept-unofficial-risk` |
+| Auto | `--transport=auto` | Official first, best-effort fallback |
 
 ## Configuration
 
 | Source | Priority |
-|--------|----------|
+|---|---|
 | CLI flags | Highest |
 | `GOLINK_*` env vars | |
 | `~/.config/golink/config.yaml` | |
-| Default values | Lowest |
+| Defaults | Lowest |
 
-**Environment variables:**
+### Environment variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+|---|---|---|
 | `GOLINK_CLIENT_ID` | Yes | LinkedIn app client ID |
-| `GOLINK_API_VERSION` | No | Override `Linkedin-Version` header (YYYYMM format) |
-| `GOLINK_REDIRECT_PORT` | No | Preferred OAuth callback port |
+| `GOLINK_API_VERSION` | No | `Linkedin-Version` header, e.g. `202604` |
+| `GOLINK_REDIRECT_PORT` | No | Preferred OAuth loopback port; `0` picks any free port |
+| `GOLINK_JSON`, `GOLINK_TRANSPORT` | No | Preflight overrides for `--json` / `--transport` |
 
-## Exit Codes
+Tokens are stored in the OS keyring — never on disk or in logs.
+
+## Exit codes
 
 | Code | Meaning |
-|------|---------|
+|---|---|
 | 0 | Success |
 | 2 | Validation / usage error |
 | 4 | Auth / session error |
 | 5 | API / transport error |
 
-## Prerequisites
+`status:"unsupported"` envelopes still exit `0` — the envelope `status` field is the machine-readable signal.
 
-- A [LinkedIn Developer App](https://www.linkedin.com/developers/) with native PKCE enabled (contact LinkedIn support to enable)
-- The `w_member_social` scope (self-serve via developer portal)
+## Prerequisites for live API access
+
+- A [LinkedIn Developer App](https://www.linkedin.com/developers/) with native PKCE enabled (contact LinkedIn support to enable PKCE for your app)
+- The `w_member_social` scope (self-serve via the developer portal)
+- Endpoint-family specific scopes as required (`r_member_social`, `w_member_social_feed`, organization-scoped permissions)
 - Go 1.26.2+ for building from source
+
+## Project layout
+
+```
+main.go                    entry point + signal handling
+cmd/                       cobra commands (auth, post, comment, react, search, version)
+internal/api/              Transport interface + official LinkedIn adapter + NoopTransport
+internal/auth/             PKCE login, keyring-backed session store
+internal/config/           viper-backed settings with env/flag/file precedence
+internal/output/           JSON envelope types, schema validation, enum parsers
+schemas/                   golink-output.schema.json — contract for every --json response
+```
+
+## Development
+
+```sh
+make test          # go test ./...
+make race          # go test -race ./...
+make vet           # go vet ./...
+make lint          # golangci-lint run ./...
+make vuln          # govulncheck ./...
+make ci            # vet lint test race vuln
+```
 
 ## License
 

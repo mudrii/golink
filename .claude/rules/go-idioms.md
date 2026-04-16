@@ -8,7 +8,9 @@ Prefer modern Go patterns when the project's toolchain supports them and they im
 type yearsSince int
 age := new(yearsSince(born))     // *yearsSince — allocates and initializes from expression
 
-type Adder[A Adder[A]] interface { // self-referential generic constraints
+// Self-referential generic constraint — useful when a method must return
+// the same concrete type that implements the interface (not `any`).
+type Adder[A Adder[A]] interface {
     Add(A) A
 }
 ```
@@ -49,3 +51,16 @@ Useful analyzers:
 - `stringsseq` / `stditerators` — loops over eager APIs → iterator-based forms
 - `waitgroupgo` — `wg.Add(1)`/`go`/`wg.Done()` → `wg.Go` (stdlib `sync.WaitGroup`, Go 1.25+); prefer `errgroup.Group.Go` from `golang.org/x/sync/errgroup` when error propagation is needed
 - `//go:fix inline` — source-level inliner for API migrations
+
+## Applied in this repo
+
+| Modernizer | Status | Notes |
+|---|---|---|
+| `omitzero` | ✅ | `internal/auth/session.go` — `ExpiresAt`, `ConnectedAt` |
+| `any` | ✅ | No `interface{}` in source |
+| `rangeint` | ⚠️ | `cmd/app.go:commandLookupArgs` keeps a C-style loop because the body advances `i` for flag-with-value pairs |
+| `testingcontext` | ❌ | Tests still use `context.Background()` |
+
+Not applicable today (no callers to migrate): `mapsloop`, `stringsseq`, `stditerators`, `newexpr`, `waitgroupgo`, `minmax`, `slicessort`, `fmtappendf`.
+
+Workflow: `go fix -diff ./...` shows pending changes; apply with `go fix ./...`; review diff; run `make ci`.

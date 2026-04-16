@@ -143,6 +143,62 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 			}`),
 		},
 		{
+			name: "post delete dry run",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_post_delete_dryrun_01",
+				"command": "post delete",
+				"transport": "official",
+				"mode": "dry_run",
+				"generated_at": "2026-04-16T10:21:30Z",
+				"data": {
+					"would_delete": {
+						"endpoint": "DELETE /rest/posts/urn:li:share:42",
+						"post_urn": "urn:li:share:42"
+					},
+					"mode": "dry_run"
+				}
+			}`),
+		},
+		{
+			name: "comment add dry run",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_comment_add_dryrun_01",
+				"command": "comment add",
+				"transport": "official",
+				"mode": "dry_run",
+				"generated_at": "2026-04-16T10:22:30Z",
+				"data": {
+					"would_comment": {
+						"endpoint": "POST /rest/socialActions/urn:li:share:42/comments",
+						"post_urn": "urn:li:share:42",
+						"text": "nice"
+					},
+					"mode": "dry_run"
+				}
+			}`),
+		},
+		{
+			name: "react add dry run",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_react_add_dryrun_01",
+				"command": "react add",
+				"transport": "official",
+				"mode": "dry_run",
+				"generated_at": "2026-04-16T10:23:30Z",
+				"data": {
+					"would_react": {
+						"endpoint": "POST /rest/reactions",
+						"post_urn": "urn:li:share:42",
+						"type": "PRAISE"
+					},
+					"mode": "dry_run"
+				}
+			}`),
+		},
+		{
 			name: "post list",
 			payload: []byte(`{
 				"status": "ok",
@@ -330,20 +386,6 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 				"error": "missing required flag: --text",
 				"code": "VALIDATION_ERROR",
 				"details": "non-interactive mode requires --text"
-			}`),
-		},
-		{
-			name: "mcp tool",
-			payload: []byte(`{
-				"status": "ok",
-				"command_id": "cmd_mcp_tool_01",
-				"command": "mcp serve",
-				"transport": "official",
-				"generated_at": "2026-04-16T10:30:00Z",
-				"data": {
-					"tool": "golink_create_post",
-					"result_json": {"status":"ok","id":"urn:li:share:3"}
-				}
 			}`),
 		},
 		{

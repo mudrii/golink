@@ -1,30 +1,16 @@
 package cmd
 
-import (
-	"fmt"
+import "strings"
 
-	"github.com/mudrii/golink/internal/output"
-	"github.com/spf13/cobra"
-)
-
-func newUnsupportedCommand(a *app, use, short, feature string) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return a.writeUnsupported(cmd, output.UnsupportedPayload{
-				Feature:           feature,
-				Reason:            "implementation is not complete yet",
-				SuggestedFallback: "retry after the transport and command handler are implemented",
-			}, fmt.Sprintf("unsupported: %s is not implemented yet", feature))
-		},
-	}
+// trimmedText returns the input with leading and trailing whitespace stripped.
+func trimmedText(raw string) string {
+	return strings.TrimSpace(raw)
 }
 
+// fallback returns value when non-empty, otherwise the default.
 func fallback(value, defaultValue string) string {
 	if value == "" {
 		return defaultValue
 	}
-
 	return value
 }

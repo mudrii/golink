@@ -75,16 +75,95 @@ func TestAuthLoginRequiresClientID(t *testing.T) {
 func TestAuthLoginJSON(t *testing.T) {
 	t.Setenv("GOLINK_CLIENT_ID", "client-123")
 
-	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "login"}, testDepsOptions{})
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "login"}, testDepsOptions{
+		loginRunner: func(_ context.Context, _ *auth.LoginRequest, profile string, transport string, _ auth.LoginFlowOptions) (*auth.Session, error) {
+			return &auth.Session{
+				Profile:        profile,
+				Transport:      transport,
+				AccessToken:    "token",
+				ConnectedAt:    time.Date(2026, 4, 16, 12, 0, 1, 0, time.UTC),
+				Scopes:         []string{"openid", "profile", "email", "w_member_social"},
+				MemberURN:      "urn:li:person:abc123",
+				ProfileID:      "abc123",
+				Name:           "Ion Mudreac",
+				Email:          "ion@example.com",
+				LocaleCountry:  "MY",
+				LocaleLanguage: "en",
+			}, nil
+		},
+	})
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d stderr=%s", code, stderr)
 	}
 
-	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	lines := bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 json lines, got %d: %s", len(lines), stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), lines[0])
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), lines[1])
+}
+
+func TestAuthLoginTimeoutReturnsAuthError(t *testing.T) {
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "--timeout=1ms", "auth", "login"}, testDepsOptions{
+		loginRunner: func(ctx context.Context, _ *auth.LoginRequest, _ string, _ string, _ auth.LoginFlowOptions) (*auth.Session, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	if code != 4 {
+		t.Fatalf("expected exit code 4, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() == 0 {
+		t.Fatalf("expected login start payload before timeout")
+	}
+
+	lines := bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 stdout json line, got %d: %s", len(lines), stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), lines[0])
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
+func TestUnknownFlagUsesJSONValidationEnvelope(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "--bogus"}, testDepsOptions{})
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
 func TestProfileMeReturnsAuthErrorWithoutSession(t *testing.T) {
 	code, stdout, stderr := executeTestCommand(t, []string{"--json", "profile", "me"}, testDepsOptions{})
+	if code != 4 {
+		t.Fatalf("expected exit code 4, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
+func TestProfileMeRejectsMalformedSession(t *testing.T) {
+	store := auth.NewMemoryStore()
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:   "default",
+		Transport: "official",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "profile", "me"}, testDepsOptions{store: store})
 	if code != 4 {
 		t.Fatalf("expected exit code 4, got %d stdout=%s stderr=%s", code, stdout, stderr)
 	}
@@ -119,6 +198,52 @@ func TestPostCreateDryRunJSON(t *testing.T) {
 	if payload.Mode != "dry_run" || payload.Data.Mode != "dry_run" {
 		t.Fatalf("expected dry_run mode, got envelope=%q data=%q", payload.Mode, payload.Data.Mode)
 	}
+}
+
+func TestPostDeleteRequiresURN(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "post", "delete"}, testDepsOptions{})
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+
+	var payload struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal stderr: %v", err)
+	}
+	if payload.Command != "post delete" {
+		t.Fatalf("expected command post delete, got %q", payload.Command)
+	}
+}
+
+func TestCommentAddRequiresURNAndText(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "comment", "add"}, testDepsOptions{})
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
+func TestSearchPeopleRequiresKeywords(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "search", "people"}, testDepsOptions{})
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
 func TestUnofficialTransportRequiresAcknowledgement(t *testing.T) {
@@ -160,8 +285,30 @@ func TestProfileMeUsesStoredSession(t *testing.T) {
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
 }
 
+func TestAuthStatusRejectsMalformedSession(t *testing.T) {
+	store := auth.NewMemoryStore()
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:   "default",
+		Transport: "",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "status"}, testDepsOptions{store: store})
+	if code != 4 {
+		t.Fatalf("expected exit code 4, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
 type testDepsOptions struct {
-	store auth.Store
+	store            auth.Store
+	loginRunner      func(context.Context, *auth.LoginRequest, string, string, auth.LoginFlowOptions) (*auth.Session, error)
+	transportFactory TransportFactory
 }
 
 func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int, *bytes.Buffer, *bytes.Buffer) {
@@ -175,11 +322,13 @@ func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int,
 	}
 
 	code := ExecuteContext(context.Background(), args, Dependencies{
-		Stdout:        stdout,
-		Stderr:        stderr,
-		Now:           func() time.Time { return time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC) },
-		SessionStore:  store,
-		IsInteractive: func() bool { return false },
+		Stdout:           stdout,
+		Stderr:           stderr,
+		LoginRunner:      opts.loginRunner,
+		Now:              func() time.Time { return time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC) },
+		SessionStore:     store,
+		IsInteractive:    func() bool { return false },
+		TransportFactory: opts.transportFactory,
 	}, BuildInfo{
 		Version:   "test",
 		Commit:    "abc123",

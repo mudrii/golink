@@ -17,7 +17,6 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			settings, err := a.loader.Load()
 			if err != nil {
-				a.settings.JSON = false
 				return a.validationFailure(cmd, "invalid configuration", err.Error())
 			}
 
@@ -60,7 +59,6 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 		newCommentCommand(a),
 		newReactCommand(a),
 		newSearchCommand(a),
-		newMCPCommand(a),
 		newVersionCommand(a),
 	)
 

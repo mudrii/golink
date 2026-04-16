@@ -14,12 +14,14 @@
     { "$ref": "#/$defs/postListOutput" },
     { "$ref": "#/$defs/postGetOutput" },
     { "$ref": "#/$defs/postDeleteOutput" },
+    { "$ref": "#/$defs/postDeleteDryRunOutput" },
     { "$ref": "#/$defs/commentAddOutput" },
+    { "$ref": "#/$defs/commentAddDryRunOutput" },
     { "$ref": "#/$defs/commentListOutput" },
     { "$ref": "#/$defs/reactionAddOutput" },
+    { "$ref": "#/$defs/reactionAddDryRunOutput" },
     { "$ref": "#/$defs/reactionListOutput" },
     { "$ref": "#/$defs/searchPeopleOutput" },
-    { "$ref": "#/$defs/mcpToolOutput" },
     { "$ref": "#/$defs/versionOutput" },
     { "$ref": "#/$defs/unsupportedOutput" },
     { "$ref": "#/$defs/validationErrorOutput" },
@@ -257,6 +259,62 @@
         "revisions": { "type": "integer", "minimum": 0 }
       }
     },
+    "postDeletePreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "post_urn"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1 },
+        "post_urn": { "type": "string", "minLength": 1 }
+      }
+    },
+    "postDeleteDryRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["would_delete", "mode"],
+      "properties": {
+        "would_delete": { "$ref": "#/$defs/postDeletePreview" },
+        "mode": { "const": "dry_run" }
+      }
+    },
+    "commentAddPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "post_urn", "text"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1 },
+        "post_urn": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1 }
+      }
+    },
+    "commentAddDryRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["would_comment", "mode"],
+      "properties": {
+        "would_comment": { "$ref": "#/$defs/commentAddPreview" },
+        "mode": { "const": "dry_run" }
+      }
+    },
+    "reactionAddPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "post_urn", "type"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1 },
+        "post_urn": { "type": "string", "minLength": 1 },
+        "type": { "$ref": "#/$defs/reactionType" }
+      }
+    },
+    "reactionAddDryRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["would_react", "mode"],
+      "properties": {
+        "would_react": { "$ref": "#/$defs/reactionAddPreview" },
+        "mode": { "const": "dry_run" }
+      }
+    },
     "commentData": {
       "type": "object",
       "additionalProperties": false,
@@ -341,15 +399,6 @@
         "start": { "type": "integer", "minimum": 0 },
         "total_count": { "type": "integer", "minimum": 0 },
         "people": { "type": "array", "items": { "$ref": "#/$defs/person" } }
-      }
-    },
-    "mcpToolResultData": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["tool", "result_json"],
-      "properties": {
-        "tool": { "type": "string", "minLength": 1 },
-        "result_json": { "description": "Embedded JSON value (object, array, etc.) — not a string-encoded blob" }
       }
     },
     "versionData": {
@@ -477,6 +526,18 @@
         "data": { "$ref": "#/$defs/postDeleteData" }
       }
     },
+    "postDeleteDryRunOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post delete" },
+        "mode": { "const": "dry_run" },
+        "data": { "$ref": "#/$defs/postDeleteDryRunData" }
+      }
+    },
     "commentAddOutput": {
       "type": "object",
       "unevaluatedProperties": false,
@@ -486,6 +547,18 @@
         "status": { "const": "ok" },
         "command": { "const": "comment add" },
         "data": { "$ref": "#/$defs/commentData" }
+      }
+    },
+    "commentAddDryRunOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "comment add" },
+        "mode": { "const": "dry_run" },
+        "data": { "$ref": "#/$defs/commentAddDryRunData" }
       }
     },
     "commentListOutput": {
@@ -510,6 +583,18 @@
         "data": { "$ref": "#/$defs/reactionAddData" }
       }
     },
+    "reactionAddDryRunOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "react add" },
+        "mode": { "const": "dry_run" },
+        "data": { "$ref": "#/$defs/reactionAddDryRunData" }
+      }
+    },
     "reactionListOutput": {
       "type": "object",
       "unevaluatedProperties": false,
@@ -530,17 +615,6 @@
         "status": { "const": "ok" },
         "command": { "const": "search people" },
         "data": { "$ref": "#/$defs/searchPeopleData" }
-      }
-    },
-    "mcpToolOutput": {
-      "type": "object",
-      "unevaluatedProperties": false,
-      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
-      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
-      "properties": {
-        "status": { "const": "ok" },
-        "command": { "const": "mcp serve" },
-        "data": { "$ref": "#/$defs/mcpToolResultData" }
       }
     },
     "versionOutput": {

@@ -1,8 +1,12 @@
+// Package auth manages golink authentication state, including the native PKCE
+// OAuth flow and profile-keyed session persistence.
 package auth
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,8 +23,8 @@ type Session struct {
 	Transport      string    `json:"transport"`
 	AccessToken    string    `json:"access_token,omitempty"`
 	Scopes         []string  `json:"scopes,omitempty"`
-	ExpiresAt      time.Time `json:"expires_at,omitempty"`
-	ConnectedAt    time.Time `json:"connected_at,omitempty"`
+	ExpiresAt      time.Time `json:"expires_at,omitzero"`
+	ConnectedAt    time.Time `json:"connected_at,omitzero"`
 	AuthFlow       string    `json:"auth_flow,omitempty"`
 	MemberURN      string    `json:"member_urn,omitempty"`
 	ProfileID      string    `json:"profile_id,omitempty"`
@@ -36,6 +40,47 @@ type Store interface {
 	LoadSession(ctx context.Context, profile string) (*Session, error)
 	SaveSession(ctx context.Context, session Session) error
 	DeleteSession(ctx context.Context, profile string) error
+}
+
+// Validate checks whether the stored session has the minimum valid shape.
+// A valid session may still be unauthenticated — use IsAuthenticated for that.
+func (s Session) Validate() error {
+	if strings.TrimSpace(s.Profile) == "" {
+		return fmt.Errorf("stored session is missing profile")
+	}
+
+	if err := ValidateTransport(s.Transport); err != nil {
+		return fmt.Errorf("stored session transport is invalid: %w", err)
+	}
+
+	return nil
+}
+
+// IsAuthenticated reports whether the session holds a usable bearer token.
+// Returns false (with nil error) if the structural Validate passes but the
+// session has no token or has expired.
+func (s Session) IsAuthenticated(now time.Time) (bool, error) {
+	if err := s.Validate(); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(s.AccessToken) == "" {
+		return false, nil
+	}
+	if !s.ExpiresAt.IsZero() && !now.Before(s.ExpiresAt) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// ValidateTransport checks whether the session transport value is supported.
+func ValidateTransport(transport string) error {
+	switch strings.TrimSpace(transport) {
+	case "official", "unofficial", "auto":
+		return nil
+	default:
+		return fmt.Errorf("transport must be one of official|unofficial|auto")
+	}
 }
 
 // MemoryStore is an in-memory session store used by tests.

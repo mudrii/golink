@@ -1,7 +1,6 @@
 package output
 
 import (
-	"encoding/json"
 	"time"
 )
 
@@ -198,6 +197,44 @@ type PostCreateDryRunData struct {
 	Mode      string             `json:"mode"`
 }
 
+// PostDeletePreview describes a dry-run post delete request.
+type PostDeletePreview struct {
+	Endpoint string `json:"endpoint"`
+	PostURN  string `json:"post_urn"`
+}
+
+// PostDeleteDryRunData contains the dry-run preview for post delete.
+type PostDeleteDryRunData struct {
+	WouldDelete PostDeletePreview `json:"would_delete"`
+	Mode        string            `json:"mode"`
+}
+
+// CommentAddPreview describes a dry-run comment add request.
+type CommentAddPreview struct {
+	Endpoint string `json:"endpoint"`
+	PostURN  string `json:"post_urn"`
+	Text     string `json:"text"`
+}
+
+// CommentAddDryRunData contains the dry-run preview for comment add.
+type CommentAddDryRunData struct {
+	WouldComment CommentAddPreview `json:"would_comment"`
+	Mode         string            `json:"mode"`
+}
+
+// ReactionAddPreview describes a dry-run reaction add request.
+type ReactionAddPreview struct {
+	Endpoint string       `json:"endpoint"`
+	PostURN  string       `json:"post_urn"`
+	Type     ReactionType `json:"type"`
+}
+
+// ReactionAddDryRunData contains the dry-run preview for react add.
+type ReactionAddDryRunData struct {
+	WouldReact ReactionAddPreview `json:"would_react"`
+	Mode       string             `json:"mode"`
+}
+
 // PostGetData contains details for a single post.
 type PostGetData struct {
 	PostSummary
@@ -295,12 +332,6 @@ type SearchPeopleData struct {
 	People     []Person `json:"people"`
 }
 
-// MCPToolResultData is the standard wrapper for MCP tool JSON.
-type MCPToolResultData struct {
-	Tool       string          `json:"tool"`
-	ResultJSON json.RawMessage `json:"result_json"`
-}
-
 // VersionData contains build and runtime metadata.
 type VersionData struct {
 	Version   string `json:"version"`
@@ -355,9 +386,6 @@ type ReactionListOutput = SuccessEnvelope[ReactionListData]
 
 // SearchPeopleOutput is the schema-aligned search output envelope.
 type SearchPeopleOutput = SuccessEnvelope[SearchPeopleData]
-
-// MCPToolOutput is the schema-aligned MCP tool envelope.
-type MCPToolOutput = SuccessEnvelope[MCPToolResultData]
 
 // UnsupportedOutput is the schema-aligned unsupported envelope.
 type UnsupportedOutput = SuccessEnvelope[UnsupportedPayload]

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/output"
@@ -29,16 +30,9 @@ func newProfileCommand(a *app) *cobra.Command {
 				return a.transportFailure(cmd, "failed to resolve profile session", err.Error())
 			}
 
-			data := output.ProfileData{
-				Sub:       session.MemberURN,
-				Name:      session.Name,
-				Email:     session.Email,
-				Picture:   session.Picture,
-				ProfileID: session.ProfileID,
-				Locale: output.Locale{
-					Country:  fallback(session.LocaleCountry, "MY"),
-					Language: fallback(session.LocaleLanguage, "en"),
-				},
+			data, err := profileDataFromSession(*session)
+			if err != nil {
+				return a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", err.Error())
 			}
 
 			return a.writeSuccess(cmd, data, fmt.Sprintf("%s <%s>", fallback(data.Name, data.Sub), data.Email))
@@ -46,4 +40,28 @@ func newProfileCommand(a *app) *cobra.Command {
 	})
 
 	return profileCmd
+}
+
+func profileDataFromSession(session auth.Session) (output.ProfileData, error) {
+	if strings.TrimSpace(session.MemberURN) == "" {
+		return output.ProfileData{}, fmt.Errorf("stored session is missing member URN")
+	}
+
+	if transport := strings.TrimSpace(session.Transport); transport != "" {
+		if err := auth.ValidateTransport(transport); err != nil {
+			return output.ProfileData{}, fmt.Errorf("stored session transport is invalid: %w", err)
+		}
+	}
+
+	return output.ProfileData{
+		Sub:       session.MemberURN,
+		Name:      session.Name,
+		Email:     session.Email,
+		Picture:   session.Picture,
+		ProfileID: session.ProfileID,
+		Locale: output.Locale{
+			Country:  fallback(session.LocaleCountry, "MY"),
+			Language: fallback(session.LocaleLanguage, "en"),
+		},
+	}, nil
 }
