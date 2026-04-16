@@ -23,6 +23,7 @@ type Entry struct {
 	HTTPStatus    int             `json:"http_status,omitempty"`
 	ErrorCode     string          `json:"error_code,omitempty"`
 	DryRunPreview json.RawMessage `json:"dry_run_preview,omitempty"`
+	PlanSHA256    string          `json:"plan_sha256,omitempty"`
 }
 
 // Sink appends an Entry to the audit destination.

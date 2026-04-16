@@ -14,14 +14,16 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ```
 main.go                entry point + signal handling
-cmd/                   cobra commands (auth, post, comment, react, search, social, batch, approval, schedule, doctor, version)
+cmd/                   cobra commands (auth, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
 internal/api/          Transport interface, official adapter, retry client, typed errors
 internal/approval/     approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
 internal/auth/         PKCE OAuth + keyring session store
 internal/config/       viper settings with env/flag/file precedence
+internal/httprecord/   HTTP record/replay cassette (RecordTransport, ReplayTransport, Wrap); activated by GOLINK_RECORD / GOLINK_REPLAY
 internal/idempotency/  append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
 internal/output/       JSON envelopes, schema validator, enum parsers
+internal/plan/         golink.plan/v1 document type — Load (envelope-aware), SHA256, IsPlannableCommand
 internal/schedule/     client-side post queue (Store interface, FileStore, MemoryStore; states: pending/running/completed/failed/cancelled)
 schemas/               golink-output.schema.json (the --json contract)
 ```
@@ -59,6 +61,8 @@ Run `go vet ./...` and `go test -race ./...` after any code change. Only run `go
 | `GOLINK_IDEMPOTENCY_PATH` | no | Override idempotency store path (default: `$XDG_STATE_HOME/golink/idempotency.jsonl`) |
 | `GOLINK_AUDIT` | no | `on` (default) or `off` to disable the audit log |
 | `GOLINK_AUDIT_PATH` | no | Override audit log file path (default: `$XDG_STATE_HOME/golink/audit.jsonl`) |
+| `GOLINK_RECORD` | no | Path to a JSONL cassette file; wraps the HTTP client to record every exchange |
+| `GOLINK_REPLAY` | no | Path to a JSONL cassette file; serves responses from cassette without network access (mutually exclusive with `GOLINK_RECORD`) |
 
 No client secret. Tokens via keyring only. Config file stores non-sensitive settings.
 

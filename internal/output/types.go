@@ -870,3 +870,19 @@ func (d SearchPeopleData) Rows() [][]string {
 	}
 	return rows
 }
+
+// PlanData mirrors the golink.plan/v1 JSON document.
+type PlanData struct {
+	Schema         string         `json:"schema"`
+	CreatedAt      time.Time      `json:"created_at"`
+	Command        string         `json:"command"`
+	Args           map[string]any `json:"args"`
+	Transport      string         `json:"transport"`
+	Profile        string         `json:"profile"`
+	IdempotencyKey string         `json:"idempotency_key,omitempty"`
+	DryRun         bool           `json:"dry_run,omitempty"`
+	Notes          string         `json:"notes,omitempty"`
+}
+
+// PlanOutput is the schema-aligned plan envelope.
+type PlanOutput = SuccessEnvelope[PlanData]

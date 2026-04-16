@@ -76,6 +76,8 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 		newApprovalCommand(a),
 		newSocialCommand(a),
 		newScheduleCommand(a),
+		newPlanCommand(a),
+		newExecuteCommand(a),
 	)
 
 	return rootCmd, nil

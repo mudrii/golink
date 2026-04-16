@@ -23,6 +23,7 @@ import (
 	"github.com/mudrii/golink/internal/config"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
+	"github.com/mudrii/golink/internal/plan"
 	"github.com/mudrii/golink/internal/schedule"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -66,11 +67,12 @@ type Dependencies struct {
 }
 
 type app struct {
-	buildInfo BuildInfo
-	deps      Dependencies
-	loader    *config.Loader
-	settings  config.Settings
-	logger    *slog.Logger
+	buildInfo  BuildInfo
+	deps       Dependencies
+	loader     *config.Loader
+	settings   config.Settings
+	logger     *slog.Logger
+	activePlan *plan.Plan
 }
 
 type commandFailure struct {
@@ -767,6 +769,9 @@ func (a *app) auditMutation(cmd *cobra.Command, commandID, status, mode, request
 	}
 	if len(dryRunPreview) > 0 {
 		entry.DryRunPreview = dryRunPreview
+	}
+	if a.activePlan != nil {
+		entry.PlanSHA256 = a.activePlan.SHA256()
 	}
 	if err := a.deps.AuditSink.Append(cmd.Context(), entry); err != nil {
 		a.logger.Warn("audit append failed", "err", err)

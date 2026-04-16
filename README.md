@@ -43,6 +43,10 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `post edit <urn>` | ✅ | httptest | Update commentary or visibility of an existing post |
 | `post reshare <urn>` | ✅ | httptest | Reshare an existing share with optional added commentary (requires `Linkedin-Version >= 202209`) |
 | `post create --image <path>` | ✅ | httptest | Upload a local image and attach it to a new post |
+| `plan post create / delete / edit / reshare / schedule` | ✅ | unit | Generate a plan document without calling LinkedIn |
+| `plan comment add` | ✅ | unit | Generate a comment-add plan document |
+| `plan react add` | ✅ | unit | Generate a react-add plan document |
+| `execute <plan.json>` | ✅ | unit | Execute a golink.plan/v1 document via the normal Transport path |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
 
@@ -230,6 +234,62 @@ Each op may include a per-op `dry_run: true` field to preview that op without ex
 
 Resume: on each successful op, a line is appended to `<ops.jsonl>.progress`. Re-running with `--resume` skips those lines and emits `from_cache:true` envelopes for them.
 
+## Plan / Execute
+
+`golink plan` generates a `golink.plan/v1` JSON document that describes a mutating operation without calling LinkedIn. The document can be inspected, stored, or version-controlled before being executed.
+
+```sh
+# Generate a plan (no network call, no auth required)
+golink plan post create --text "Hello from golink" --visibility PUBLIC > plan.json
+
+# Review the plan
+cat plan.json
+
+# Execute it (auth required, all middleware applies)
+golink execute plan.json
+
+# Preview without executing
+golink --dry-run execute plan.json
+
+# Pipe directly
+golink plan comment add --post-urn urn:li:share:123 --text "nice" | golink execute -
+```
+
+Plannable commands: `post create`, `post delete`, `post edit`, `post reshare`, `post schedule`, `comment add`, `react add`.
+
+The plan document is the full output envelope from `golink plan` (or a bare `golink.plan/v1` JSON — both are accepted by `execute`).
+
+**Plan SHA-256**: every time `execute` dispatches a plan, the SHA-256 of the plan document is recorded in the audit log (`plan_sha256` field). This makes it possible to trace which exact plan produced a given mutation.
+
+**Transport mismatch**: if the plan's `transport` field differs from the `--transport` CLI flag, a warning is logged but execution proceeds with the CLI value.
+
+**Idempotency**: the plan's `idempotency_key` (if set) is used as the idempotency key unless `--idempotency-key` is supplied on the CLI.
+
+**Dry-run**: the plan's `dry_run` field is OR'd with the `--dry-run` CLI flag — either source can enable dry-run.
+
+## Record / Replay
+
+golink can record HTTP exchanges to a cassette file and replay them later without network access. This is useful for offline testing, CI environments, and sharing reproduction cases.
+
+```sh
+# Record all LinkedIn API calls to a cassette
+GOLINK_RECORD=cassette.jsonl golink --json post list
+
+# Replay from the cassette (no network)
+GOLINK_REPLAY=cassette.jsonl golink --json post list
+```
+
+`GOLINK_RECORD` and `GOLINK_REPLAY` are mutually exclusive — setting both is a startup error.
+
+**Cassette format**: newline-delimited JSON (JSONL). Each line records one HTTP exchange:
+- `method`, `url`, `body_sha256` — request identity (match key for replay)
+- `request_body` — request body inlined if ≤ 1 KB, otherwise omitted
+- `response.status`, `response.headers`, `response.body_base64` — full response
+
+**Security**: `Authorization`, `Cookie`, and `Set-Cookie` headers are redacted from cassettes before writing. Access tokens never appear in cassette files.
+
+**Replay semantics**: responses are matched by `method + url + body_sha256`. A miss aborts with an error — the replayer never falls back to the network.
+
 ## Approval gate
 
 `--require-approval` stages a mutating command for operator review instead of executing it immediately. The command exits with code 3 and emits a `pending_approval` JSON envelope. An operator then uses the `approval` subcommands to review and dispatch.
@@ -363,14 +423,17 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 
 ```
 main.go                    entry point + signal handling
-cmd/                       cobra commands (auth, post, comment, react, search, batch, approval, doctor, version)
+cmd/                       cobra commands (auth, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
 internal/api/              Transport interface + official LinkedIn adapter + NoopTransport
 internal/approval/         approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/            append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
 internal/auth/             PKCE login, keyring-backed session store
 internal/config/           viper-backed settings with env/flag/file precedence
+internal/httprecord/       HTTP record/replay cassette (RecordTransport, ReplayTransport, Wrap)
 internal/idempotency/      append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
 internal/output/           JSON envelope types, schema validation, enum parsers
+internal/plan/             golink.plan/v1 document type, Load, SHA256
+internal/schedule/         client-side post queue (Store interface, FileStore, MemoryStore)
 schemas/                   golink-output.schema.json — contract for every --json response
 ```
 

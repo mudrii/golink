@@ -43,7 +43,8 @@
     { "$ref": "#/$defs/scheduleRunOutput" },
     { "$ref": "#/$defs/scheduleCancelOutput" },
     { "$ref": "#/$defs/scheduleShowOutput" },
-    { "$ref": "#/$defs/scheduleNextOutput" }
+    { "$ref": "#/$defs/scheduleNextOutput" },
+    { "$ref": "#/$defs/planOutput" }
   ],
   "$defs": {
     "commandStatus": {
@@ -1263,6 +1264,33 @@
         "status": { "const": "ok" },
         "command": { "const": "schedule next" },
         "data": { "$ref": "#/$defs/scheduledPostItem" }
+      }
+    },
+    "planData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "created_at", "command", "args", "transport", "profile"],
+      "properties": {
+        "schema": { "type": "string", "const": "golink.plan/v1" },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "command": { "type": "string", "minLength": 1 },
+        "args": { "type": "object" },
+        "transport": { "type": "string" },
+        "profile": { "type": "string" },
+        "idempotency_key": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    },
+    "planOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "plan" },
+        "data": { "$ref": "#/$defs/planData" }
       }
     }
   }

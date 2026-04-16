@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	retryablehttp "github.com/hashicorp/go-retryablehttp"
+	"github.com/mudrii/golink/internal/httprecord"
 	"github.com/mudrii/golink/internal/output"
 )
 
@@ -64,9 +66,42 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 
+	// Wrap the base transport with record/replay if env vars are set.
+	baseTransport, wrapErr := httprecord.Wrap(
+		func() http.RoundTripper {
+			if cfg.HTTPClient != nil {
+				return cfg.HTTPClient.Transport
+			}
+			return http.DefaultTransport
+		}(),
+		os.Getenv("GOLINK_RECORD"),
+		os.Getenv("GOLINK_REPLAY"),
+	)
+	if wrapErr != nil {
+		return nil, fmt.Errorf("httprecord: %w", wrapErr)
+	}
+
 	client := retryablehttp.NewClient()
 	if cfg.HTTPClient != nil {
 		client.HTTPClient = cfg.HTTPClient
+		if baseTransport != cfg.HTTPClient.Transport {
+			// record/replay wrapper applied — use a fresh client with it.
+			client.HTTPClient = &http.Client{
+				Transport:     baseTransport,
+				CheckRedirect: cfg.HTTPClient.CheckRedirect,
+				Jar:           cfg.HTTPClient.Jar,
+				Timeout:       cfg.HTTPClient.Timeout,
+			}
+		}
+	} else if baseTransport != http.DefaultTransport {
+		client.HTTPClient = &http.Client{Transport: baseTransport}
+	}
+
+	switch {
+	case os.Getenv("GOLINK_RECORD") != "":
+		logger.Info("httprecord: recording HTTP exchanges", "path", os.Getenv("GOLINK_RECORD"))
+	case os.Getenv("GOLINK_REPLAY") != "":
+		logger.Info("httprecord: replaying from cassette", "path", os.Getenv("GOLINK_REPLAY"))
 	}
 	client.RetryMax = cfg.RetryMax
 	if client.RetryMax == 0 {
