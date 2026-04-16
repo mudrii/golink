@@ -78,9 +78,14 @@ type Store interface {
 	// MarkCompleted transitions a running entry to completed.
 	MarkCompleted(ctx context.Context, commandID string) error
 
-	// MarkFailed increments retry_count and stores the error message,
-	// transitioning the entry back to pending for operator retry.
+	// MarkFailed transitions a running entry to failed. It increments
+	// retry_count and stores the error message. Failed is terminal —
+	// use MarkRetrying to transition back to pending for operator retry.
 	MarkFailed(ctx context.Context, commandID, lastError string, now time.Time) error
+
+	// MarkRetrying transitions a failed entry back to pending so it can
+	// be re-run. retry_count is preserved; last_error is cleared.
+	MarkRetrying(ctx context.Context, commandID string) error
 
 	// MarkCancelled transitions a pending entry to cancelled.
 	MarkCancelled(ctx context.Context, commandID string) error
@@ -314,7 +319,7 @@ func (s *FileStore) MarkCompleted(_ context.Context, commandID string) error {
 	return os.Remove(path)
 }
 
-// MarkFailed increments retry_count, stores error, transitions running → pending.
+// MarkFailed transitions running → failed; increments retry_count and stores error.
 func (s *FileStore) MarkFailed(_ context.Context, commandID, lastError string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -327,6 +332,20 @@ func (s *FileStore) MarkFailed(_ context.Context, commandID, lastError string, n
 		e.RetryCount++
 		t := now.UTC()
 		e.LastRunAt = &t
+		return nil
+	})
+}
+
+// MarkRetrying transitions failed → pending so a failed entry can be re-run.
+func (s *FileStore) MarkRetrying(_ context.Context, commandID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateEntry(commandID, func(e *Entry) error {
+		if e.State != StateFailed {
+			return fmt.Errorf("%w: %s (state=%s, want failed)", ErrInvalidState, commandID, e.State)
+		}
+		e.State = StatePending
+		e.LastError = ""
 		return nil
 	})
 }
@@ -536,7 +555,7 @@ func (m *MemoryStore) MarkCompleted(_ context.Context, commandID string) error {
 	return nil
 }
 
-// MarkFailed increments retry_count, stores error, transitions running → failed.
+// MarkFailed transitions running → failed; increments retry_count and stores error.
 func (m *MemoryStore) MarkFailed(_ context.Context, commandID, lastError string, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -552,6 +571,23 @@ func (m *MemoryStore) MarkFailed(_ context.Context, commandID, lastError string,
 	e.RetryCount++
 	t := now.UTC()
 	e.LastRunAt = &t
+	m.entries[commandID] = e
+	return nil
+}
+
+// MarkRetrying transitions failed → pending so a failed entry can be re-run.
+func (m *MemoryStore) MarkRetrying(_ context.Context, commandID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[commandID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
+	}
+	if e.State != StateFailed {
+		return fmt.Errorf("%w: %s (state=%s, want failed)", ErrInvalidState, commandID, e.State)
+	}
+	e.State = StatePending
+	e.LastError = ""
 	m.entries[commandID] = e
 	return nil
 }

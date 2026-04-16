@@ -143,15 +143,16 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 					return a.validationFailure(cmd,
 						fmt.Sprintf("entry %s is in state %s, only pending/failed entries can be run", commandID, e.State), "")
 				}
-				// Treat failed entries as runnable by re-marking them pending first.
+				// Transition failed → pending in the store so MarkRunning (which
+				// requires pending) will accept the entry during runOneEntry.
 				if e.State == schedule.StateFailed {
-					// We'll just run it; MarkRunning expects pending — reload with pending state override.
-					// Make a copy and treat it as pending for this run cycle.
+					if retryErr := a.deps.ScheduleStore.MarkRetrying(ctx, commandID); retryErr != nil {
+						return a.transportFailure(cmd, "failed to reset schedule entry for retry", retryErr.Error())
+					}
 					e.State = schedule.StatePending
-					toRun = []schedule.Entry{e}
-				} else {
-					toRun = []schedule.Entry{e}
+					e.LastError = ""
 				}
+				toRun = []schedule.Entry{e}
 			} else {
 				// Run all past-due pending entries.
 				due, err := a.deps.ScheduleStore.Due(ctx, now, flagLimit)
@@ -225,10 +226,11 @@ func runOneEntry(
 ) (output.ScheduleRunResult, error) {
 	cobCtx := cmd.Context()
 
+	cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+
 	if err := a.deps.ScheduleStore.MarkRunning(cobCtx, e.CommandID); err != nil {
-		// If the entry is in failed state, MarkRunning will reject it.
-		// Re-attempt after transitioning: write directly is not possible via
-		// interface, so we skip and report as skipped.
+		// Entry could not transition to running (e.g. concurrent runner already
+		// claimed it). Report as skipped; no audit entry since we didn't act.
 		return output.ScheduleRunResult{
 			CommandID: e.CommandID,
 			Status:    "skipped",
@@ -242,22 +244,24 @@ func runOneEntry(
 		Media:      "",
 	}
 
-	// Image upload when image_path is set.
+	// Image upload when image_path is set. MarkRunning has already succeeded,
+	// so MarkFailed (which requires running) is a valid transition here.
 	if e.Request.ImagePath != "" {
 		if _, statErr := os.Stat(e.Request.ImagePath); statErr != nil {
-			markErr := a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID,
-				fmt.Sprintf("image not found: %v", statErr), a.deps.Now().UTC())
-			_ = markErr
+			errMsg := fmt.Sprintf("image not found: %v", statErr)
+			_ = a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID, errMsg, a.deps.Now().UTC())
+			a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
 				Status:    "failed",
-				Error:     fmt.Sprintf("image not found: %v", statErr),
+				Error:     errMsg,
 			}, statErr
 		}
 
 		uploadURL, imageURN, initErr := transport.InitializeImageUpload(cobCtx, memberURN)
 		if initErr != nil {
 			_ = a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID, initErr.Error(), a.deps.Now().UTC())
+			a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
 				Status:    "failed",
@@ -266,6 +270,7 @@ func runOneEntry(
 		}
 		if uploadErr := transport.UploadImageBinary(cobCtx, uploadURL, e.Request.ImagePath); uploadErr != nil {
 			_ = a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID, uploadErr.Error(), a.deps.Now().UTC())
+			a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
 				Status:    "failed",
@@ -284,6 +289,7 @@ func runOneEntry(
 		if hit {
 			// Already ran — mark completed and return cached urn.
 			_ = a.deps.ScheduleStore.MarkCompleted(cobCtx, e.CommandID)
+			a.auditMutation(cmd, cmdID, "ok", "normal", entry.RequestID, entry.HTTPStatus, "", nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
 				Status:    "succeeded",
@@ -296,6 +302,7 @@ func runOneEntry(
 	if err != nil {
 		errMsg := err.Error()
 		_ = a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID, errMsg, a.deps.Now().UTC())
+		a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 		return output.ScheduleRunResult{
 			CommandID: e.CommandID,
 			Status:    "failed",
@@ -304,6 +311,7 @@ func runOneEntry(
 	}
 
 	_ = a.deps.ScheduleStore.MarkCompleted(cobCtx, e.CommandID)
+	a.auditMutation(cmd, cmdID, "ok", "normal", summary.ID, 201, "", nil)
 
 	return output.ScheduleRunResult{
 		CommandID: e.CommandID,
@@ -338,8 +346,7 @@ func newScheduleCancelCommand(a *app) *cobra.Command {
 				return a.transportFailure(cmd, "failed to cancel schedule entry", err.Error())
 			}
 
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
-			a.auditMutation(cmd, cmdID, "cancelled", "normal", "", 0, "", nil)
+			a.auditMutation(cmd, commandID, "cancelled", "normal", "", 0, "", nil)
 
 			// Return the entry as it was before cancellation (state field updated).
 			e.State = schedule.StateCancelled
