@@ -251,6 +251,7 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 					Media:      media,
 				})
 				if runErr != nil {
+					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 					return a.mapTransportError(cmd, "post create", runErr)
 				}
 				resultData = output.PostCreateData{PostSummary: *summary}
@@ -263,10 +264,65 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 				}
 				data, runErr := transport.DeletePost(cmd.Context(), postURN)
 				if runErr != nil {
+					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 					return a.mapTransportError(cmd, "post delete", runErr)
 				}
 				resultData = data
 				httpStatus = 204
+
+			case "post edit":
+				postURN, _ := payloadMap["post_urn"].(string)
+				if postURN == "" {
+					return a.validationFailure(cmd, "approval run: missing post_urn in payload", "")
+				}
+				editReq := api.EditPostRequest{PostURN: postURN}
+				// Stored payload: {"patch": {"$set": {"commentary": "...", "visibility": "..."}}}
+				if outer, ok := payloadMap["patch"].(map[string]any); ok {
+					if inner, ok := outer["patch"].(map[string]any); ok {
+						if set, ok := inner["$set"].(map[string]any); ok {
+							if v, ok := set["commentary"].(string); ok {
+								s := v
+								editReq.Text = &s
+							}
+							if v, ok := set["visibility"].(string); ok {
+								vis, perr := output.ParseVisibility(v)
+								if perr == nil {
+									editReq.Visibility = &vis
+								}
+							}
+						}
+					}
+				}
+				data, runErr := transport.EditPost(cmd.Context(), editReq)
+				if runErr != nil {
+					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
+					return a.mapTransportError(cmd, "post edit", runErr)
+				}
+				resultData = data
+				httpStatus = 204
+
+			case "post reshare":
+				parentURN, _ := payloadMap["parent_urn"].(string)
+				commentary, _ := payloadMap["commentary"].(string)
+				visStr, _ := payloadMap["visibility"].(string)
+				if parentURN == "" {
+					return a.validationFailure(cmd, "approval run: missing parent_urn in payload", "")
+				}
+				visibility, parseErr := output.ParseVisibility(visStr)
+				if parseErr != nil {
+					visibility = output.VisibilityPublic
+				}
+				summary, runErr := transport.ResharePost(cmd.Context(), api.ResharePostRequest{
+					ParentURN:  parentURN,
+					Commentary: commentary,
+					Visibility: visibility,
+				})
+				if runErr != nil {
+					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
+					return a.mapTransportError(cmd, "post reshare", runErr)
+				}
+				resultData = output.PostCreateData{PostSummary: *summary}
+				httpStatus = 201
 
 			case "comment add":
 				postURN, _ := payloadMap["post_urn"].(string)
@@ -276,6 +332,7 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 				}
 				comment, runErr := transport.AddComment(cmd.Context(), postURN, text)
 				if runErr != nil {
+					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 					return a.mapTransportError(cmd, "comment add", runErr)
 				}
 				resultData = output.CommentAddData{CommentData: *comment}
@@ -293,13 +350,14 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 				}
 				data, runErr := transport.AddReaction(cmd.Context(), postURN, rtype)
 				if runErr != nil {
+					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 					return a.mapTransportError(cmd, "react add", runErr)
 				}
 				resultData = output.ReactionAddData{ReactionData: *data, TargetURN: postURN}
 				httpStatus = 201
 
 			default:
-				return a.validationFailure(cmd, fmt.Sprintf("approval run: unsupported command %q", cmdName), "supported: post create, post delete, comment add, react add")
+				return a.validationFailure(cmd, fmt.Sprintf("approval run: unsupported command %q", cmdName), "supported: post create, post delete, post edit, post reshare, comment add, react add")
 			}
 
 			// Record idempotency on success.
