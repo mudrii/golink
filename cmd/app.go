@@ -23,6 +23,7 @@ import (
 	"github.com/mudrii/golink/internal/config"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
+	"github.com/mudrii/golink/internal/schedule"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -55,6 +56,7 @@ type Dependencies struct {
 	AuditSink        audit.Sink
 	IdempotencyStore idempotency.Store
 	ApprovalStore    approval.Store
+	ScheduleStore    schedule.Store
 	// TokenURL overrides the LinkedIn token endpoint; defaults to auth.TokenURL.
 	// Set in tests to point at a local httptest server.
 	TokenURL string
@@ -227,6 +229,9 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 	}
 	if deps.ApprovalStore == nil {
 		deps.ApprovalStore = approval.NewFileStore("")
+	}
+	if deps.ScheduleStore == nil {
+		deps.ScheduleStore = schedule.NewFileStore("")
 	}
 
 	return deps

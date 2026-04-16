@@ -492,6 +492,129 @@ type PostReshareOutput = SuccessEnvelope[PostCreateData]
 // PostReshareDryRunOutput is the schema-aligned post reshare dry-run envelope.
 type PostReshareDryRunOutput = SuccessEnvelope[PostReshareDryRunData]
 
+// ScheduleState is the lifecycle state of a scheduled post entry.
+type ScheduleState string
+
+const (
+	// ScheduleStatePending means the entry is queued and not yet executed.
+	ScheduleStatePending ScheduleState = "pending"
+	// ScheduleStateRunning means execution is currently in progress.
+	ScheduleStateRunning ScheduleState = "running"
+	// ScheduleStateCompleted means the post was successfully created.
+	ScheduleStateCompleted ScheduleState = "completed"
+	// ScheduleStateFailed means execution was attempted but failed.
+	ScheduleStateFailed ScheduleState = "failed"
+	// ScheduleStateCancelled means the entry was cancelled before execution.
+	ScheduleStateCancelled ScheduleState = "cancelled"
+)
+
+// ScheduleRequest is the stored post request parameters.
+type ScheduleRequest struct {
+	Text       string     `json:"text"`
+	Visibility Visibility `json:"visibility"`
+	ImagePath  string     `json:"image_path,omitempty"`
+	ImageAlt   string     `json:"image_alt,omitempty"`
+}
+
+// ScheduledPostData is returned by post schedule (create response, no retry_count).
+type ScheduledPostData struct {
+	CommandID      string          `json:"command_id"`
+	State          ScheduleState   `json:"state"`
+	ScheduledAt    time.Time       `json:"scheduled_at"`
+	CreatedAt      time.Time       `json:"created_at"`
+	LastRunAt      *time.Time      `json:"last_run_at,omitempty"`
+	LastError      string          `json:"last_error,omitempty"`
+	Profile        string          `json:"profile"`
+	Transport      string          `json:"transport"`
+	Request        ScheduleRequest `json:"request"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+}
+
+// ScheduledPostItem includes retry_count for list/show.
+type ScheduledPostItem struct {
+	CommandID      string          `json:"command_id"`
+	State          ScheduleState   `json:"state"`
+	ScheduledAt    time.Time       `json:"scheduled_at"`
+	CreatedAt      time.Time       `json:"created_at"`
+	LastRunAt      *time.Time      `json:"last_run_at,omitempty"`
+	LastError      string          `json:"last_error,omitempty"`
+	RetryCount     int             `json:"retry_count,omitempty"`
+	Profile        string          `json:"profile"`
+	Transport      string          `json:"transport"`
+	Request        ScheduleRequest `json:"request"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+}
+
+// ScheduleListCounts holds per-state counts for schedule list.
+type ScheduleListCounts struct {
+	Pending   int `json:"pending"`
+	PastDue   int `json:"past_due"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+	Cancelled int `json:"cancelled"`
+}
+
+// ScheduleListData is the payload for schedule list.
+type ScheduleListData struct {
+	Items  []ScheduledPostItem `json:"items"`
+	Counts ScheduleListCounts  `json:"counts"`
+}
+
+// ScheduleRunResult is one entry in the run results slice.
+type ScheduleRunResult struct {
+	CommandID string `json:"command_id"`
+	Status    string `json:"status"`
+	PostURN   string `json:"post_urn,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// ScheduleRunData is the payload for schedule run.
+type ScheduleRunData struct {
+	Ran       int                 `json:"ran"`
+	Succeeded int                 `json:"succeeded"`
+	Failed    int                 `json:"failed"`
+	Skipped   int                 `json:"skipped"`
+	Results   []ScheduleRunResult `json:"results"`
+}
+
+// SchedulePostOutput is the schema-aligned post schedule envelope.
+type SchedulePostOutput = SuccessEnvelope[ScheduledPostData]
+
+// ScheduleListOutput is the schema-aligned schedule list envelope.
+type ScheduleListOutput = SuccessEnvelope[ScheduleListData]
+
+// ScheduleRunOutput is the schema-aligned schedule run envelope.
+type ScheduleRunOutput = SuccessEnvelope[ScheduleRunData]
+
+// ScheduleCancelOutput is the schema-aligned schedule cancel envelope.
+type ScheduleCancelOutput = SuccessEnvelope[ScheduledPostData]
+
+// ScheduleShowOutput is the schema-aligned schedule show envelope.
+type ScheduleShowOutput = SuccessEnvelope[ScheduledPostItem]
+
+// ScheduleNextOutput is the schema-aligned schedule next envelope.
+type ScheduleNextOutput = SuccessEnvelope[ScheduledPostItem]
+
+// Headers implements TabularData for ScheduleListData.
+func (d ScheduleListData) Headers() []string {
+	return []string{"COMMAND_ID", "STATE", "SCHEDULED_AT", "TEXT"}
+}
+
+// Rows implements TabularData for ScheduleListData.
+func (d ScheduleListData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.Items))
+	for i := range d.Items {
+		item := &d.Items[i]
+		rows = append(rows, []string{
+			item.CommandID,
+			string(item.State),
+			item.ScheduledAt.UTC().Format(time.RFC3339),
+			item.Request.Text,
+		})
+	}
+	return rows
+}
+
 // DoctorEnvironment describes the observed environment variable state.
 type DoctorEnvironment struct {
 	GOLINKClientID   bool   `json:"golink_client_id_set"`

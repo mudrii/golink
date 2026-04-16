@@ -37,7 +37,13 @@
     { "$ref": "#/$defs/postEditOutput" },
     { "$ref": "#/$defs/postEditDryRunOutput" },
     { "$ref": "#/$defs/postReshareOutput" },
-    { "$ref": "#/$defs/postReshareDryRunOutput" }
+    { "$ref": "#/$defs/postReshareDryRunOutput" },
+    { "$ref": "#/$defs/schedulePostOutput" },
+    { "$ref": "#/$defs/scheduleListOutput" },
+    { "$ref": "#/$defs/scheduleRunOutput" },
+    { "$ref": "#/$defs/scheduleCancelOutput" },
+    { "$ref": "#/$defs/scheduleShowOutput" },
+    { "$ref": "#/$defs/scheduleNextOutput" }
   ],
   "$defs": {
     "commandStatus": {
@@ -1097,6 +1103,166 @@
         "command": { "const": "post reshare" },
         "mode": { "const": "dry_run" },
         "data": { "$ref": "#/$defs/postReshareDryRunData" }
+      }
+    },
+    "scheduleState": {
+      "type": "string",
+      "enum": ["pending", "running", "completed", "failed", "cancelled"]
+    },
+    "scheduleRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "visibility"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "visibility": { "$ref": "#/$defs/visibility" },
+        "image_path": { "type": "string" },
+        "image_alt": { "type": "string" }
+      }
+    },
+    "scheduledPostData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "state", "scheduled_at", "created_at", "profile", "transport", "request"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/scheduleState" },
+        "scheduled_at": { "$ref": "#/$defs/dateTime" },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "last_run_at": { "$ref": "#/$defs/dateTime" },
+        "last_error": { "type": "string" },
+        "profile": { "type": "string", "minLength": 1 },
+        "transport": { "type": "string" },
+        "request": { "$ref": "#/$defs/scheduleRequest" },
+        "idempotency_key": { "type": "string" }
+      }
+    },
+    "scheduledPostItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "state", "scheduled_at", "created_at", "profile", "transport", "request"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/scheduleState" },
+        "scheduled_at": { "$ref": "#/$defs/dateTime" },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "last_run_at": { "$ref": "#/$defs/dateTime" },
+        "last_error": { "type": "string" },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "profile": { "type": "string", "minLength": 1 },
+        "transport": { "type": "string" },
+        "request": { "$ref": "#/$defs/scheduleRequest" },
+        "idempotency_key": { "type": "string" }
+      }
+    },
+    "scheduleListCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pending", "past_due", "completed", "failed", "cancelled"],
+      "properties": {
+        "pending": { "type": "integer", "minimum": 0 },
+        "past_due": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "cancelled": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "scheduleListData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "counts"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/scheduledPostItem" } },
+        "counts": { "$ref": "#/$defs/scheduleListCounts" }
+      }
+    },
+    "scheduleRunResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "status"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["succeeded", "failed", "skipped"] },
+        "post_urn": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "scheduleRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ran", "succeeded", "failed", "skipped", "results"],
+      "properties": {
+        "ran": { "type": "integer", "minimum": 0 },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "results": { "type": "array", "items": { "$ref": "#/$defs/scheduleRunResult" } }
+      }
+    },
+    "schedulePostOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post schedule" },
+        "data": { "$ref": "#/$defs/scheduledPostData" }
+      }
+    },
+    "scheduleListOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "schedule list" },
+        "data": { "$ref": "#/$defs/scheduleListData" }
+      }
+    },
+    "scheduleRunOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "schedule run" },
+        "data": { "$ref": "#/$defs/scheduleRunData" }
+      }
+    },
+    "scheduleCancelOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "schedule cancel" },
+        "data": { "$ref": "#/$defs/scheduledPostData" }
+      }
+    },
+    "scheduleShowOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "schedule show" },
+        "data": { "$ref": "#/$defs/scheduledPostItem" }
+      }
+    },
+    "scheduleNextOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "schedule next" },
+        "data": { "$ref": "#/$defs/scheduledPostItem" }
       }
     }
   }

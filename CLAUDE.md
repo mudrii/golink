@@ -14,7 +14,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ```
 main.go                entry point + signal handling
-cmd/                   cobra commands (auth, post, comment, react, search, social, batch, approval, doctor, version)
+cmd/                   cobra commands (auth, post, comment, react, search, social, batch, approval, schedule, doctor, version)
 internal/api/          Transport interface, official adapter, retry client, typed errors
 internal/approval/     approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
@@ -22,6 +22,7 @@ internal/auth/         PKCE OAuth + keyring session store
 internal/config/       viper settings with env/flag/file precedence
 internal/idempotency/  append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
 internal/output/       JSON envelopes, schema validator, enum parsers
+internal/schedule/     client-side post queue (Store interface, FileStore, MemoryStore; states: pending/running/completed/failed/cancelled)
 schemas/               golink-output.schema.json (the --json contract)
 ```
 

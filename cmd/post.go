@@ -33,6 +33,7 @@ func newPostCommand(a *app) *cobra.Command {
 		newPostDeleteCommand(a),
 		newPostEditCommand(a),
 		newPostReshareCommand(a),
+		newPostScheduleCommand(a),
 	)
 
 	return postCmd

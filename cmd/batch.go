@@ -18,6 +18,7 @@ import (
 	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
+	"github.com/mudrii/golink/internal/schedule"
 	"github.com/spf13/cobra"
 )
 
@@ -44,10 +45,11 @@ type progressEntry struct {
 }
 
 var batchSupportedCommands = map[string]struct{}{
-	"post create": {},
-	"post delete": {},
-	"comment add": {},
-	"react add":   {},
+	"post create":   {},
+	"post delete":   {},
+	"comment add":   {},
+	"react add":     {},
+	"post schedule": {},
 }
 
 func newBatchCommand(a *app) *cobra.Command {
@@ -233,7 +235,7 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) error 
 	cmdName := strings.TrimSpace(op.Command)
 
 	if _, ok := batchSupportedCommands[cmdName]; !ok {
-		return r.emitValidationError(lineNum, op, fmt.Sprintf("unsupported command %q; supported: post create, post delete, comment add, react add", cmdName))
+		return r.emitValidationError(lineNum, op, fmt.Sprintf("unsupported command %q; supported: post create, post delete, comment add, react add, post schedule", cmdName))
 	}
 
 	// Idempotency check.
@@ -271,6 +273,8 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) error 
 		resultData, cmdID, httpStatus, opErr = r.runCommentAdd(ctx, op, dryRun)
 	case "react add":
 		resultData, cmdID, httpStatus, opErr = r.runReactAdd(ctx, op, dryRun)
+	case "post schedule":
+		resultData, cmdID, httpStatus, opErr = r.runPostSchedule(ctx, op)
 	}
 
 	if opErr != nil {
@@ -412,6 +416,76 @@ func (r *batchRunner) runReactAdd(ctx context.Context, op batchOp, dryRun bool) 
 		return nil, cmdID, 0, err
 	}
 	return output.ReactionAddData{ReactionData: *data, TargetURN: postURN}, cmdID, 201, nil
+}
+
+func (r *batchRunner) runPostSchedule(ctx context.Context, op batchOp) (any, string, int, error) {
+	cmdID := newCommandID("post_schedule", r.a.deps.Now().UTC())
+
+	atStr := stringArg(op.Args, "at")
+	if atStr == "" {
+		return nil, cmdID, 0, fmt.Errorf("missing required arg: at")
+	}
+	scheduledAt, err := time.Parse(time.RFC3339, atStr)
+	if err != nil {
+		return nil, cmdID, 0, fmt.Errorf("invalid at value: %w", err)
+	}
+	scheduledAt = scheduledAt.UTC()
+	if !scheduledAt.After(r.a.deps.Now().UTC().Add(30 * time.Second)) {
+		return nil, cmdID, 0, fmt.Errorf("at must be at least 30 seconds in the future")
+	}
+
+	text := stringArg(op.Args, "text")
+	if text == "" {
+		return nil, cmdID, 0, fmt.Errorf("missing required arg: text")
+	}
+	visStr := stringArg(op.Args, "visibility")
+	if visStr == "" {
+		visStr = "PUBLIC"
+	}
+	visibility, err := output.ParseVisibility(visStr)
+	if err != nil {
+		return nil, cmdID, 0, fmt.Errorf("invalid visibility: %w", err)
+	}
+	imagePath := stringArg(op.Args, "image_path")
+	if imagePath != "" && !strings.HasPrefix(imagePath, "/") {
+		return nil, cmdID, 0, fmt.Errorf("image_path must be absolute")
+	}
+
+	entry := schedule.Entry{
+		CommandID:      cmdID,
+		State:          schedule.StatePending,
+		ScheduledAt:    scheduledAt,
+		CreatedAt:      r.a.deps.Now().UTC(),
+		Profile:        r.a.settings.Profile,
+		Transport:      r.a.settings.Transport,
+		IdempotencyKey: op.IdempotencyKey,
+		Request: schedule.Request{
+			Text:       text,
+			Visibility: string(visibility),
+			ImagePath:  imagePath,
+			ImageAlt:   stringArg(op.Args, "image_alt"),
+		},
+	}
+	if err := r.a.deps.ScheduleStore.Add(ctx, entry); err != nil {
+		return nil, cmdID, 0, err
+	}
+
+	data := output.ScheduledPostData{
+		CommandID:      entry.CommandID,
+		State:          output.ScheduleStatePending,
+		ScheduledAt:    entry.ScheduledAt,
+		CreatedAt:      entry.CreatedAt,
+		Profile:        entry.Profile,
+		Transport:      entry.Transport,
+		IdempotencyKey: entry.IdempotencyKey,
+		Request: output.ScheduleRequest{
+			Text:       entry.Request.Text,
+			Visibility: output.Visibility(entry.Request.Visibility),
+			ImagePath:  entry.Request.ImagePath,
+			ImageAlt:   entry.Request.ImageAlt,
+		},
+	}
+	return data, cmdID, 0, nil
 }
 
 // emitPendingApproval stages the op and emits a pending_approval result.

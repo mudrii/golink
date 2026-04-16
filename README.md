@@ -38,8 +38,31 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `approval cancel <id>` | ✅ | unit | Remove a pending entry |
 | `--require-approval` | ✅ | unit | Stage any mutating command for review (exits 3) |
 | `social metadata <urn>...` | ✅ | httptest | Batch engagement read: comment count, reaction totals per type, comments-state for up to 100 post URNs in one call |
+| `post schedule --at ...` | ✅ | unit | Queue a post for later publication (client-side queue) |
+| `schedule list / show / run / cancel / next` | ✅ | unit | Manage the scheduled-post queue |
+| `post edit <urn>` | ✅ | httptest | Update commentary or visibility of an existing post |
+| `post reshare <urn>` | ✅ | httptest | Reshare an existing share with optional added commentary (requires `Linkedin-Version >= 202209`) |
+| `post create --image <path>` | ✅ | httptest | Upload a local image and attach it to a new post |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
+
+## Scheduling
+
+LinkedIn has no native scheduled-post API. golink implements a client-side queue — scheduled posts are stored on disk and executed on demand:
+
+```sh
+# Queue a post for tomorrow 9am UTC
+golink post schedule --at 2026-04-18T09:00:00Z --text "Good morning"
+
+# Inspect the queue
+golink schedule list
+golink schedule next        # prints the earliest pending scheduled_at
+
+# Execute past-due entries (typically invoked from cron)
+golink schedule run --limit 20
+```
+
+golink does NOT run a daemon. Operators invoke `schedule run` via cron, launchd, systemd-timer, or an agent loop. Queue location: `$GOLINK_SCHEDULE_DIR` (override), else `$XDG_STATE_HOME/golink/schedule/`. `--image` paths must be absolute because they resolve at run time. `--require-approval` is not supported on scheduled posts in this release.
 
 ## Installation
 
