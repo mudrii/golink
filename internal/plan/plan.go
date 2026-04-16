@@ -15,6 +15,7 @@ import (
 	"time"
 )
 
+// SchemaV1 is the canonical schema identifier for golink plan documents.
 const SchemaV1 = "golink.plan/v1"
 
 // ErrInvalidSchema is returned when the plan document carries an unknown schema string.

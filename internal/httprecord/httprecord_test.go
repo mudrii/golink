@@ -1,6 +1,7 @@
 package httprecord_test
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,7 +35,7 @@ func TestRecordReplayCycle(t *testing.T) {
 	}
 	recClient := &http.Client{Transport: recorder}
 
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/test", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/test", http.NoBody)
 	resp, err := recClient.Do(req)
 	if err != nil {
 		t.Fatalf("record request: %v", err)
@@ -55,7 +56,7 @@ func TestRecordReplayCycle(t *testing.T) {
 	}
 	replayClient := &http.Client{Transport: replayer}
 
-	req2, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/test", nil)
+	req2, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/test", http.NoBody)
 	resp2, err := replayClient.Do(req2)
 	if err != nil {
 		t.Fatalf("replay request: %v", err)
@@ -65,7 +66,7 @@ func TestRecordReplayCycle(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("replay: status %d", resp2.StatusCode)
 	}
-	if string(body) != string(body2) {
+	if !bytes.Equal(body, body2) {
 		t.Errorf("replay body mismatch: got %s, want %s", body2, body)
 	}
 }
@@ -82,7 +83,7 @@ func TestReplayMiss(t *testing.T) {
 	// Record GET /recorded.
 	recorder, _ := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
 	recClient := &http.Client{Transport: recorder}
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/recorded", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/recorded", http.NoBody)
 	resp, err := recClient.Do(req)
 	if err != nil {
 		t.Fatalf("record: %v", err)
@@ -93,7 +94,7 @@ func TestReplayMiss(t *testing.T) {
 	// Replay a different path — should fail.
 	replayer, _ := httprecord.Wrap(nil, "", cassettePath)
 	replayClient := &http.Client{Transport: replayer}
-	req2, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/not-recorded", nil)
+	req2, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/not-recorded", http.NoBody)
 	_, err = replayClient.Do(req2)
 	if err == nil {
 		t.Fatal("expected error on replay miss, got nil")
@@ -127,7 +128,7 @@ func TestWrap_noop(t *testing.T) {
 		t.Fatal("expected non-nil transport")
 	}
 	// Verify the returned transport is the original by calling through it.
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/", http.NoBody)
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
@@ -151,7 +152,7 @@ func TestHeaderRedaction(t *testing.T) {
 	recorder, _ := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
 
 	// Add Authorization header to the request — must not appear in cassette.
-	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/", nil)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/", http.NoBody)
 	req.Header.Set("Authorization", "Bearer secret-token")
 
 	resp, err := (&http.Client{Transport: recorder}).Do(req)
