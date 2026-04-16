@@ -1,0 +1,25 @@
+# Project-specific
+PROMPT_golink.md
+
+# Build artifacts
+golink
+/dist/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+
+# Codex / agent artifacts
+.codex/
+AGENTS.md
