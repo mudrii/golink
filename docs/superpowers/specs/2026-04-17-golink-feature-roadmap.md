@@ -30,6 +30,11 @@ it doesn't exist, not endorsed for default implementation.
 
 ## 2 · ADR: remove the MCP layer (M1)
 
+> **Status: implemented.** Path-B curation landed before git history began —
+> `internal/mcp/`, `cmd/mcp.go`, and `mark3labs/mcp-go` never existed on `main`.
+> The blast-radius list below is archival; none of the listed files exist
+> today.
+
 ### Decision
 
 Remove the MCP stdio server and its 11 tool surface. The CLI's `--json` mode
@@ -305,27 +310,23 @@ Captured here so every implementation plan can check access before work.
 This is advisory; each feature still gets its own brainstorm → plan → execute
 cycle. The ordering reflects dependency + quick-win priority.
 
-1. **MCP removal** — blocks on nothing; do first (isolated, clarifies the
-   surface).
-2. **Refresh tokens + auto-refresh** — unlocks long-running agent sessions.
-3. **`--output` modes + `--compact`** — smallest agent-UX win, no LinkedIn
-   dependency.
-4. **Audit log** — grounds all subsequent mutating features in observability.
-5. **`golink doctor`** — exposes what the current token can and can't do;
-   useful immediately.
-6. **`--idempotency-key` + resumable batch** — unblocks real agent workflows.
-7. **`--require-approval` gate** — supervised-agent feature; depends on
-   audit log being in place.
-8. **`social metadata` batch read** — first new LinkedIn surface;
-   high-efficiency read primitive.
-9. **Image post + edit post + reshare** — unblocks most agent content
-   workflows.
-10. **`post schedule` (client-side queue)** — needs audit log, idempotency
-    keys, and doctor already shipped.
-11. **Plan/execute split + record/replay** — pattern hardening once the core
-    is stable.
-12. **Org posting + `org list`** — first P1 bleed-over for users with
-    Community Management access.
+> **Status update (2026-04-17):** items 1–12 have all shipped (see `git log`).
+> The next P0 candidates are from §4.10: `--explain`/`--trace`, `golink open`,
+> `config set/get/list`, shell completions, `auth list`/`auth switch`,
+> `post preview`.
+
+1. ✅ **MCP removal** — never landed in git history; Path-B curation shipped.
+2. ✅ **Refresh tokens + auto-refresh** — `auth refresh` + silent pre-expiry refresh.
+3. ✅ **`--output` modes + `--compact`** — text/json/jsonl/compact/table all wired.
+4. ✅ **Audit log** — `internal/audit/` JSONL sink, enforced in every mutating `RunE`.
+5. ✅ **`golink doctor`** — env + session + scope probe; read-only, never audited.
+6. ✅ **`--idempotency-key` + resumable batch** — 24h file store + batch `--resume`.
+7. ✅ **`--require-approval` gate** — exit code 3, `approval grant`/`run`/`deny`.
+8. ✅ **`social metadata` batch read** — `social metadata` command via Reactions/Comments count API.
+9. ✅ **Image post + edit post + reshare** — `post create --image`, `post edit`, `post reshare`.
+10. ✅ **`post schedule` (client-side queue)** — `schedule list/show/run/cancel/next`.
+11. ✅ **Plan/execute split + record/replay** — `golink.plan/v1` + `GOLINK_RECORD`/`GOLINK_REPLAY`.
+12. ✅ **Org posting + `org list`** — `post create --as-org`, `org list`.
 
 P1 features are scheduled *after* partner approval lands (outside engineering
 control). P2 features wait on a conscious decision to own the ToS risk.

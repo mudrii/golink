@@ -1,5 +1,10 @@
 # Curate Initial Commit — Land golink v3 Without MCP (Path B)
 
+> **Status: Completed (shipped in commit `fbcd7c0` and prior).** The MCP layer
+> never landed in git history (`internal/mcp/`, `cmd/mcp.go` do not exist).
+> Keeping this plan as an archival record of the Path-B approach. Do not
+> re-execute — there is nothing left to curate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Curate the existing working-tree WIP so the MCP layer never lands in git history. Ship the golink v3 implementation, CI config, and planning docs across three clean commits.
