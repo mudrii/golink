@@ -149,7 +149,10 @@ func (rt *RecordTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
 	if readErr != nil {
-		return resp, nil
+		// Surface read failures to the caller so truncated bodies are not
+		// silently accepted. We still return resp so callers that want to
+		// inspect the partial body can.
+		return resp, fmt.Errorf("record: read response body: %w", readErr)
 	}
 
 	bodyHash := bodySHA256(reqBody)
