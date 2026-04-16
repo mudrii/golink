@@ -1,8 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +133,17 @@ func (o *Official) CreatePost(ctx context.Context, req CreatePostRequest) (*outp
 			"targetEntities":                 []any{},
 			"thirdPartyDistributionChannels": []any{},
 		},
+	}
+
+	if req.MediaPayload != nil {
+		media := map[string]any{"id": req.MediaPayload.ID}
+		if req.MediaPayload.Title != "" {
+			media["title"] = req.MediaPayload.Title
+		}
+		if req.MediaPayload.Alt != "" {
+			media["altText"] = req.MediaPayload.Alt
+		}
+		payload["content"] = map[string]any{"media": media}
 	}
 
 	resp, err := o.do(ctx, "POST", "/rest/posts", payload)
@@ -551,4 +566,266 @@ func (o *Official) SearchPeople(_ context.Context, _ SearchPeopleRequest) (*outp
 		Reason:             "not available through open self-serve LinkedIn consumer/community permissions",
 		SuggestedTransport: "unofficial",
 	}
+}
+
+// maxImageBytes is the LinkedIn upload size limit for images.
+const maxImageBytes = 10 * 1024 * 1024
+
+// InitializeImageUpload calls the LinkedIn Images API to register an upload
+// and obtain a signed upload URL and the image URN.
+func (o *Official) InitializeImageUpload(ctx context.Context, ownerURN string) (uploadURL, imageURN string, err error) {
+	owner := strings.TrimSpace(ownerURN)
+	if owner == "" {
+		owner = o.authorURN
+	}
+	if owner == "" {
+		return "", "", &Error{Status: 401, Code: "UNAUTHORIZED", Message: "owner urn not resolved from session"}
+	}
+
+	payload := map[string]any{
+		"initializeUploadRequest": map[string]any{
+			"owner": owner,
+		},
+	}
+	resp, err := o.do(ctx, "POST", "/rest/images?action=initializeUpload", payload)
+	if err != nil {
+		return "", "", fmt.Errorf("initialize image upload: %w", err)
+	}
+
+	var raw struct {
+		Value struct {
+			UploadURL string `json:"uploadUrl"`
+			Image     string `json:"image"`
+		} `json:"value"`
+	}
+	if err := resp.UnmarshalJSON(&raw); err != nil {
+		return "", "", fmt.Errorf("decode initialize upload response: %w", err)
+	}
+	if raw.Value.UploadURL == "" {
+		return "", "", fmt.Errorf("images api response missing uploadUrl")
+	}
+	if raw.Value.Image == "" {
+		return "", "", fmt.Errorf("images api response missing image urn")
+	}
+	return raw.Value.UploadURL, raw.Value.Image, nil
+}
+
+// UploadImageBinary PUTs the file bytes to the LinkedIn signed upload URL.
+// The signed URL must NOT receive an Authorization header — LinkedIn signs
+// the URL itself and rejects requests that also carry a Bearer token.
+func (o *Official) UploadImageBinary(ctx context.Context, uploadURL, filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read image file: %w", err)
+	}
+	if len(data) > maxImageBytes {
+		return fmt.Errorf("image file exceeds 10MB limit (%d bytes)", len(data))
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("image file is empty")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("build upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	httpClient := o.client.retryable.HTTPClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload image binary: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("upload image binary: unexpected status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// EditPost PATCHes an existing post's commentary and/or visibility.
+// LinkedIn returns 204 No Content on success; in that case a minimal
+// PostEditData is constructed from the request rather than making a GET.
+func (o *Official) EditPost(ctx context.Context, req EditPostRequest) (*output.PostEditData, error) {
+	postURN := strings.TrimSpace(req.PostURN)
+	if postURN == "" {
+		return nil, fmt.Errorf("post urn must not be empty")
+	}
+	if req.Text == nil && req.Visibility == nil {
+		return nil, fmt.Errorf("at least one of text or visibility must be provided")
+	}
+
+	encoded, err := EncodeURN(postURN)
+	if err != nil {
+		return nil, fmt.Errorf("encode post urn: %w", err)
+	}
+
+	set := map[string]any{}
+	if req.Text != nil {
+		set["commentary"] = *req.Text
+	}
+	if req.Visibility != nil {
+		set["visibility"] = string(*req.Visibility)
+	}
+
+	body := map[string]any{
+		"patch": map[string]any{"$set": set},
+	}
+
+	resp, err := o.do(ctx, http.MethodPatch, "/rest/posts/"+encoded, body)
+	if err != nil {
+		return nil, fmt.Errorf("edit post: %w", err)
+	}
+
+	now := o.now().UTC()
+
+	// LinkedIn returns 204 on success — build result from the request inputs.
+	if resp.Status == http.StatusNoContent || len(resp.Body) == 0 {
+		text := ""
+		if req.Text != nil {
+			text = *req.Text
+		}
+		visibility := output.VisibilityPublic
+		if req.Visibility != nil {
+			visibility = *req.Visibility
+		}
+		return &output.PostEditData{
+			PostSummary: output.PostSummary{
+				ID:         postURN,
+				CreatedAt:  now,
+				Text:       text,
+				Visibility: visibility,
+				URL:        fmt.Sprintf("https://www.linkedin.com/feed/update/%s", postURN),
+				AuthorURN:  o.authorURN,
+			},
+			UpdatedAt: now,
+		}, nil
+	}
+
+	var raw struct {
+		ID         string `json:"id"`
+		Commentary string `json:"commentary"`
+		Author     string `json:"author"`
+		Visibility string `json:"visibility"`
+		CreatedAt  int64  `json:"createdAt"`
+	}
+	if err := resp.UnmarshalJSON(&raw); err != nil {
+		return nil, fmt.Errorf("decode edit post response: %w", err)
+	}
+
+	created := now
+	if raw.CreatedAt > 0 {
+		created = time.UnixMilli(raw.CreatedAt).UTC()
+	}
+	id := raw.ID
+	if id == "" {
+		id = postURN
+	}
+	return &output.PostEditData{
+		PostSummary: output.PostSummary{
+			ID:         id,
+			CreatedAt:  created,
+			Text:       raw.Commentary,
+			Visibility: output.Visibility(raw.Visibility),
+			URL:        fmt.Sprintf("https://www.linkedin.com/feed/update/%s", id),
+			AuthorURN:  raw.Author,
+		},
+		UpdatedAt: now,
+	}, nil
+}
+
+// compareVersionYYYYMM compares two YYYYMM version strings. Returns negative
+// if a < b, zero if equal, positive if a > b. Non-numeric strings sort low.
+func compareVersionYYYYMM(a, b string) int {
+	ai, _ := parseInt(a)
+	bi, _ := parseInt(b)
+	return ai - bi
+}
+
+func parseInt(s string) (int, bool) {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// ResharePost creates a new post that reshares an existing share URN.
+// Requires Linkedin-Version >= 202209.
+func (o *Official) ResharePost(ctx context.Context, req ResharePostRequest) (*output.PostSummary, error) {
+	parentURN := strings.TrimSpace(req.ParentURN)
+	if parentURN == "" {
+		return nil, fmt.Errorf("parent urn must not be empty")
+	}
+	author := strings.TrimSpace(o.authorURN)
+	if author == "" {
+		return nil, &Error{Status: 401, Code: "UNAUTHORIZED", Message: "author urn not resolved from session"}
+	}
+
+	// Gate on Linkedin-Version >= 202209.
+	effective := strings.TrimSpace(o.client.apiVers)
+	if effective != "" && compareVersionYYYYMM(effective, "202209") < 0 {
+		return nil, &ErrFeatureUnavailable{
+			Feature: "post reshare",
+			Reason:  fmt.Sprintf("reshare requires Linkedin-Version >= 202209 (configured: %s)", effective),
+		}
+	}
+
+	visibility := req.Visibility
+	if visibility == "" {
+		visibility = output.VisibilityPublic
+	}
+
+	payload := map[string]any{
+		"author":                    author,
+		"commentary":                req.Commentary,
+		"visibility":                string(visibility),
+		"lifecycleState":            "PUBLISHED",
+		"isReshareDisabledByAuthor": false,
+		"distribution": map[string]any{
+			"feedDistribution":               "MAIN_FEED",
+			"targetEntities":                 []any{},
+			"thirdPartyDistributionChannels": []any{},
+		},
+		"reshareContext": map[string]any{
+			"parent": parentURN,
+		},
+	}
+
+	resp, err := o.do(ctx, "POST", "/rest/posts", payload)
+	if err != nil {
+		return nil, fmt.Errorf("reshare post: %w", err)
+	}
+
+	id := resp.Header.Get("x-restli-id")
+	if id == "" {
+		id = resp.Header.Get("X-RestLi-Id")
+	}
+	if id == "" {
+		var body struct {
+			ID string `json:"id"`
+		}
+		_ = resp.UnmarshalJSON(&body)
+		id = body.ID
+	}
+	if id == "" {
+		return nil, fmt.Errorf("posts api response missing post urn")
+	}
+
+	return &output.PostSummary{
+		ID:         id,
+		CreatedAt:  o.now().UTC(),
+		Text:       req.Commentary,
+		Visibility: visibility,
+		URL:        fmt.Sprintf("https://www.linkedin.com/feed/update/%s", id),
+		AuthorURN:  author,
+	}, nil
 }

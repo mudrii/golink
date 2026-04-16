@@ -3,6 +3,8 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/mudrii/golink/internal/api"
 	"github.com/mudrii/golink/internal/idempotency"
@@ -14,6 +16,8 @@ type postCreateFlags struct {
 	text       string
 	visibility string
 	media      string
+	image      string
+	imageAlt   string
 }
 
 func newPostCommand(a *app) *cobra.Command {
@@ -27,6 +31,8 @@ func newPostCommand(a *app) *cobra.Command {
 		newPostListCommand(a),
 		newPostGetCommand(a),
 		newPostDeleteCommand(a),
+		newPostEditCommand(a),
+		newPostReshareCommand(a),
 	)
 
 	return postCmd
@@ -59,19 +65,29 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				return a.validationFailure(cmd, "invalid --visibility", err.Error())
 			}
 
+			imagePath := strings.TrimSpace(flags.image)
+
 			if a.settings.DryRun {
-				data := output.PostCreateDryRunData{
-					WouldPost: output.PostPayloadPreview{
-						Endpoint:   "POST /rest/posts",
-						Text:       text,
-						Visibility: visibility,
-						Media:      flags.media,
-					},
-					Mode: "dry_run",
+				preview := output.PostPayloadPreview{
+					Endpoint:   "POST /rest/posts",
+					Text:       text,
+					Visibility: visibility,
+					Media:      flags.media,
 				}
-				preview, _ := json.Marshal(data)
+				if imagePath != "" {
+					preview.WouldUpload = &output.ImageUploadPreview{
+						Path:           imagePath,
+						PlaceholderURN: "urn:li:image:<to-be-uploaded>",
+						Alt:            strings.TrimSpace(flags.imageAlt),
+					}
+				}
+				data := output.PostCreateDryRunData{
+					WouldPost: preview,
+					Mode:      "dry_run",
+				}
+				previewBytes, _ := json.Marshal(data)
 				writeErr := a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN POST /rest/posts text=%q visibility=%s", text, visibility))
-				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", preview)
+				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", previewBytes)
 				return writeErr
 			}
 
@@ -107,11 +123,34 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				return a.transportFailure(cmd, "failed to build transport", err.Error())
 			}
 
-			summary, err := transport.CreatePost(cmd.Context(), api.CreatePostRequest{
+			createReq := api.CreatePostRequest{
 				Text:       text,
 				Visibility: visibility,
 				Media:      flags.media,
-			})
+			}
+
+			// Image upload flow: validate file → initialize → upload binary → attach URN.
+			if imagePath != "" {
+				if _, statErr := os.Stat(imagePath); statErr != nil {
+					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+					return a.validationFailure(cmd, "cannot read image file", statErr.Error())
+				}
+				uploadURL, imageURN, initErr := transport.InitializeImageUpload(cmd.Context(), session.MemberURN)
+				if initErr != nil {
+					a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
+					return a.mapTransportError(cmd, "post create image upload init", initErr)
+				}
+				if uploadErr := transport.UploadImageBinary(cmd.Context(), uploadURL, imagePath); uploadErr != nil {
+					a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
+					return a.mapTransportError(cmd, "post create image upload binary", uploadErr)
+				}
+				createReq.MediaPayload = &api.MediaPayload{
+					ID:  imageURN,
+					Alt: strings.TrimSpace(flags.imageAlt),
+				}
+			}
+
+			summary, err := transport.CreatePost(cmd.Context(), createReq)
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.mapTransportError(cmd, "post create", err)
@@ -139,6 +178,8 @@ func newPostCreateCommand(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&flags.text, "text", "", "post text")
 	cmd.Flags().StringVar(&flags.visibility, "visibility", "PUBLIC", "PUBLIC|CONNECTIONS|LOGGED_IN")
 	cmd.Flags().StringVar(&flags.media, "media", "", "optional media path")
+	cmd.Flags().StringVar(&flags.image, "image", "", "path to a local image to attach (single image)")
+	cmd.Flags().StringVar(&flags.imageAlt, "image-alt", "", "alt text for the attached image")
 
 	return cmd
 }
@@ -290,5 +331,248 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 			return writeErr
 		},
 	}
+	return cmd
+}
+
+func newPostEditCommand(a *app) *cobra.Command {
+	var flagText string
+	var flagVisibility string
+
+	cmd := &cobra.Command{
+		Use:         "edit <post_urn>",
+		Short:       "Edit an existing post's commentary and/or visibility",
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{"audit": "mutating"},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			ikey, _ := cmd.Flags().GetString("idempotency-key")
+
+			postURN := trimmedText(args[0])
+			if postURN == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+				return a.validationFailure(cmd, "missing required argument: post_urn", "post edit requires a post URN")
+			}
+
+			textChanged := cmd.Flags().Changed("text")
+			visChanged := cmd.Flags().Changed("visibility")
+			if !textChanged && !visChanged {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+				return a.validationFailure(cmd, "no changes specified", "provide --text and/or --visibility to edit")
+			}
+
+			var editText *string
+			if textChanged {
+				t := trimmedText(flagText)
+				editText = &t
+			}
+			var editVisibility *output.Visibility
+			if visChanged {
+				v, err := output.ParseVisibility(flagVisibility)
+				if err != nil {
+					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+					return a.validationFailure(cmd, "invalid --visibility", err.Error())
+				}
+				editVisibility = &v
+			}
+
+			// Build PATCH preview for dry-run and approval.
+			patchSet := map[string]any{}
+			if editText != nil {
+				patchSet["commentary"] = *editText
+			}
+			if editVisibility != nil {
+				patchSet["visibility"] = string(*editVisibility)
+			}
+			patchBody := map[string]any{"$set": patchSet}
+
+			if a.settings.DryRun {
+				data := output.PostEditDryRunData{
+					WouldPatch: output.PostEditPreview{
+						Endpoint: "PATCH /rest/posts/" + postURN,
+						PostURN:  postURN,
+						Patch:    map[string]any{"patch": patchBody},
+					},
+					Mode: "dry_run",
+				}
+				previewBytes, _ := json.Marshal(data)
+				writeErr := a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN PATCH /rest/posts/%s", postURN))
+				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", previewBytes)
+				return writeErr
+			}
+
+			if a.settings.RequireApproval {
+				payload := output.PostEditPreview{
+					Endpoint: "PATCH /rest/posts/" + postURN,
+					PostURN:  postURN,
+					Patch:    map[string]any{"patch": patchBody},
+				}
+				return a.approvalPending(cmd, cmdID, payload, ikey)
+			}
+
+			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post edit"); hit {
+				var data output.PostEditData
+				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {
+					a.auditMutation(cmd, cmdID, "ok", "normal", cached.RequestID, cached.HTTPStatus, "", nil)
+					return a.writeSuccessFromCache(cmd, data, fmt.Sprintf("post edited (cached): %s", data.ID))
+				}
+			} else if checkErr != nil {
+				return checkErr
+			}
+
+			session, err := a.resolveSession(cmd)
+			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
+				return err
+			}
+			transport, err := a.resolveTransport(cmd.Context(), session)
+			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
+				return a.transportFailure(cmd, "failed to build transport", err.Error())
+			}
+
+			data, err := transport.EditPost(cmd.Context(), api.EditPostRequest{
+				PostURN:    postURN,
+				Text:       editText,
+				Visibility: editVisibility,
+			})
+			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
+				return a.mapTransportError(cmd, "post edit", err)
+			}
+
+			if ikey != "" {
+				resultBytes, _ := json.Marshal(data)
+				a.idempotencyRecord(cmd.Context(), idempotency.Entry{
+					TS:         a.deps.Now().UTC(),
+					Key:        ikey,
+					Command:    "post edit",
+					CommandID:  cmdID,
+					Status:     "ok",
+					HTTPStatus: 204,
+					Result:     resultBytes,
+				})
+			}
+			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("post edited: %s", data.ID))
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 204, "", nil)
+			return writeErr
+		},
+	}
+
+	cmd.Flags().StringVar(&flagText, "text", "", "new post commentary")
+	cmd.Flags().StringVar(&flagVisibility, "visibility", "", "PUBLIC|CONNECTIONS|LOGGED_IN")
+
+	return cmd
+}
+
+func newPostReshareCommand(a *app) *cobra.Command {
+	var flagText string
+	var flagVisibility string
+
+	cmd := &cobra.Command{
+		Use:         "reshare <share_urn>",
+		Short:       "Reshare an existing post with optional commentary",
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{"audit": "mutating"},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			ikey, _ := cmd.Flags().GetString("idempotency-key")
+
+			parentURN := trimmedText(args[0])
+			if parentURN == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+				return a.validationFailure(cmd, "missing required argument: share_urn", "post reshare requires a share URN")
+			}
+
+			visibility := output.VisibilityPublic
+			if cmd.Flags().Changed("visibility") {
+				v, err := output.ParseVisibility(flagVisibility)
+				if err != nil {
+					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+					return a.validationFailure(cmd, "invalid --visibility", err.Error())
+				}
+				visibility = v
+			}
+
+			commentary := strings.TrimSpace(flagText)
+
+			if a.settings.DryRun {
+				data := output.PostReshareDryRunData{
+					WouldReshare: output.PostResharePreview{
+						Endpoint:   "POST /rest/posts",
+						ParentURN:  parentURN,
+						Commentary: commentary,
+						Visibility: visibility,
+					},
+					Mode: "dry_run",
+				}
+				previewBytes, _ := json.Marshal(data)
+				writeErr := a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN POST /rest/posts reshare parent=%s", parentURN))
+				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", previewBytes)
+				return writeErr
+			}
+
+			if a.settings.RequireApproval {
+				payload := output.PostResharePreview{
+					Endpoint:   "POST /rest/posts",
+					ParentURN:  parentURN,
+					Commentary: commentary,
+					Visibility: visibility,
+				}
+				return a.approvalPending(cmd, cmdID, payload, ikey)
+			}
+
+			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post reshare"); hit {
+				var data output.PostCreateData
+				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {
+					a.auditMutation(cmd, cmdID, "ok", "normal", cached.RequestID, cached.HTTPStatus, "", nil)
+					return a.writeSuccessFromCache(cmd, data, fmt.Sprintf("post reshared (cached): %s", data.URL))
+				}
+			} else if checkErr != nil {
+				return checkErr
+			}
+
+			session, err := a.resolveSession(cmd)
+			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
+				return err
+			}
+			transport, err := a.resolveTransport(cmd.Context(), session)
+			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
+				return a.transportFailure(cmd, "failed to build transport", err.Error())
+			}
+
+			summary, err := transport.ResharePost(cmd.Context(), api.ResharePostRequest{
+				ParentURN:  parentURN,
+				Commentary: commentary,
+				Visibility: visibility,
+			})
+			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
+				return a.mapTransportError(cmd, "post reshare", err)
+			}
+
+			data := output.PostCreateData{PostSummary: *summary}
+			if ikey != "" {
+				resultBytes, _ := json.Marshal(data)
+				a.idempotencyRecord(cmd.Context(), idempotency.Entry{
+					TS:         a.deps.Now().UTC(),
+					Key:        ikey,
+					Command:    "post reshare",
+					CommandID:  cmdID,
+					Status:     "ok",
+					HTTPStatus: 201,
+					Result:     resultBytes,
+				})
+			}
+			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("post reshared: %s", summary.URL))
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 201, "", nil)
+			return writeErr
+		},
+	}
+
+	cmd.Flags().StringVar(&flagText, "text", "", "commentary to add to the reshare")
+	cmd.Flags().StringVar(&flagVisibility, "visibility", "PUBLIC", "PUBLIC|CONNECTIONS|LOGGED_IN")
+
 	return cmd
 }

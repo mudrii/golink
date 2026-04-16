@@ -122,6 +122,47 @@ func (f *fakeTransport) SocialMetadata(_ context.Context, urns []string) (*outpu
 	return &output.SocialMetadataData{Items: items, Count: len(items)}, nil
 }
 
+func (f *fakeTransport) InitializeImageUpload(_ context.Context, _ string) (string, string, error) {
+	return "https://upload.example.com/signed", "urn:li:image:fake123", nil
+}
+
+func (f *fakeTransport) UploadImageBinary(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (f *fakeTransport) EditPost(_ context.Context, req api.EditPostRequest) (*output.PostEditData, error) {
+	text := ""
+	if req.Text != nil {
+		text = *req.Text
+	}
+	visibility := output.VisibilityPublic
+	if req.Visibility != nil {
+		visibility = *req.Visibility
+	}
+	return &output.PostEditData{
+		PostSummary: output.PostSummary{
+			ID:         req.PostURN,
+			CreatedAt:  time.Date(2026, 4, 16, 9, 0, 0, 0, time.UTC),
+			Text:       text,
+			Visibility: visibility,
+			URL:        "https://www.linkedin.com/feed/update/" + req.PostURN,
+			AuthorURN:  "urn:li:person:abc123",
+		},
+		UpdatedAt: time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC),
+	}, nil
+}
+
+func (f *fakeTransport) ResharePost(_ context.Context, req api.ResharePostRequest) (*output.PostSummary, error) {
+	return &output.PostSummary{
+		ID:         "urn:li:share:reshare1",
+		CreatedAt:  time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC),
+		Text:       req.Commentary,
+		Visibility: req.Visibility,
+		URL:        "https://www.linkedin.com/feed/update/urn:li:share:reshare1",
+		AuthorURN:  "urn:li:person:abc123",
+	}, nil
+}
+
 func authenticatedStore(t *testing.T) auth.Store {
 	t.Helper()
 	store := auth.NewMemoryStore()
@@ -272,6 +313,169 @@ func TestSearchPeopleOfficialReturnsUnsupported(t *testing.T) {
 	}
 	if payload.Status != "unsupported" || payload.Data.Feature != "search people" {
 		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
+func TestPostEditDryRun(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "--dry-run", "post", "edit", "urn:li:share:42", "--text", "new body"},
+		testDepsOptions{})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Mode string `json:"mode"`
+		Data struct {
+			Mode       string `json:"mode"`
+			WouldPatch struct {
+				PostURN string `json:"post_urn"`
+			} `json:"would_patch"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Mode != "dry_run" {
+		t.Fatalf("envelope mode = %q", payload.Mode)
+	}
+	if payload.Data.WouldPatch.PostURN != "urn:li:share:42" {
+		t.Fatalf("post_urn = %q", payload.Data.WouldPatch.PostURN)
+	}
+}
+
+func TestPostEditNoFlagsFails(t *testing.T) {
+	code, _, stderr := executeTestCommand(t,
+		[]string{"--json", "post", "edit", "urn:li:share:42"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d stderr=%s", code, stderr)
+	}
+}
+
+func TestPostEditLive(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "post", "edit", "urn:li:share:42", "--text", "updated"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.ID != "urn:li:share:42" {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
+func TestPostReshareDryRun(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "--dry-run", "post", "reshare", "urn:li:share:1", "--text", "worth sharing"},
+		testDepsOptions{})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Mode string `json:"mode"`
+		Data struct {
+			WouldReshare struct {
+				ParentURN string `json:"parent_urn"`
+			} `json:"would_reshare"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Mode != "dry_run" {
+		t.Fatalf("mode = %q", payload.Mode)
+	}
+	if payload.Data.WouldReshare.ParentURN != "urn:li:share:1" {
+		t.Fatalf("parent_urn = %q", payload.Data.WouldReshare.ParentURN)
+	}
+}
+
+func TestPostReshareLive(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "post", "reshare", "urn:li:share:1", "--text", "great post"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.ID != "urn:li:share:reshare1" {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
+func TestPostCreateImageDryRun(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "--dry-run", "post", "create", "--text", "image post", "--image", "/tmp/photo.jpg", "--image-alt", "a nice photo"},
+		testDepsOptions{})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Data struct {
+			WouldPost struct {
+				WouldUpload *struct {
+					Path           string `json:"path"`
+					PlaceholderURN string `json:"placeholder_urn"`
+					Alt            string `json:"alt"`
+				} `json:"would_upload"`
+			} `json:"would_post"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Data.WouldPost.WouldUpload == nil {
+		t.Fatal("expected would_upload in dry-run output")
+	}
+	if payload.Data.WouldPost.WouldUpload.Path != "/tmp/photo.jpg" {
+		t.Fatalf("path = %q", payload.Data.WouldPost.WouldUpload.Path)
+	}
+	if payload.Data.WouldPost.WouldUpload.PlaceholderURN != "urn:li:image:<to-be-uploaded>" {
+		t.Fatalf("placeholder_urn = %q", payload.Data.WouldPost.WouldUpload.PlaceholderURN)
+	}
+}
+
+func TestPostCreateImageMissingFileFails(t *testing.T) {
+	code, _, stderr := executeTestCommand(t,
+		[]string{"--json", "post", "create", "--text", "image post", "--image", "/nonexistent-file-xyz.png"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for missing image file, stderr=%s", stderr)
 	}
 }
 

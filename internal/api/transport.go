@@ -25,6 +25,12 @@ type Transport interface {
 	GetPost(ctx context.Context, postURN string) (*output.PostGetData, error)
 	DeletePost(ctx context.Context, postURN string) (*output.PostDeleteData, error)
 
+	InitializeImageUpload(ctx context.Context, ownerURN string) (uploadURL, imageURN string, err error)
+	UploadImageBinary(ctx context.Context, uploadURL, filePath string) error
+
+	EditPost(ctx context.Context, req EditPostRequest) (*output.PostEditData, error)
+	ResharePost(ctx context.Context, req ResharePostRequest) (*output.PostSummary, error)
+
 	AddComment(ctx context.Context, postURN, text string) (*output.CommentData, error)
 	ListComments(ctx context.Context, postURN string, count, start int) (*output.CommentListData, error)
 
@@ -42,6 +48,31 @@ type CreatePostRequest struct {
 	Text       string
 	Visibility output.Visibility
 	Media      string
+	// MediaPayload carries a pre-uploaded image attachment. When non-nil,
+	// CreatePost includes a content.media block in the Posts API payload.
+	MediaPayload *MediaPayload
+}
+
+// MediaPayload describes an image attachment for a LinkedIn post.
+type MediaPayload struct {
+	// ID is the image URN returned by InitializeImageUpload.
+	ID    string
+	Title string
+	Alt   string
+}
+
+// EditPostRequest describes a partial update to an existing post.
+type EditPostRequest struct {
+	PostURN    string
+	Text       *string
+	Visibility *output.Visibility
+}
+
+// ResharePostRequest describes a reshare of an existing post.
+type ResharePostRequest struct {
+	ParentURN  string
+	Commentary string
+	Visibility output.Visibility
 }
 
 // SearchPeopleRequest describes a people search query. Only Keywords is

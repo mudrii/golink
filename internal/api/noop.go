@@ -83,6 +83,26 @@ func (t *NoopTransport) ListReactions(_ context.Context, _ string) (*output.Reac
 	return nil, t.unavailable("react list")
 }
 
+// InitializeImageUpload returns ErrFeatureUnavailable.
+func (t *NoopTransport) InitializeImageUpload(_ context.Context, _ string) (string, string, error) {
+	return "", "", t.unavailable("image upload initialize")
+}
+
+// UploadImageBinary returns ErrFeatureUnavailable.
+func (t *NoopTransport) UploadImageBinary(_ context.Context, _, _ string) error {
+	return t.unavailable("image upload binary")
+}
+
+// EditPost returns ErrFeatureUnavailable.
+func (t *NoopTransport) EditPost(_ context.Context, _ EditPostRequest) (*output.PostEditData, error) {
+	return nil, t.unavailable("post edit")
+}
+
+// ResharePost returns ErrFeatureUnavailable.
+func (t *NoopTransport) ResharePost(_ context.Context, _ ResharePostRequest) (*output.PostSummary, error) {
+	return nil, t.unavailable("post reshare")
+}
+
 // SearchPeople returns ErrFeatureUnavailable.
 func (t *NoopTransport) SearchPeople(_ context.Context, _ SearchPeopleRequest) (*output.SearchPeopleData, error) {
 	return nil, t.unavailable("search people")

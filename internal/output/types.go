@@ -167,12 +167,27 @@ const (
 	VisibilityLoggedIn Visibility = "LOGGED_IN"
 )
 
+// MediaPreview describes a media attachment in a post payload.
+type MediaPreview struct {
+	ImageURN string `json:"image_urn"`
+	Title    string `json:"title,omitempty"`
+	Alt      string `json:"alt,omitempty"`
+}
+
+// ImageUploadPreview describes the upload plan shown in a dry-run image post.
+type ImageUploadPreview struct {
+	Path           string `json:"path"`
+	PlaceholderURN string `json:"placeholder_urn"`
+	Alt            string `json:"alt,omitempty"`
+}
+
 // PostPayloadPreview describes a dry-run post request.
 type PostPayloadPreview struct {
-	Endpoint   string     `json:"endpoint"`
-	Text       string     `json:"text"`
-	Visibility Visibility `json:"visibility"`
-	Media      string     `json:"media,omitempty"`
+	Endpoint    string              `json:"endpoint"`
+	Text        string              `json:"text"`
+	Visibility  Visibility          `json:"visibility"`
+	Media       string              `json:"media,omitempty"`
+	WouldUpload *ImageUploadPreview `json:"would_upload,omitempty"`
 }
 
 // PostSummary contains the common post fields used by multiple commands.
@@ -431,6 +446,51 @@ type SocialMetadataData struct {
 
 // SocialMetadataOutput is the schema-aligned social metadata envelope.
 type SocialMetadataOutput = SuccessEnvelope[SocialMetadataData]
+
+// PostEditPreview describes a dry-run post edit (PATCH) request.
+type PostEditPreview struct {
+	Endpoint string         `json:"endpoint"`
+	PostURN  string         `json:"post_urn"`
+	Patch    map[string]any `json:"patch,omitempty"`
+}
+
+// PostEditData contains the result of an edit (PATCH) on a post.
+type PostEditData struct {
+	PostSummary
+	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
+}
+
+// PostEditDryRunData contains the dry-run preview for post edit.
+type PostEditDryRunData struct {
+	WouldPatch PostEditPreview `json:"would_patch"`
+	Mode       string          `json:"mode"`
+}
+
+// PostResharePreview describes a dry-run reshare request.
+type PostResharePreview struct {
+	Endpoint   string     `json:"endpoint"`
+	ParentURN  string     `json:"parent_urn"`
+	Commentary string     `json:"commentary,omitempty"`
+	Visibility Visibility `json:"visibility"`
+}
+
+// PostReshareDryRunData contains the dry-run preview for post reshare.
+type PostReshareDryRunData struct {
+	WouldReshare PostResharePreview `json:"would_reshare"`
+	Mode         string             `json:"mode"`
+}
+
+// PostEditOutput is the schema-aligned post edit envelope.
+type PostEditOutput = SuccessEnvelope[PostEditData]
+
+// PostEditDryRunOutput is the schema-aligned post edit dry-run envelope.
+type PostEditDryRunOutput = SuccessEnvelope[PostEditDryRunData]
+
+// PostReshareOutput is the schema-aligned post reshare envelope (reuses PostCreateData).
+type PostReshareOutput = SuccessEnvelope[PostCreateData]
+
+// PostReshareDryRunOutput is the schema-aligned post reshare dry-run envelope.
+type PostReshareDryRunOutput = SuccessEnvelope[PostReshareDryRunData]
 
 // DoctorEnvironment describes the observed environment variable state.
 type DoctorEnvironment struct {

@@ -33,7 +33,11 @@
     { "$ref": "#/$defs/approvalListOutput" },
     { "$ref": "#/$defs/approvalShowOutput" },
     { "$ref": "#/$defs/approvalStateChangeOutput" },
-    { "$ref": "#/$defs/socialMetadataOutput" }
+    { "$ref": "#/$defs/socialMetadataOutput" },
+    { "$ref": "#/$defs/postEditOutput" },
+    { "$ref": "#/$defs/postEditDryRunOutput" },
+    { "$ref": "#/$defs/postReshareOutput" },
+    { "$ref": "#/$defs/postReshareDryRunOutput" }
   ],
   "$defs": {
     "commandStatus": {
@@ -191,7 +195,8 @@
         "endpoint": { "type": "string", "minLength": 1 },
         "text": { "type": "string", "minLength": 1 },
         "visibility": { "$ref": "#/$defs/visibility" },
-        "media": { "type": "string" }
+        "media": { "type": "string" },
+        "would_upload": { "$ref": "#/$defs/imageUploadPreview" }
       }
     },
     "postSummary": {
@@ -973,6 +978,125 @@
         "status": { "const": "ok" },
         "command": { "const": "social metadata" },
         "data": { "$ref": "#/$defs/socialMetadataData" }
+      }
+    },
+    "mediaPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image_urn"],
+      "properties": {
+        "image_urn": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "alt": { "type": "string" }
+      }
+    },
+    "imageUploadPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "placeholder_urn"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "placeholder_urn": { "type": "string", "minLength": 1 },
+        "alt": { "type": "string" }
+      }
+    },
+    "postEditPreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "post_urn"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1 },
+        "post_urn": { "type": "string", "minLength": 1 },
+        "patch": { "type": "object" }
+      }
+    },
+    "postEditData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "created_at", "text", "visibility", "url", "author_urn"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "text": { "type": "string" },
+        "visibility": { "$ref": "#/$defs/visibility" },
+        "url": { "type": "string", "format": "uri" },
+        "author_urn": { "type": "string", "pattern": "^urn:li:(person|organization):" },
+        "updated_at": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "postEditDryRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["would_patch", "mode"],
+      "properties": {
+        "would_patch": { "$ref": "#/$defs/postEditPreview" },
+        "mode": { "const": "dry_run" }
+      }
+    },
+    "postResharePreview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "parent_urn"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1 },
+        "parent_urn": { "type": "string", "minLength": 1 },
+        "commentary": { "type": "string" },
+        "visibility": { "$ref": "#/$defs/visibility" }
+      }
+    },
+    "postReshareDryRunData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["would_reshare", "mode"],
+      "properties": {
+        "would_reshare": { "$ref": "#/$defs/postResharePreview" },
+        "mode": { "const": "dry_run" }
+      }
+    },
+    "postEditOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post edit" },
+        "data": { "$ref": "#/$defs/postEditData" }
+      }
+    },
+    "postEditDryRunOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post edit" },
+        "mode": { "const": "dry_run" },
+        "data": { "$ref": "#/$defs/postEditDryRunData" }
+      }
+    },
+    "postReshareOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post reshare" },
+        "data": { "$ref": "#/$defs/postCreateData" }
+      }
+    },
+    "postReshareDryRunOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "post reshare" },
+        "mode": { "const": "dry_run" },
+        "data": { "$ref": "#/$defs/postReshareDryRunData" }
       }
     }
   }

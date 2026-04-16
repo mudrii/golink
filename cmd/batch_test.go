@@ -72,6 +72,18 @@ func (c *countingTransport) SearchPeople(ctx context.Context, req api.SearchPeop
 func (c *countingTransport) SocialMetadata(ctx context.Context, urns []string) (*output.SocialMetadataData, error) {
 	return c.inner.SocialMetadata(ctx, urns)
 }
+func (c *countingTransport) InitializeImageUpload(ctx context.Context, ownerURN string) (string, string, error) {
+	return c.inner.InitializeImageUpload(ctx, ownerURN)
+}
+func (c *countingTransport) UploadImageBinary(ctx context.Context, uploadURL, filePath string) error {
+	return c.inner.UploadImageBinary(ctx, uploadURL, filePath)
+}
+func (c *countingTransport) EditPost(ctx context.Context, req api.EditPostRequest) (*output.PostEditData, error) {
+	return c.inner.EditPost(ctx, req)
+}
+func (c *countingTransport) ResharePost(ctx context.Context, req api.ResharePostRequest) (*output.PostSummary, error) {
+	return c.inner.ResharePost(ctx, req)
+}
 
 func writeOpsFile(t *testing.T, lines []string) string {
 	t.Helper()

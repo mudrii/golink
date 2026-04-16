@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -234,6 +235,249 @@ func TestOfficialSearchPeopleReturnsUnavailable(t *testing.T) {
 	_, err := o.SearchPeople(context.Background(), SearchPeopleRequest{Keywords: "engineer"})
 	if !errors.Is(err, &ErrFeatureUnavailable{}) {
 		t.Fatalf("expected feature unavailable, got %v", err)
+	}
+}
+
+func TestOfficialInitializeImageUpload(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/images" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		if r.URL.RawQuery != "action=initializeUpload" {
+			t.Fatalf("query = %q", r.URL.RawQuery)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"value": map[string]any{
+				"uploadUrl": "https://upload.example.com/signed/abc",
+				"image":     "urn:li:image:99999",
+			},
+		})
+	}, "urn:li:person:abc123")
+
+	uploadURL, imageURN, err := o.InitializeImageUpload(context.Background(), "urn:li:person:abc123")
+	if err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	if uploadURL != "https://upload.example.com/signed/abc" {
+		t.Fatalf("uploadURL = %q", uploadURL)
+	}
+	if imageURN != "urn:li:image:99999" {
+		t.Fatalf("imageURN = %q", imageURN)
+	}
+}
+
+func TestOfficialUploadImageBinary(t *testing.T) {
+	var gotMethod, gotContentType string
+	var gotBody []byte
+
+	uploadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		// Signed URL must NOT receive Authorization header.
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("upload endpoint received unexpected Authorization header")
+		}
+		gotBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer uploadServer.Close()
+
+	o, _ := newTestOfficial(t, func(_ http.ResponseWriter, _ *http.Request) {}, "urn:li:person:abc123")
+
+	// Write a small temp image file.
+	tmpFile := t.TempDir() + "/test.jpg"
+	if err := os.WriteFile(tmpFile, []byte("fake-image-bytes"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	if err := o.UploadImageBinary(context.Background(), uploadServer.URL+"/upload", tmpFile); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Fatalf("method = %q", gotMethod)
+	}
+	if gotContentType != "application/octet-stream" {
+		t.Fatalf("content-type = %q", gotContentType)
+	}
+	if string(gotBody) != "fake-image-bytes" {
+		t.Fatalf("body = %q", gotBody)
+	}
+}
+
+func TestOfficialUploadImageBinaryRejectsOversized(t *testing.T) {
+	o, _ := newTestOfficial(t, func(_ http.ResponseWriter, _ *http.Request) {}, "urn:li:person:abc123")
+
+	// Write a file > 10MB.
+	tmpFile := t.TempDir() + "/big.jpg"
+	big := make([]byte, maxImageBytes+1)
+	if err := os.WriteFile(tmpFile, big, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	err := o.UploadImageBinary(context.Background(), "https://upload.example.com/signed", tmpFile)
+	if err == nil {
+		t.Fatal("expected error for oversized file")
+	}
+	if !strings.Contains(err.Error(), "10MB") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestOfficialEditPost204(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if r.URL.EscapedPath() != "/rest/posts/urn%3Ali%3Ashare%3A42" {
+			t.Fatalf("path = %q", r.URL.EscapedPath())
+		}
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		patch, _ := payload["patch"].(map[string]any)
+		set, _ := patch["$set"].(map[string]any)
+		if set["commentary"] != "updated text" {
+			t.Fatalf("commentary = %v", set["commentary"])
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}, "urn:li:person:abc123")
+
+	text := "updated text"
+	data, err := o.EditPost(context.Background(), EditPostRequest{
+		PostURN: "urn:li:share:42",
+		Text:    &text,
+	})
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if data.ID != "urn:li:share:42" {
+		t.Fatalf("id = %q", data.ID)
+	}
+	if data.Text != "updated text" {
+		t.Fatalf("text = %q", data.Text)
+	}
+	if data.UpdatedAt.IsZero() {
+		t.Fatal("expected non-zero updated_at")
+	}
+}
+
+func TestOfficialResharePost(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		reshare, _ := payload["reshareContext"].(map[string]any)
+		if reshare["parent"] != "urn:li:share:1" {
+			t.Fatalf("reshare parent = %v", reshare["parent"])
+		}
+		if payload["commentary"] != "worth sharing" {
+			t.Fatalf("commentary = %v", payload["commentary"])
+		}
+		w.Header().Set("x-restli-id", "urn:li:share:9999")
+		w.WriteHeader(http.StatusCreated)
+	}, "urn:li:person:abc123")
+
+	summary, err := o.ResharePost(context.Background(), ResharePostRequest{
+		ParentURN:  "urn:li:share:1",
+		Commentary: "worth sharing",
+		Visibility: output.VisibilityPublic,
+	})
+	if err != nil {
+		t.Fatalf("reshare: %v", err)
+	}
+	if summary.ID != "urn:li:share:9999" {
+		t.Fatalf("id = %q", summary.ID)
+	}
+	if summary.Text != "worth sharing" {
+		t.Fatalf("text = %q", summary.Text)
+	}
+}
+
+func TestOfficialResharePostVersionGate(t *testing.T) {
+	// Build a client with version 202201 < 202209 — reshare should be blocked.
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("reshare must not hit the network when version is too old")
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		BaseURL:      server.URL,
+		APIVersion:   "202201",
+		RetryMax:     1,
+		RetryWaitMin: time.Millisecond,
+		RetryWaitMax: time.Millisecond,
+		Token: func(_ context.Context) (string, error) {
+			return "token", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	o := NewOfficial(OfficialConfig{
+		Client:    client,
+		AuthorURN: "urn:li:person:abc123",
+		Now:       func() time.Time { return time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC) },
+	})
+
+	_, reshareErr := o.ResharePost(context.Background(), ResharePostRequest{
+		ParentURN:  "urn:li:share:1",
+		Commentary: "test",
+		Visibility: output.VisibilityPublic,
+	})
+	if reshareErr == nil {
+		t.Fatal("expected version gate error")
+	}
+	fe, ok := AsFeatureUnavailable(reshareErr)
+	if !ok {
+		t.Fatalf("expected ErrFeatureUnavailable, got %T: %v", reshareErr, reshareErr)
+	}
+	if !strings.Contains(fe.Reason, "202209") {
+		t.Fatalf("reason = %q", fe.Reason)
+	}
+}
+
+func TestOfficialCreatePostWithMedia(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		content, _ := payload["content"].(map[string]any)
+		if content == nil {
+			t.Fatal("expected content block")
+		}
+		media, _ := content["media"].(map[string]any)
+		if media["id"] != "urn:li:image:99999" {
+			t.Fatalf("media id = %v", media["id"])
+		}
+		w.Header().Set("x-restli-id", "urn:li:share:imgpost1")
+		w.WriteHeader(http.StatusCreated)
+	}, "urn:li:person:abc123")
+
+	post, err := o.CreatePost(context.Background(), CreatePostRequest{
+		Text:       "image post",
+		Visibility: output.VisibilityPublic,
+		MediaPayload: &MediaPayload{
+			ID:  "urn:li:image:99999",
+			Alt: "nice photo",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if post.ID != "urn:li:share:imgpost1" {
+		t.Fatalf("id = %q", post.ID)
 	}
 }
 
