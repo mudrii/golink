@@ -53,6 +53,13 @@ type Settings struct {
 	// Output is the resolved output mode: text|json|jsonl|compact|table.
 	// Normalized from --output, --compact, and --json flags during Load().
 	Output string
+	// Audit controls whether mutating commands append to the audit log.
+	// Default true. Set via GOLINK_AUDIT env (on/off/true/false/1/0/yes/no)
+	// or `audit: false` in the config file.
+	Audit bool
+	// AuditPath is the audit log file path. Empty means use audit.ResolvePath().
+	// Override via GOLINK_AUDIT_PATH env or `audit_path` config key.
+	AuditPath string
 }
 
 // Loader resolves settings from flags, environment variables, and config files.
@@ -72,6 +79,7 @@ func NewLoader() *Loader {
 	v.SetDefault("transport", defaultTransport)
 	v.SetDefault("timeout", defaultTimeout)
 	v.SetDefault("default_visibility", defaultVisibility)
+	v.SetDefault("audit", true)
 
 	if configDir, err := os.UserConfigDir(); err == nil {
 		v.AddConfigPath(filepath.Join(configDir, defaultConfigSubdir))
@@ -116,6 +124,11 @@ func (l *Loader) Load() (Settings, error) {
 		resolvedOutput = "text"
 	}
 
+	auditEnabled, err := resolveAuditEnabled(l.v.GetString("audit"))
+	if err != nil {
+		return Settings{}, err
+	}
+
 	settings := Settings{
 		JSON:                 resolvedOutput == "json",
 		DryRun:               l.v.GetBool("dry-run"),
@@ -129,6 +142,8 @@ func (l *Loader) Load() (Settings, error) {
 		RedirectPort:         l.v.GetInt("redirect_port"),
 		DefaultVisibility:    l.v.GetString("default_visibility"),
 		Output:               resolvedOutput,
+		Audit:                auditEnabled,
+		AuditPath:            l.v.GetString("audit_path"),
 	}
 
 	if err := settings.Validate(); err != nil {
@@ -163,6 +178,20 @@ func (s Settings) Validate() error {
 	}
 
 	return nil
+}
+
+// resolveAuditEnabled converts the raw string value of the audit setting to a
+// bool. Accepts on/true/1/yes (→ true) and off/false/0/no (→ false). Empty
+// string maps to true (the default). Any other value is a validation error.
+func resolveAuditEnabled(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "on", "true", "1", "yes":
+		return true, nil
+	case "off", "false", "0", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("audit must be one of on|off|true|false|1|0|yes|no, got %q", raw)
+	}
 }
 
 func (l *Loader) readConfig() error {

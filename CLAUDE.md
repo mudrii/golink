@@ -16,6 +16,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 main.go            entry point + signal handling
 cmd/               cobra commands (auth, post, comment, react, search, version)
 internal/api/      Transport interface, official adapter, retry client, typed errors
+internal/audit/    append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
 internal/auth/     PKCE OAuth + keyring session store
 internal/config/   viper settings with env/flag/file precedence
 internal/output/   JSON envelopes, schema validator, enum parsers
@@ -52,6 +53,8 @@ Run `go vet ./...` and `go test -race ./...` after any code change. Only run `go
 | `GOLINK_API_VERSION` | no | `Linkedin-Version` header value (`YYYYMM`) |
 | `GOLINK_REDIRECT_PORT` | no | Preferred OAuth loopback port; `0` picks any free port |
 | `GOLINK_JSON`, `GOLINK_TRANSPORT` | no | Preflight overrides for `--json` / `--transport` |
+| `GOLINK_AUDIT` | no | `on` (default) or `off` to disable the audit log |
+| `GOLINK_AUDIT_PATH` | no | Override audit log file path (default: `$XDG_STATE_HOME/golink/audit.jsonl`) |
 
 No client secret. Tokens via keyring only. Config file stores non-sensitive settings.
 
@@ -116,6 +119,7 @@ Implementation:
 - **Config**: loaded and validated at startup via `internal/config.Loader`; no hardcoded runtime values
 - **HTTP**: all LinkedIn calls go through `internal/api.Client`; always close bodies (`errcheck` is enabled)
 - **Security**: `govulncheck` on dep changes and before release; gated by `make ci`
+- **Audit**: every mutating command's `RunE` must call `a.auditMutation(cmd, cmdID, status, mode, ...)` before returning. Opt-out via `GOLINK_AUDIT=off` or `audit: false` in config. Tokens/secrets must never appear in audit entries.
 
 ## Review rejects (blocking)
 

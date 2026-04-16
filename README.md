@@ -130,6 +130,26 @@ golink --output=table react list urn:li:share:123
 
 Tokens are stored in the OS keyring — never on disk or in logs.
 
+## Audit log
+
+Every mutating command (`post create`, `post delete`, `comment add`, `react add`, `auth login`, `auth logout`, `auth refresh`) appends one JSONL line to an audit log after the command completes. Read commands are not audited.
+
+**File location** (first match wins):
+
+1. `GOLINK_AUDIT_PATH=/custom/path.jsonl`
+2. `$XDG_STATE_HOME/golink/audit.jsonl`
+3. `~/.local/state/golink/audit.jsonl`
+
+The file is created with mode `0600` in a `0700` directory on first write.
+
+**Opt-out**: set `GOLINK_AUDIT=off` (or `audit: false` in `~/.config/golink/config.yaml`).
+
+**What is recorded**: timestamp, profile, transport, command, command ID, mode (`normal`/`dry_run`), outcome status, request ID when available, HTTP status, error code, and (for dry-run) the would-be payload preview.
+
+**What is never recorded**: access tokens, refresh tokens, PKCE codes or state, email addresses, or any other secrets.
+
+Audit-write failures are logged at WARN and never abort the command.
+
 ## Exit codes
 
 | Code | Meaning |

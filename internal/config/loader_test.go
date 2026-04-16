@@ -59,3 +59,40 @@ func TestLoaderLoadPrecedence(t *testing.T) {
 		t.Fatalf("expected env client id, got %q", settings.ClientID)
 	}
 }
+
+func TestLoaderAuditDefault(t *testing.T) {
+	loader := NewLoader()
+	settings, err := loader.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !settings.Audit {
+		t.Error("expected Audit to default to true")
+	}
+}
+
+func TestLoaderAuditEnvOff(t *testing.T) {
+	t.Setenv("GOLINK_AUDIT", "off")
+
+	loader := NewLoader()
+	settings, err := loader.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if settings.Audit {
+		t.Error("expected Audit to be false when GOLINK_AUDIT=off")
+	}
+}
+
+func TestLoaderAuditPathEnv(t *testing.T) {
+	t.Setenv("GOLINK_AUDIT_PATH", "/tmp/test-audit.jsonl")
+
+	loader := NewLoader()
+	settings, err := loader.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if settings.AuditPath != "/tmp/test-audit.jsonl" {
+		t.Errorf("expected AuditPath /tmp/test-audit.jsonl, got %q", settings.AuditPath)
+	}
+}

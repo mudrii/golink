@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/mudrii/golink/internal/api"
+	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/config"
 	"github.com/mudrii/golink/internal/output"
@@ -49,6 +50,7 @@ type Dependencies struct {
 	SessionStore     auth.Store
 	IsInteractive    func() bool
 	TransportFactory TransportFactory
+	AuditSink        audit.Sink
 	// TokenURL overrides the LinkedIn token endpoint; defaults to auth.TokenURL.
 	// Set in tests to point at a local httptest server.
 	TokenURL string
@@ -606,6 +608,39 @@ func (a *app) transportFailure(cmd *cobra.Command, message, details string) erro
 		errMsg:     message,
 		errCode:    string(output.ErrorCodeTransport),
 		text:       text,
+	}
+}
+
+// auditMutation builds an audit Entry from the completed command state and
+// appends it via the configured sink. Failures are logged at WARN and never
+// propagate — audit must not break the primary command.
+//
+// Call this at the end of every mutating command's RunE, passing:
+//   - status: "ok", "error", "validation_error", or "unsupported"
+//   - mode:   "normal" or "dry_run"
+//   - requestID, httpStatus, errorCode: from the transport response when known
+//   - dryRunPreview: marshalled dry-run payload, or nil
+func (a *app) auditMutation(cmd *cobra.Command, commandID, status, mode, requestID string, httpStatus int, errorCode string, dryRunPreview []byte) {
+	if a.deps.AuditSink == nil {
+		return
+	}
+	entry := audit.Entry{
+		TS:         a.deps.Now().UTC(),
+		Profile:    a.settings.Profile,
+		Transport:  a.settings.Transport,
+		Command:    commandName(cmd),
+		CommandID:  commandID,
+		Mode:       mode,
+		Status:     status,
+		RequestID:  requestID,
+		HTTPStatus: httpStatus,
+		ErrorCode:  errorCode,
+	}
+	if len(dryRunPreview) > 0 {
+		entry.DryRunPreview = dryRunPreview
+	}
+	if err := a.deps.AuditSink.Append(cmd.Context(), entry); err != nil {
+		a.logger.Warn("audit append failed", "err", err)
 	}
 }
 

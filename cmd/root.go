@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/mudrii/golink/internal/audit"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +23,12 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 
 			a.settings = settings
 			a.logger = newLogger(settings.Verbose, a.deps.Stderr)
+			if !settings.Audit {
+				// Opt-out always wins, even over an injected sink.
+				a.deps.AuditSink = audit.NoopSink{}
+			} else if a.deps.AuditSink == nil {
+				a.deps.AuditSink = audit.NewFileSink(settings.AuditPath)
+			}
 			if settings.Transport == "unofficial" && !settings.AcceptUnofficialRisk {
 				return a.validationFailure(cmd, "missing required flag: --accept-unofficial-risk", "unofficial transport requires explicit acknowledgement in the current implementation")
 			}

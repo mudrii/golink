@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
 	outputtest "github.com/mudrii/golink/internal/output"
 )
@@ -467,6 +468,7 @@ type testDepsOptions struct {
 	store            auth.Store
 	loginRunner      func(context.Context, *auth.LoginRequest, string, string, auth.LoginFlowOptions) (*auth.Session, error)
 	transportFactory TransportFactory
+	auditSink        audit.Sink
 }
 
 func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int, *bytes.Buffer, *bytes.Buffer) {
@@ -487,6 +489,7 @@ func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int,
 		SessionStore:     store,
 		IsInteractive:    func() bool { return false },
 		TransportFactory: opts.transportFactory,
+		AuditSink:        opts.auditSink,
 	}, BuildInfo{
 		Version:   "test",
 		Commit:    "abc123",
@@ -518,6 +521,7 @@ func executeTestCommandWithHTTP(t *testing.T, args []string, opts testDepsOption
 		SessionStore:     store,
 		IsInteractive:    func() bool { return false },
 		TransportFactory: opts.transportFactory,
+		AuditSink:        opts.auditSink,
 	}, BuildInfo{
 		Version:   "test",
 		Commit:    "abc123",
@@ -525,6 +529,89 @@ func executeTestCommandWithHTTP(t *testing.T, args []string, opts testDepsOption
 	})
 
 	return code, stdout, stderr
+}
+
+func TestAuditPostCreateDryRun(t *testing.T) {
+	sink := audit.NewMemorySink()
+	t.Setenv("GOLINK_AUDIT", "on")
+
+	code, _, stderr := executeTestCommand(
+		t,
+		[]string{"--json", "--dry-run", "post", "create", "--text", "Hello from golink", "--visibility", "PUBLIC"},
+		testDepsOptions{auditSink: sink},
+	)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d stderr=%s", code, stderr)
+	}
+
+	entries := sink.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Status != "ok" {
+		t.Errorf("status: want ok, got %q", e.Status)
+	}
+	if e.Mode != "dry_run" {
+		t.Errorf("mode: want dry_run, got %q", e.Mode)
+	}
+	if e.Command != "post create" {
+		t.Errorf("command: want post create, got %q", e.Command)
+	}
+	if len(e.DryRunPreview) == 0 {
+		t.Error("expected dry_run_preview to be populated")
+	}
+}
+
+func TestAuditPostCreateValidationError(t *testing.T) {
+	sink := audit.NewMemorySink()
+
+	code, _, _ := executeTestCommand(
+		t,
+		[]string{"--json", "post", "create"},
+		testDepsOptions{auditSink: sink},
+	)
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d", code)
+	}
+
+	entries := sink.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Status != "validation_error" {
+		t.Errorf("status: want validation_error, got %q", e.Status)
+	}
+	if e.Mode != "normal" {
+		t.Errorf("mode: want normal, got %q", e.Mode)
+	}
+}
+
+func TestAuditReadCommandNotAudited(t *testing.T) {
+	sink := audit.NewMemorySink()
+
+	executeTestCommand(t, []string{"--json", "version"}, testDepsOptions{auditSink: sink})
+
+	if len(sink.Entries()) != 0 {
+		t.Fatalf("expected no audit entries for read command, got %d", len(sink.Entries()))
+	}
+}
+
+func TestAuditOffSkipsMutating(t *testing.T) {
+	t.Setenv("GOLINK_AUDIT", "off")
+
+	sink := audit.NewMemorySink()
+
+	executeTestCommand(
+		t,
+		[]string{"--json", "--dry-run", "post", "create", "--text", "Hello from golink"},
+		testDepsOptions{auditSink: sink},
+	)
+
+	if len(sink.Entries()) != 0 {
+		t.Fatalf("expected no audit entries when GOLINK_AUDIT=off, got %d", len(sink.Entries()))
+	}
 }
 
 func schemaPath(t *testing.T) string {

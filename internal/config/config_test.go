@@ -2,6 +2,45 @@ package config
 
 import "testing"
 
+func TestResolveAuditEnabled(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{raw: "", want: true},
+		{raw: "on", want: true},
+		{raw: "true", want: true},
+		{raw: "1", want: true},
+		{raw: "yes", want: true},
+		{raw: "off", want: false},
+		{raw: "false", want: false},
+		{raw: "0", want: false},
+		{raw: "no", want: false},
+		{raw: "ON", want: true},
+		{raw: "OFF", want: false},
+		{raw: "garbage", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			got, err := resolveAuditEnabled(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveAuditEnabled(%q): want %v, got %v", tc.raw, tc.want, got)
+			}
+		})
+	}
+}
+
 func TestSettingsValidate(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/mudrii/golink/internal/output"
@@ -25,19 +26,25 @@ func newCommentAddCommand(a *app) *cobra.Command {
 	var text string
 
 	cmd := &cobra.Command{
-		Use:   "add <post_urn>",
-		Short: "Add a comment",
-		Args:  cobra.ExactArgs(1),
+		Use:         "add <post_urn>",
+		Short:       "Add a comment",
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+
 			postURN := trimmedText(args[0])
 			if postURN == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "missing required argument: post_urn", "comment add requires a post URN")
 			}
 			textValue := trimmedText(text)
 			if textValue == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "missing required flag: --text", "comment add requires --text")
 			}
 			if len(textValue) > 1250 {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "invalid --text length", "text must be between 1 and 1250 characters")
 			}
 
@@ -50,23 +57,31 @@ func newCommentAddCommand(a *app) *cobra.Command {
 					},
 					Mode: "dry_run",
 				}
-				return a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN POST /rest/socialActions/%s/comments", postURN))
+				preview, _ := json.Marshal(data)
+				writeErr := a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN POST /rest/socialActions/%s/comments", postURN))
+				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", preview)
+				return writeErr
 			}
 
 			session, err := a.resolveSession(cmd)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return err
 			}
 			transport, err := a.resolveTransport(cmd.Context(), session)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to build transport", err.Error())
 			}
 			comment, err := transport.AddComment(cmd.Context(), postURN, textValue)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.mapTransportError(cmd, "comment add", err)
 			}
 
-			return a.writeSuccess(cmd, output.CommentAddData{CommentData: *comment}, fmt.Sprintf("comment added: %s", comment.ID))
+			writeErr := a.writeSuccess(cmd, output.CommentAddData{CommentData: *comment}, fmt.Sprintf("comment added: %s", comment.ID))
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 201, "", nil)
+			return writeErr
 		},
 	}
 	cmd.Flags().StringVar(&text, "text", "", "comment text")

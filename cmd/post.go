@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/mudrii/golink/internal/api"
@@ -34,19 +35,25 @@ func newPostCreateCommand(a *app) *cobra.Command {
 	var flags postCreateFlags
 
 	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create a LinkedIn post",
-		Args:  cobra.NoArgs,
+		Use:         "create",
+		Short:       "Create a LinkedIn post",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+
 			text := trimmedText(flags.text)
 			if text == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "missing required flag: --text", "non-interactive mode requires --text")
 			}
 			if len(text) < 5 || len(text) > 3000 {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "invalid --text length", "text must be between 5 and 3000 characters")
 			}
 			visibility, err := output.ParseVisibility(flags.visibility)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "invalid --visibility", err.Error())
 			}
 
@@ -60,15 +67,20 @@ func newPostCreateCommand(a *app) *cobra.Command {
 					},
 					Mode: "dry_run",
 				}
-				return a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN POST /rest/posts text=%q visibility=%s", text, visibility))
+				preview, _ := json.Marshal(data)
+				writeErr := a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN POST /rest/posts text=%q visibility=%s", text, visibility))
+				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", preview)
+				return writeErr
 			}
 
 			session, err := a.resolveSession(cmd)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return err
 			}
 			transport, err := a.resolveTransport(cmd.Context(), session)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to build transport", err.Error())
 			}
 
@@ -78,11 +90,14 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				Media:      flags.media,
 			})
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.mapTransportError(cmd, "post create", err)
 			}
 
 			data := output.PostCreateData{PostSummary: *summary}
-			return a.writeSuccess(cmd, data, fmt.Sprintf("post created: %s", summary.URL))
+			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("post created: %s", summary.URL))
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 201, "", nil)
+			return writeErr
 		},
 	}
 
@@ -163,12 +178,16 @@ func newPostGetCommand(a *app) *cobra.Command {
 
 func newPostDeleteCommand(a *app) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "delete <post_urn>",
-		Short: "Delete a post",
-		Args:  cobra.ExactArgs(1),
+		Use:         "delete <post_urn>",
+		Short:       "Delete a post",
+		Args:        cobra.ExactArgs(1),
+		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+
 			postURN := trimmedText(args[0])
 			if postURN == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "missing required argument: post_urn", "post delete requires a post URN")
 			}
 			if a.settings.DryRun {
@@ -179,22 +198,30 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 					},
 					Mode: "dry_run",
 				}
-				return a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN DELETE /rest/posts/%s", postURN))
+				preview, _ := json.Marshal(data)
+				writeErr := a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN DELETE /rest/posts/%s", postURN))
+				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", preview)
+				return writeErr
 			}
 
 			session, err := a.resolveSession(cmd)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return err
 			}
 			transport, err := a.resolveTransport(cmd.Context(), session)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to build transport", err.Error())
 			}
 			data, err := transport.DeletePost(cmd.Context(), postURN)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.mapTransportError(cmd, "post delete", err)
 			}
-			return a.writeSuccess(cmd, data, fmt.Sprintf("post deleted: %s", data.ID))
+			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("post deleted: %s", data.ID))
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 204, "", nil)
+			return writeErr
 		},
 	}
 	return cmd

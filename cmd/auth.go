@@ -32,19 +32,23 @@ func newAuthCommand(a *app) *cobra.Command {
 
 func newAuthLoginCommand(a *app) *cobra.Command {
 	return &cobra.Command{
-		Use:   "login",
-		Short: "Start the LinkedIn native PKCE login flow",
-		Args:  cobra.NoArgs,
+		Use:         "login",
+		Short:       "Start the LinkedIn native PKCE login flow",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
 			loginCtx, cancel := context.WithTimeout(cmd.Context(), a.settings.Timeout)
 			defer cancel()
 
 			if a.settings.ClientID == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "missing required environment variable: GOLINK_CLIENT_ID", "auth login requires a LinkedIn app client ID")
 			}
 
 			request, err := auth.BuildLoginRequest(loginCtx, a.settings.ClientID, a.settings.RedirectPort, defaultScopes)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to prepare auth login request", err.Error())
 			}
 
@@ -67,23 +71,27 @@ func newAuthLoginCommand(a *app) *cobra.Command {
 			})
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 					return a.authFailure(cmd, "authentication timed out", err.Error())
 				}
-
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return a.authFailure(cmd, "authentication failed", err.Error())
 			}
 
 			if err := a.deps.SessionStore.SaveSession(loginCtx, *session); err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return a.authFailure(cmd, "authentication failed", fmt.Sprintf("persist session: %v", err))
 			}
 
-			return a.writeAuthLoginResult(cmd, output.AuthLoginResultData{
+			writeErr := a.writeAuthLoginResult(cmd, output.AuthLoginResultData{
 				Status:        "success",
 				Profile:       session.Profile,
 				Transport:     session.Transport,
 				ConnectedAt:   session.ConnectedAt.UTC().Format(time.RFC3339),
 				ScopesGranted: append([]string(nil), session.Scopes...),
 			})
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 0, "", nil)
+			return writeErr
 		},
 	}
 }
@@ -172,35 +180,42 @@ func (a *app) writeAuthLoginResult(cmd *cobra.Command, data output.AuthLoginResu
 
 func newAuthRefreshCommand(a *app) *cobra.Command {
 	return &cobra.Command{
-		Use:   "refresh",
-		Short: "Refresh the access token without re-authorizing",
-		Args:  cobra.NoArgs,
+		Use:         "refresh",
+		Short:       "Refresh the access token without re-authorizing",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
 			refreshCtx, cancel := context.WithTimeout(cmd.Context(), a.settings.Timeout)
 			defer cancel()
 
 			session, err := a.deps.SessionStore.LoadSession(refreshCtx, a.settings.Profile)
 			if err != nil {
 				if errors.Is(err, auth.ErrSessionNotFound) {
+					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 					return a.validationFailure(cmd,
 						fmt.Sprintf("no session for profile %s; run: golink auth login", a.settings.Profile),
 						"session not found")
 				}
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to load session", err.Error())
 			}
 
 			if session.RefreshToken == "" {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return a.authFailure(cmd,
 					"refresh tokens unavailable for this app (apply for LinkedIn programmatic refresh-token enablement or re-run auth login)",
 					"no refresh token stored")
 			}
 
 			if a.settings.ClientID == "" {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 				return a.validationFailure(cmd, "missing required environment variable: GOLINK_CLIENT_ID", "auth refresh requires a LinkedIn app client ID")
 			}
 
 			token, err := auth.RefreshAccessToken(refreshCtx, a.deps.HTTPClient, a.deps.TokenURL, a.settings.ClientID, session.RefreshToken)
 			if err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return a.authFailure(cmd, "refresh token expired; re-run: golink auth login", err.Error())
 			}
 
@@ -220,6 +235,7 @@ func newAuthRefreshCommand(a *app) *cobra.Command {
 			}
 
 			if err := a.deps.SessionStore.SaveSession(refreshCtx, *session); err != nil {
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to persist refreshed session", err.Error())
 			}
 
@@ -234,7 +250,9 @@ func newAuthRefreshCommand(a *app) *cobra.Command {
 				data.RefreshExpiresAt = session.RefreshExpiresAt.UTC().Format(time.RFC3339)
 			}
 
-			return a.writeAuthRefresh(cmd, data)
+			writeErr := a.writeAuthRefresh(cmd, data)
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 0, "", nil)
+			return writeErr
 		},
 	}
 }
@@ -256,10 +274,13 @@ func (a *app) writeAuthRefresh(cmd *cobra.Command, data output.AuthRefreshData) 
 
 func newAuthLogoutCommand(a *app) *cobra.Command {
 	return &cobra.Command{
-		Use:   "logout",
-		Short: "Clear the current profile session",
-		Args:  cobra.NoArgs,
+		Use:         "logout",
+		Short:       "Clear the current profile session",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+
 			err := a.deps.SessionStore.DeleteSession(cmd.Context(), a.settings.Profile)
 			if err != nil {
 				if errors.Is(err, auth.ErrSessionNotFound) {
@@ -269,9 +290,11 @@ func newAuthLogoutCommand(a *app) *cobra.Command {
 						Transport: a.settings.Transport,
 						Cleared:   false,
 					}
-					return a.writeSuccess(cmd, data, fmt.Sprintf("no session stored for profile %s", a.settings.Profile))
+					writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("no session stored for profile %s", a.settings.Profile))
+					a.auditMutation(cmd, cmdID, "ok", "normal", "", 0, "", nil)
+					return writeErr
 				}
-
+				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to clear session", err.Error())
 			}
 
@@ -281,7 +304,9 @@ func newAuthLogoutCommand(a *app) *cobra.Command {
 				Transport: a.settings.Transport,
 				Cleared:   true,
 			}
-			return a.writeSuccess(cmd, data, fmt.Sprintf("cleared session for profile %s", a.settings.Profile))
+			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("cleared session for profile %s", a.settings.Profile))
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 0, "", nil)
+			return writeErr
 		},
 	}
 }
