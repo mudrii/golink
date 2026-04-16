@@ -18,6 +18,7 @@ type postCreateFlags struct {
 	media      string
 	image      string
 	imageAlt   string
+	asOrg      string
 }
 
 func newPostCommand(a *app) *cobra.Command {
@@ -66,6 +67,12 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				return a.validationFailure(cmd, "invalid --visibility", err.Error())
 			}
 
+			asOrg := strings.TrimSpace(flags.asOrg)
+			if asOrg != "" && !strings.HasPrefix(asOrg, "urn:li:organization:") {
+				a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+				return a.validationFailure(cmd, "invalid --as-org value", "--as-org must be a urn:li:organization:... URN")
+			}
+
 			imagePath := strings.TrimSpace(flags.image)
 
 			if a.settings.DryRun {
@@ -74,6 +81,7 @@ func newPostCreateCommand(a *app) *cobra.Command {
 					Text:       text,
 					Visibility: visibility,
 					Media:      flags.media,
+					AuthorURN:  asOrg,
 				}
 				if imagePath != "" {
 					preview.WouldUpload = &output.ImageUploadPreview{
@@ -98,6 +106,7 @@ func newPostCreateCommand(a *app) *cobra.Command {
 					Text:       text,
 					Visibility: visibility,
 					Media:      flags.media,
+					AuthorURN:  asOrg,
 				}
 				return a.approvalPending(cmd, cmdID, payload, ikey)
 			}
@@ -118,6 +127,24 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
 				return err
 			}
+
+			// Scope check for org posting — must happen after session is resolved.
+			if asOrg != "" {
+				hasScope := false
+				for _, s := range session.Scopes {
+					if s == "w_organization_social" {
+						hasScope = true
+						break
+					}
+				}
+				if !hasScope {
+					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+					return a.validationFailure(cmd,
+						"posting as an organization requires the w_organization_social scope",
+						"run `golink auth login` with the scope added to the LinkedIn app")
+				}
+			}
+
 			transport, err := a.resolveTransport(cmd.Context(), session)
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
@@ -128,6 +155,7 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				Text:       text,
 				Visibility: visibility,
 				Media:      flags.media,
+				AuthorURN:  asOrg,
 			}
 
 			// Image upload flow: validate file → initialize → upload binary → attach URN.
@@ -171,7 +199,7 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				})
 			}
 			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("post created: %s", summary.URL))
-			a.auditMutation(cmd, cmdID, "ok", "normal", "", 201, "", nil)
+			a.auditMutationWithAuthor(cmd, cmdID, "ok", "normal", "", 201, "", nil, asOrg)
 			return writeErr
 		},
 	}
@@ -181,6 +209,7 @@ func newPostCreateCommand(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&flags.media, "media", "", "optional media path")
 	cmd.Flags().StringVar(&flags.image, "image", "", "path to a local image to attach (single image)")
 	cmd.Flags().StringVar(&flags.imageAlt, "image-alt", "", "alt text for the attached image")
+	cmd.Flags().StringVar(&flags.asOrg, "as-org", "", "post as an organization (urn:li:organization:...); requires w_organization_social scope")
 
 	return cmd
 }

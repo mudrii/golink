@@ -40,6 +40,8 @@ type Transport interface {
 	SearchPeople(ctx context.Context, req SearchPeopleRequest) (*output.SearchPeopleData, error)
 
 	SocialMetadata(ctx context.Context, urns []string) (*output.SocialMetadataData, error)
+
+	ListOrganizations(ctx context.Context) (*output.OrgListData, error)
 }
 
 // CreatePostRequest captures the inputs needed to publish a post via the
@@ -51,6 +53,10 @@ type CreatePostRequest struct {
 	// MediaPayload carries a pre-uploaded image attachment. When non-nil,
 	// CreatePost includes a content.media block in the Posts API payload.
 	MediaPayload *MediaPayload
+	// AuthorURN overrides the session member URN when posting as an
+	// organization. Must be "urn:li:organization:..." when set; empty means
+	// use the member URN from the session.
+	AuthorURN string
 }
 
 // MediaPayload describes an image attachment for a LinkedIn post.

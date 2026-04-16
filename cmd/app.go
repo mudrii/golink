@@ -752,6 +752,12 @@ func (a *app) idempotencyRecord(ctx context.Context, entry idempotency.Entry) {
 //   - requestID, httpStatus, errorCode: from the transport response when known
 //   - dryRunPreview: marshalled dry-run payload, or nil
 func (a *app) auditMutation(cmd *cobra.Command, commandID, status, mode, requestID string, httpStatus int, errorCode string, dryRunPreview []byte) {
+	a.auditMutationWithAuthor(cmd, commandID, status, mode, requestID, httpStatus, errorCode, dryRunPreview, "")
+}
+
+// auditMutationWithAuthor is like auditMutation but also records an optional
+// authorURN in the audit entry (used when posting as an organization).
+func (a *app) auditMutationWithAuthor(cmd *cobra.Command, commandID, status, mode, requestID string, httpStatus int, errorCode string, dryRunPreview []byte, authorURN string) {
 	if a.deps.AuditSink == nil {
 		return
 	}
@@ -766,6 +772,7 @@ func (a *app) auditMutation(cmd *cobra.Command, commandID, status, mode, request
 		RequestID:  requestID,
 		HTTPStatus: httpStatus,
 		ErrorCode:  errorCode,
+		AuthorURN:  authorURN,
 	}
 	if len(dryRunPreview) > 0 {
 		entry.DryRunPreview = dryRunPreview

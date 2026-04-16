@@ -78,6 +78,7 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 		newScheduleCommand(a),
 		newPlanCommand(a),
 		newExecuteCommand(a),
+		newOrgCommand(a),
 	)
 
 	return rootCmd, nil

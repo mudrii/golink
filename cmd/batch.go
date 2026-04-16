@@ -328,6 +328,7 @@ func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool
 		Text:       text,
 		Visibility: visibility,
 		Media:      stringArg(op.Args, "media"),
+		AuthorURN:  stringArg(op.Args, "author_urn"),
 	})
 	if err != nil {
 		return nil, cmdID, 0, err

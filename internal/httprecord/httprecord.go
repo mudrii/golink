@@ -29,12 +29,12 @@ const maxInlineBodyBytes = 1024
 
 // Entry is one line of a JSONL cassette file.
 type Entry struct {
-	Seq         int             `json:"seq"`
-	Method      string          `json:"method"`
-	URL         string          `json:"url"`
-	BodySHA256  string          `json:"body_sha256"`
-	RequestBody string          `json:"request_body,omitempty"`
-	Response    EntryResponse   `json:"response"`
+	Seq         int           `json:"seq"`
+	Method      string        `json:"method"`
+	URL         string        `json:"url"`
+	BodySHA256  string        `json:"body_sha256"`
+	RequestBody string        `json:"request_body,omitempty"`
+	Response    EntryResponse `json:"response"`
 }
 
 // EntryResponse holds the recorded HTTP response.

@@ -47,8 +47,37 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `plan comment add` | ✅ | unit | Generate a comment-add plan document |
 | `plan react add` | ✅ | unit | Generate a react-add plan document |
 | `execute <plan.json>` | ✅ | unit | Execute a golink.plan/v1 document via the normal Transport path |
+| `org list` | ✅ | httptest | List organizations where the session member is ADMINISTRATOR; requires `w_organization_social` scope |
+| `post create --as-org <urn>` | ✅ | httptest | Post as an organization; requires `w_organization_social` scope |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
+
+## Organization posting
+
+To post as a LinkedIn organization page you need the `w_organization_social` scope added to your LinkedIn app. The session member must be an ADMINISTRATOR of the organization.
+
+```sh
+# List organizations you administer
+golink --json org list
+
+# Post as an org page
+golink --json post create \
+  --text "Exciting news from Acme Corp" \
+  --as-org urn:li:organization:12345678
+
+# Preview without sending
+golink --json --dry-run post create \
+  --text "Draft post" \
+  --as-org urn:li:organization:12345678
+
+# Plan for review, then execute
+golink --json plan post create \
+  --text "Queued org post" \
+  --as-org urn:li:organization:12345678 > plan.json
+golink execute plan.json
+```
+
+`golink doctor` reflects `org list` and `post create --as-org` availability based on whether `w_organization_social` is in the session scopes.
 
 ## Scheduling
 

@@ -85,6 +85,10 @@ func (c *countingTransport) ResharePost(ctx context.Context, req api.ResharePost
 	return c.inner.ResharePost(ctx, req)
 }
 
+func (c *countingTransport) ListOrganizations(ctx context.Context) (*output.OrgListData, error) {
+	return c.inner.ListOrganizations(ctx)
+}
+
 func writeOpsFile(t *testing.T, lines []string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ops.jsonl")

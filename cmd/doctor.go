@@ -39,6 +39,8 @@ var featureRules = []featureRule{
 	{command: "react add", requiredScope: "w_member_social"},
 	{command: "react list", fixedReason: "r_member_social is closed by LinkedIn (entitlement-gated)"},
 	{command: "search people", fixedReason: "not available on official transport (use --transport=unofficial)"},
+	{command: "org list", requiredScope: "w_organization_social"},
+	{command: "post create --as-org", requiredScope: "w_organization_social"},
 }
 
 func newDoctorCommand(a *app) *cobra.Command {

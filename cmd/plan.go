@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/mudrii/golink/internal/output"
@@ -55,13 +56,16 @@ func newPlanPostCommand(a *app) *cobra.Command {
 }
 
 func newPlanPostCreateCommand(a *app) *cobra.Command {
-	var text, visibility, media string
+	var text, visibility, media, asOrg string
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Plan a post create",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if text == "" {
 				return a.validationFailure(cmd, "missing required flag: --text", "")
+			}
+			if asOrg != "" && !strings.HasPrefix(asOrg, "urn:li:organization:") {
+				return a.validationFailure(cmd, "invalid --as-org value", "--as-org must be a urn:li:organization:... URN")
 			}
 			args := map[string]any{"text": text}
 			if visibility != "" {
@@ -70,12 +74,16 @@ func newPlanPostCreateCommand(a *app) *cobra.Command {
 			if media != "" {
 				args["media"] = media
 			}
+			if asOrg != "" {
+				args["author_urn"] = asOrg
+			}
 			return emitPlan(a, cmd, "post create", args)
 		},
 	}
 	cmd.Flags().StringVar(&text, "text", "", "post body text")
 	cmd.Flags().StringVar(&visibility, "visibility", "PUBLIC", "visibility: PUBLIC|CONNECTIONS|LOGGED_IN")
 	cmd.Flags().StringVar(&media, "media", "", "media URN")
+	cmd.Flags().StringVar(&asOrg, "as-org", "", "post as an organization (urn:li:organization:...)")
 	return cmd
 }
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -112,9 +113,17 @@ func (o *Official) CreatePost(ctx context.Context, req CreatePostRequest) (*outp
 	if strings.TrimSpace(req.Text) == "" {
 		return nil, fmt.Errorf("post text must not be empty")
 	}
-	author := strings.TrimSpace(o.authorURN)
+
+	// Determine effective author: request override takes precedence over session URN.
+	author := strings.TrimSpace(req.AuthorURN)
+	if author == "" {
+		author = strings.TrimSpace(o.authorURN)
+	}
 	if author == "" {
 		return nil, &Error{Status: 401, Code: "UNAUTHORIZED", Message: "author urn not resolved from session"}
+	}
+	if !strings.HasPrefix(author, "urn:li:person:") && !strings.HasPrefix(author, "urn:li:organization:") {
+		return nil, fmt.Errorf("author urn must start with urn:li:person: or urn:li:organization")
 	}
 
 	visibility := req.Visibility
@@ -756,6 +765,99 @@ func parseInt(s string) (int, bool) {
 		n = n*10 + int(c-'0')
 	}
 	return n, true
+}
+
+// orgListMaxConcurrency is the maximum number of parallel org-detail lookups.
+const orgListMaxConcurrency = 5
+
+// ListOrganizations returns organizations where the authenticated member holds
+// an ADMINISTRATOR role. It calls organizationAcls to list URNs then
+// hydrates each org name via /rest/organizations/{id} (up to orgListMaxConcurrency
+// concurrent requests). Per-org lookup failures are silently tolerated — the
+// item is included with Name left empty.
+func (o *Official) ListOrganizations(ctx context.Context) (*output.OrgListData, error) {
+	const path = "/rest/organizationAcls?q=roleAssignee&role=ADMINISTRATOR&state=APPROVED"
+	resp, err := o.do(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list organization acls: %w", err)
+	}
+
+	var raw struct {
+		Elements []struct {
+			Organization string `json:"organization"`
+			Role         string `json:"role"`
+			State        string `json:"state"`
+		} `json:"elements"`
+	}
+	if err := resp.UnmarshalJSON(&raw); err != nil {
+		return nil, fmt.Errorf("decode organization acls: %w", err)
+	}
+
+	items := make([]output.OrgListItem, len(raw.Elements))
+	for i, el := range raw.Elements {
+		items[i] = output.OrgListItem{
+			URN:   el.Organization,
+			Role:  el.Role,
+			State: el.State,
+		}
+	}
+
+	// Hydrate org names in parallel with bounded concurrency.
+	sem := make(chan struct{}, orgListMaxConcurrency)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	for i := range items {
+		idx := i
+		urn := items[i].URN
+		if urn == "" {
+			continue
+		}
+		// Extract numeric org ID from URN "urn:li:organization:12345".
+		parts := strings.Split(urn, ":")
+		if len(parts) < 4 {
+			continue
+		}
+		orgID := parts[3]
+		if _, err := strconv.Atoi(orgID); err != nil {
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			orgResp, lookupErr := o.do(ctx, "GET", "/rest/organizations/"+id, nil)
+			if lookupErr != nil {
+				return
+			}
+			var orgRaw struct {
+				LocalizedName string `json:"localizedName"`
+				VanityName    string `json:"vanityName"`
+				LogoV2        *struct {
+					Original string `json:"original"`
+				} `json:"logoV2"`
+			}
+			if decErr := orgResp.UnmarshalJSON(&orgRaw); decErr != nil {
+				return
+			}
+			mu.Lock()
+			items[i].Name = orgRaw.LocalizedName
+			items[i].Vanity = orgRaw.VanityName
+			if orgRaw.LogoV2 != nil {
+				items[i].LogoURL = orgRaw.LogoV2.Original
+			}
+			mu.Unlock()
+		}(idx, orgID)
+	}
+	wg.Wait()
+
+	return &output.OrgListData{
+		Count: len(items),
+		Items: items,
+	}, nil
 }
 
 // ResharePost creates a new post that reshares an existing share URN.

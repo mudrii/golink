@@ -112,3 +112,8 @@ func (t *NoopTransport) SearchPeople(_ context.Context, _ SearchPeopleRequest) (
 func (t *NoopTransport) SocialMetadata(_ context.Context, _ []string) (*output.SocialMetadataData, error) {
 	return nil, t.unavailable("social metadata")
 }
+
+// ListOrganizations returns ErrFeatureUnavailable.
+func (t *NoopTransport) ListOrganizations(_ context.Context) (*output.OrgListData, error) {
+	return nil, t.unavailable("org list")
+}

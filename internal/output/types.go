@@ -188,6 +188,7 @@ type PostPayloadPreview struct {
 	Visibility  Visibility          `json:"visibility"`
 	Media       string              `json:"media,omitempty"`
 	WouldUpload *ImageUploadPreview `json:"would_upload,omitempty"`
+	AuthorURN   string              `json:"author_urn,omitempty"`
 }
 
 // PostSummary contains the common post fields used by multiple commands.
@@ -886,3 +887,41 @@ type PlanData struct {
 
 // PlanOutput is the schema-aligned plan envelope.
 type PlanOutput = SuccessEnvelope[PlanData]
+
+// OrgListItem describes one organization where the member holds an admin role.
+type OrgListItem struct {
+	URN     string `json:"urn"`
+	Role    string `json:"role"`
+	State   string `json:"state"`
+	Name    string `json:"name,omitempty"`
+	Vanity  string `json:"vanity_name,omitempty"`
+	LogoURL string `json:"logo_url,omitempty"`
+}
+
+// OrgListData is the payload returned by org list.
+type OrgListData struct {
+	Count int           `json:"count"`
+	Items []OrgListItem `json:"items"`
+}
+
+// OrgListOutput is the schema-aligned org list envelope.
+type OrgListOutput = SuccessEnvelope[OrgListData]
+
+// Headers implements TabularData for OrgListData.
+func (d OrgListData) Headers() []string {
+	return []string{"URN", "ROLE", "STATE", "NAME"}
+}
+
+// Rows implements TabularData for OrgListData.
+func (d OrgListData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.Items))
+	for _, item := range d.Items {
+		rows = append(rows, []string{
+			item.URN,
+			item.Role,
+			item.State,
+			item.Name,
+		})
+	}
+	return rows
+}

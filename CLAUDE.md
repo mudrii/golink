@@ -4,7 +4,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ## Architecture
 
-- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`; top-level: `doctor` (read-only, not audited), `version`
+- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`; org subcommands: `list` (requires `w_organization_social`); top-level: `doctor` (read-only, not audited), `version`
 - **Transport seam**: `internal/api/transport.go` (interface) → `official.go` (live LinkedIn adapter) / `noop.go` (fallback). Every CLI command goes through `Transport`.
 - **HTTP**: `internal/api/client.go` — `go-retryablehttp`, 429/5xx retry, `Linkedin-Version` + `X-Restli-Protocol-Version` headers, rate-limit parsing, typed `api.Error`
 - **Auth**: native PKCE OAuth (`internal/auth/oauth.go`) + `go-keyring` session store — tokens never touch disk or logs
@@ -14,7 +14,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ```
 main.go                entry point + signal handling
-cmd/                   cobra commands (auth, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
+cmd/                   cobra commands (auth, org, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
 internal/api/          Transport interface, official adapter, retry client, typed errors
 internal/approval/     approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
@@ -115,7 +115,7 @@ Five modes via `--output`: `text` (default), `json`, `jsonl`, `compact`, `table`
 
 Implementation:
 - `internal/config/config.go`: `Settings.Output` holds the resolved mode; `Settings.JSON` kept in sync for back-compat checks.
-- `internal/output/render.go`: `RenderSuccess` / `RenderError` dispatch on mode. `TabularData` interface (`Headers() []string`, `Rows() [][]string`) implemented by `PostListData`, `CommentListData`, `ReactionListData`, `SearchPeopleData`.
+- `internal/output/render.go`: `RenderSuccess` / `RenderError` dispatch on mode. `TabularData` interface (`Headers() []string`, `Rows() [][]string`) implemented by `PostListData`, `CommentListData`, `ReactionListData`, `SearchPeopleData`, `OrgListData`.
 - `internal/output/format.go`: `BuildBase` and `ExtractErrorEnvelope` helpers used by `cmd/app.go`.
 - `cmd/app.go:writeSuccess` / `writeDryRun` / `writeUnsupported`: delegate to renderer for non-json modes.
 - `cmd/app.go:preflightFlags`: also parses `--output` and `--compact` so pre-cobra failures can honor the mode.

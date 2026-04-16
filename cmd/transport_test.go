@@ -163,6 +163,16 @@ func (f *fakeTransport) ResharePost(_ context.Context, req api.ResharePostReques
 	}, nil
 }
 
+func (f *fakeTransport) ListOrganizations(_ context.Context) (*output.OrgListData, error) {
+	return &output.OrgListData{
+		Count: 2,
+		Items: []output.OrgListItem{
+			{URN: "urn:li:organization:111", Role: "ADMINISTRATOR", State: "APPROVED", Name: "Acme Corp"},
+			{URN: "urn:li:organization:222", Role: "ADMINISTRATOR", State: "APPROVED", Name: "Beta Ltd"},
+		},
+	}, nil
+}
+
 func authenticatedStore(t *testing.T) auth.Store {
 	t.Helper()
 	store := auth.NewMemoryStore()
