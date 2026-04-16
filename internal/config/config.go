@@ -41,6 +41,7 @@ var validOutputModes = map[string]struct{}{
 type Settings struct {
 	JSON                 bool
 	DryRun               bool
+	RequireApproval      bool
 	Verbose              bool
 	Profile              string
 	Transport            string
@@ -132,6 +133,7 @@ func (l *Loader) Load() (Settings, error) {
 	settings := Settings{
 		JSON:                 resolvedOutput == "json",
 		DryRun:               l.v.GetBool("dry-run"),
+		RequireApproval:      l.v.GetBool("require-approval"),
 		Verbose:              l.v.GetBool("verbose"),
 		Profile:              l.v.GetString("profile"),
 		Transport:            l.v.GetString("transport"),

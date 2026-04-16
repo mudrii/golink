@@ -75,6 +75,16 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				return writeErr
 			}
 
+			if a.settings.RequireApproval {
+				payload := output.PostPayloadPreview{
+					Endpoint:   "POST /rest/posts",
+					Text:       text,
+					Visibility: visibility,
+					Media:      flags.media,
+				}
+				return a.approvalPending(cmd, cmdID, payload, ikey)
+			}
+
 			// Idempotency check — replay cached result if available.
 			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post create"); hit {
 				var data output.PostCreateData
@@ -228,6 +238,14 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 				writeErr := a.writeDryRun(cmd, data, fmt.Sprintf("DRY RUN DELETE /rest/posts/%s", postURN))
 				a.auditMutation(cmd, cmdID, "ok", "dry_run", "", 0, "", preview)
 				return writeErr
+			}
+
+			if a.settings.RequireApproval {
+				payload := output.PostDeletePreview{
+					Endpoint: "DELETE /rest/posts/" + postURN,
+					PostURN:  postURN,
+				}
+				return a.approvalPending(cmd, cmdID, payload, ikey)
 			}
 
 			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post delete"); hit {

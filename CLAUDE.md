@@ -14,8 +14,9 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ```
 main.go                entry point + signal handling
-cmd/                   cobra commands (auth, post, comment, react, search, batch, doctor, version)
+cmd/                   cobra commands (auth, post, comment, react, search, batch, approval, doctor, version)
 internal/api/          Transport interface, official adapter, retry client, typed errors
+internal/approval/     approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
 internal/auth/         PKCE OAuth + keyring session store
 internal/config/       viper settings with env/flag/file precedence
@@ -66,6 +67,7 @@ No client secret. Tokens via keyring only. Config file stores non-sensitive sett
 |---|---|
 | 0 | Success (includes `status:"unsupported"` envelopes) |
 | 2 | Validation / usage error |
+| 3 | Approval required — command staged; use `approval grant` + `approval run` |
 | 4 | Auth / session error |
 | 5 | API / transport error |
 
@@ -95,7 +97,7 @@ Only when it measurably helps. Every goroutine needs a shutdown path. Context ca
 
 - Table-driven with `t.Run`; helpers call `t.Helper()`
 - Fakes over mocks; test behavior not implementation
-- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Now`, `HTTPClient`, `SessionStore`, `BrowserOpener`, `IsInteractive`, `TransportFactory`, `IdempotencyStore`)
+- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Now`, `HTTPClient`, `SessionStore`, `BrowserOpener`, `IsInteractive`, `TransportFactory`, `IdempotencyStore`, `ApprovalStore`)
 - `t.Context()` for test-lifetime context; `t.Setenv` for env; `httptest.NewServer` for transport tests
 - `cmp.Equal` / `cmp.Diff` for nested struct comparisons
 - **Schema-first contract changes**: edit `schemas/golink-output.schema.json` + add a fixture in `internal/output/schema_test.go` FIRST, then change the Go struct and command code. The schema is the contract.

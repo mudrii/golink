@@ -65,6 +65,15 @@ func newCommentAddCommand(a *app) *cobra.Command {
 				return writeErr
 			}
 
+			if a.settings.RequireApproval {
+				payload := output.CommentAddPreview{
+					Endpoint: "POST /rest/socialActions/" + postURN + "/comments",
+					PostURN:  postURN,
+					Text:     textValue,
+				}
+				return a.approvalPending(cmd, cmdID, payload, ikey)
+			}
+
 			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "comment add"); hit {
 				var data output.CommentAddData
 				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {

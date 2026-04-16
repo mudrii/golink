@@ -30,6 +30,13 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `doctor` | ✅ | ✅ | Env vars, session state, userinfo probe, feature map, audit log state |
 | `version` | ✅ | ✅ | Reports build metadata |
 | `batch <ops.jsonl>` | ✅ | httptest | Reads JSONL ops file, dispatches each op, streams JSONL results; supports `--fail-fast`, `--strict`, `--concurrency`, `--resume` |
+| `approval list` | ✅ | unit | List staged approval entries |
+| `approval show <id>` | ✅ | unit | Show a single staged entry |
+| `approval grant <id>` | ✅ | unit | Approve a pending entry |
+| `approval deny <id>` | ✅ | unit | Deny a pending entry |
+| `approval run <id>` | ✅ | unit | Execute an approved entry via transport |
+| `approval cancel <id>` | ✅ | unit | Remove a pending entry |
+| `--require-approval` | ✅ | unit | Stage any mutating command for review (exits 3) |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
 
@@ -199,6 +206,46 @@ Each op may include a per-op `dry_run: true` field to preview that op without ex
 
 Resume: on each successful op, a line is appended to `<ops.jsonl>.progress`. Re-running with `--resume` skips those lines and emits `from_cache:true` envelopes for them.
 
+## Approval gate
+
+`--require-approval` stages a mutating command for operator review instead of executing it immediately. The command exits with code 3 and emits a `pending_approval` JSON envelope. An operator then uses the `approval` subcommands to review and dispatch.
+
+```sh
+# Stage a post for review
+golink --json post create --text "Hello from golink" --require-approval
+# exits 3; envelope contains staged_path and command_id
+
+# List pending approvals
+golink --json approval list
+
+# Inspect a specific entry
+golink --json approval show <command_id>
+
+# Approve and dispatch
+golink --json approval grant <command_id>
+golink --json approval run <command_id>
+
+# Or reject / cancel
+golink --json approval deny <command_id>
+golink --json approval cancel <command_id>
+```
+
+Supported on: `post create`, `post delete`, `comment add`, `react add`.
+
+Also supported in batch ops via `require_approval: true` on a per-op basis:
+
+```jsonl
+{"command":"post create","args":{"text":"Hello batch"},"require_approval":true}
+```
+
+**Store location** (first match wins):
+
+1. `GOLINK_APPROVAL_DIR=/custom/dir`
+2. `$XDG_STATE_HOME/golink/approvals/`
+3. `~/.local/state/golink/approvals/`
+
+Each staged entry is a `<command_id>.<state>.json` file. States: `pending` → `approved` → `completed` (or `denied`/cancelled via removal).
+
 ## Audit log
 
 Every mutating command (`post create`, `post delete`, `comment add`, `react add`, `auth login`, `auth logout`, `auth refresh`) appends one JSONL line to an audit log after the command completes. Read commands are not audited.
@@ -275,6 +322,7 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 |---|---|
 | 0 | Success |
 | 2 | Validation / usage error |
+| 3 | Approval required — command staged; use `approval grant` + `approval run` |
 | 4 | Auth / session error |
 | 5 | API / transport error |
 
@@ -291,8 +339,10 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 
 ```
 main.go                    entry point + signal handling
-cmd/                       cobra commands (auth, post, comment, react, search, batch, doctor, version)
+cmd/                       cobra commands (auth, post, comment, react, search, batch, approval, doctor, version)
 internal/api/              Transport interface + official LinkedIn adapter + NoopTransport
+internal/approval/         approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
+internal/audit/            append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
 internal/auth/             PKCE login, keyring-backed session store
 internal/config/           viper-backed settings with env/flag/file precedence
 internal/idempotency/      append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)

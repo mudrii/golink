@@ -28,12 +28,16 @@
     { "$ref": "#/$defs/unsupportedOutput" },
     { "$ref": "#/$defs/validationErrorOutput" },
     { "$ref": "#/$defs/errorOutput" },
-    { "$ref": "#/$defs/batchOpResultOutput" }
+    { "$ref": "#/$defs/batchOpResultOutput" },
+    { "$ref": "#/$defs/approvalPendingOutput" },
+    { "$ref": "#/$defs/approvalListOutput" },
+    { "$ref": "#/$defs/approvalShowOutput" },
+    { "$ref": "#/$defs/approvalStateChangeOutput" }
   ],
   "$defs": {
     "commandStatus": {
       "type": "string",
-      "enum": ["ok", "unsupported", "error", "validation_error"]
+      "enum": ["ok", "unsupported", "error", "validation_error", "pending_approval"]
     },
     "errorCode": {
       "type": "string",
@@ -785,6 +789,122 @@
         "error": { "type": "string", "minLength": 1 },
         "code": { "const": "VALIDATION_ERROR" },
         "details": { "type": "string" }
+      }
+    },
+    "approvalState": {
+      "type": "string",
+      "enum": ["pending", "approved", "denied", "completed"]
+    },
+    "approvalPayload": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Matches the dry-run preview shape for the staged command."
+    },
+    "approvalPendingData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "command", "staged_at", "staged_path", "payload"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "staged_at": { "$ref": "#/$defs/dateTime" },
+        "staged_path": { "type": "string", "minLength": 1 },
+        "payload": { "$ref": "#/$defs/approvalPayload" },
+        "idempotency_key": { "type": "string" }
+      }
+    },
+    "approvalPendingOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "pending_approval" },
+        "data": { "$ref": "#/$defs/approvalPendingData" }
+      }
+    },
+    "approvalListItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "command", "state", "staged_at"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/approvalState" },
+        "staged_at": { "$ref": "#/$defs/dateTime" },
+        "idempotency_key": { "type": "string" }
+      }
+    },
+    "approvalListData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/approvalListItem" } }
+      }
+    },
+    "approvalListOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "approval list" },
+        "data": { "$ref": "#/$defs/approvalListData" }
+      }
+    },
+    "approvalEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "command", "created_at", "transport", "profile", "payload"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "created_at": { "$ref": "#/$defs/dateTime" },
+        "transport": { "type": "string" },
+        "profile": { "type": "string" },
+        "payload": { "$ref": "#/$defs/approvalPayload" },
+        "idempotency_key": { "type": "string" }
+      }
+    },
+    "approvalShowData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry", "state"],
+      "properties": {
+        "entry": { "$ref": "#/$defs/approvalEntry" },
+        "state": { "$ref": "#/$defs/approvalState" }
+      }
+    },
+    "approvalShowOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "approval show" },
+        "data": { "$ref": "#/$defs/approvalShowData" }
+      }
+    },
+    "approvalStateChangeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "state"],
+      "properties": {
+        "command_id": { "type": "string", "minLength": 1 },
+        "state": { "$ref": "#/$defs/approvalState" }
+      }
+    },
+    "approvalStateChangeOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "data": { "$ref": "#/$defs/approvalStateChangeData" }
       }
     },
     "batchOpResultData": {

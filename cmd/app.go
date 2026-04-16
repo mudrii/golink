@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/mudrii/golink/internal/api"
+	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/config"
@@ -53,6 +54,7 @@ type Dependencies struct {
 	TransportFactory TransportFactory
 	AuditSink        audit.Sink
 	IdempotencyStore idempotency.Store
+	ApprovalStore    approval.Store
 	// TokenURL overrides the LinkedIn token endpoint; defaults to auth.TokenURL.
 	// Set in tests to point at a local httptest server.
 	TokenURL string
@@ -222,6 +224,9 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 	}
 	if deps.IdempotencyStore == nil {
 		deps.IdempotencyStore = idempotency.NewFileStore("")
+	}
+	if deps.ApprovalStore == nil {
+		deps.ApprovalStore = approval.NewFileStore("")
 	}
 
 	return deps
@@ -637,6 +642,68 @@ func (a *app) transportFailure(cmd *cobra.Command, message, details string) erro
 		errMsg:     message,
 		errCode:    string(output.ErrorCodeTransport),
 		text:       text,
+	}
+}
+
+// ErrApprovalRequired is returned by approvalPending to signal exit code 3.
+var ErrApprovalRequired = errors.New("approval required")
+
+// approvalPending stages an approval entry and returns the commandFailure that
+// causes the process to exit with code 3. The caller returns this error directly.
+func (a *app) approvalPending(cmd *cobra.Command, cmdID string, payload any, ikey string) error {
+	now := a.deps.Now().UTC()
+	entry := approval.Entry{
+		CommandID:      cmdID,
+		Command:        commandName(cmd),
+		CreatedAt:      now,
+		Transport:      a.settings.Transport,
+		Profile:        a.settings.Profile,
+		Payload:        payload,
+		IdempotencyKey: ikey,
+	}
+	path, stageErr := a.deps.ApprovalStore.Stage(cmd.Context(), entry)
+	if stageErr != nil {
+		return a.transportFailure(cmd, "approval stage failed", stageErr.Error())
+	}
+
+	a.auditMutation(cmd, cmdID, "pending_approval", "normal", "", 0, "", nil)
+
+	data := output.ApprovalPendingData{
+		CommandID:      cmdID,
+		Command:        commandName(cmd),
+		StagedAt:       now,
+		StagedPath:     path,
+		Payload:        payload,
+		IdempotencyKey: ikey,
+	}
+
+	envelope := output.ApprovalPendingOutput{
+		BaseEnvelope: output.BaseEnvelope{
+			Status:      output.StatusPendingApproval,
+			CommandID:   cmdID,
+			Command:     commandName(cmd),
+			Transport:   a.settings.Transport,
+			GeneratedAt: now,
+		},
+		Data: data,
+	}
+
+	mode := a.settings.Output
+	var writeErr error
+	switch mode {
+	case output.ModeJSON:
+		writeErr = output.WriteJSON(a.deps.Stdout, envelope)
+	default:
+		writeErr = output.WriteJSON(a.deps.Stdout, envelope)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("write approval pending: %w", writeErr)
+	}
+
+	return &commandFailure{
+		outputMode: a.settings.Output,
+		exitCode:   3,
+		text:       fmt.Sprintf("approval required: staged at %s", path),
 	}
 }
 

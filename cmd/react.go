@@ -61,6 +61,15 @@ func newReactAddCommand(a *app) *cobra.Command {
 				return writeErr
 			}
 
+			if a.settings.RequireApproval {
+				payload := output.ReactionAddPreview{
+					Endpoint: "POST /rest/reactions",
+					PostURN:  postURN,
+					Type:     parsed,
+				}
+				return a.approvalPending(cmd, cmdID, payload, ikey)
+			}
+
 			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "react add"); hit {
 				var data output.ReactionAddData
 				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {

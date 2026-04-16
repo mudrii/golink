@@ -57,6 +57,7 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 	flags.Bool("accept-unofficial-risk", false, "acknowledge unofficial transport risk")
 	flags.Duration("timeout", 30*time.Second, "request timeout")
 	flags.String("idempotency-key", "", "client-side dedup key for mutating commands (24h window)")
+	flags.Bool("require-approval", false, "stage the request for operator approval instead of executing (exits 3)")
 
 	if err := a.loader.BindFlags(flags); err != nil {
 		return nil, err
@@ -72,6 +73,7 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 		newVersionCommand(a),
 		newDoctorCommand(a),
 		newBatchCommand(a),
+		newApprovalCommand(a),
 	)
 
 	return rootCmd, nil

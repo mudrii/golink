@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mudrii/golink/internal/api"
+	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/spf13/cobra"
@@ -27,10 +28,11 @@ const (
 
 // batchOp is one line of the ops JSONL input file.
 type batchOp struct {
-	Command        string         `json:"command"`
-	Args           map[string]any `json:"args"`
-	IdempotencyKey string         `json:"idempotency_key,omitempty"`
-	DryRun         *bool          `json:"dry_run,omitempty"`
+	Command         string         `json:"command"`
+	Args            map[string]any `json:"args"`
+	IdempotencyKey  string         `json:"idempotency_key,omitempty"`
+	DryRun          *bool          `json:"dry_run,omitempty"`
+	RequireApproval bool           `json:"require_approval,omitempty"`
 }
 
 // progressEntry is one line of the sidecar progress file.
@@ -250,6 +252,11 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) error 
 		dryRun = *op.DryRun
 	}
 
+	requireApproval := op.RequireApproval
+	if requireApproval {
+		return r.emitPendingApproval(ctx, lineNum, op)
+	}
+
 	var opErr error
 	var resultData any
 	var cmdID string
@@ -405,6 +412,110 @@ func (r *batchRunner) runReactAdd(ctx context.Context, op batchOp, dryRun bool) 
 		return nil, cmdID, 0, err
 	}
 	return output.ReactionAddData{ReactionData: *data, TargetURN: postURN}, cmdID, 201, nil
+}
+
+// emitPendingApproval stages the op and emits a pending_approval result.
+// Batch continues with remaining ops — pending approval is not an error.
+func (r *batchRunner) emitPendingApproval(ctx context.Context, lineNum int, op batchOp) error {
+	cmdName := strings.TrimSpace(op.Command)
+	cmdID := newCommandID(cmdName, r.a.deps.Now().UTC())
+	now := r.a.deps.Now().UTC()
+
+	// Build the preview payload reusing the same helpers as dry-run.
+	var payload any
+	switch cmdName {
+	case "post create":
+		text := stringArg(op.Args, "text")
+		visStr := stringArg(op.Args, "visibility")
+		if visStr == "" {
+			visStr = "PUBLIC"
+		}
+		vis, _ := output.ParseVisibility(visStr)
+		payload = output.PostPayloadPreview{
+			Endpoint:   "POST /rest/posts",
+			Text:       text,
+			Visibility: vis,
+			Media:      stringArg(op.Args, "media"),
+		}
+	case "post delete":
+		postURN := stringArg(op.Args, "post_urn")
+		payload = output.PostDeletePreview{
+			Endpoint: "DELETE /rest/posts/" + postURN,
+			PostURN:  postURN,
+		}
+	case "comment add":
+		postURN := stringArg(op.Args, "post_urn")
+		payload = output.CommentAddPreview{
+			Endpoint: "POST /rest/socialActions/" + postURN + "/comments",
+			PostURN:  postURN,
+			Text:     stringArg(op.Args, "text"),
+		}
+	case "react add":
+		postURN := stringArg(op.Args, "post_urn")
+		rtStr := stringArg(op.Args, "type")
+		if rtStr == "" {
+			rtStr = string(output.ReactionLike)
+		}
+		rt, _ := output.ParseReactionType(rtStr)
+		payload = output.ReactionAddPreview{
+			Endpoint: "POST /rest/reactions",
+			PostURN:  postURN,
+			Type:     rt,
+		}
+	default:
+		payload = op.Args
+	}
+
+	entry := approval.Entry{
+		CommandID:      cmdID,
+		Command:        cmdName,
+		CreatedAt:      now,
+		Transport:      r.a.settings.Transport,
+		Profile:        r.a.settings.Profile,
+		Payload:        payload,
+		IdempotencyKey: op.IdempotencyKey,
+	}
+	stagedPath, stageErr := r.a.deps.ApprovalStore.Stage(ctx, entry)
+	if stageErr != nil {
+		return r.emitValidationError(lineNum, op, fmt.Sprintf("approval stage failed: %s", stageErr))
+	}
+
+	r.a.auditMutation(r.cmd, cmdID, "pending_approval", "normal", "", 0, "", nil)
+
+	pendingData := output.ApprovalPendingData{
+		CommandID:      cmdID,
+		Command:        cmdName,
+		StagedAt:       now,
+		StagedPath:     stagedPath,
+		Payload:        payload,
+		IdempotencyKey: op.IdempotencyKey,
+	}
+
+	meta := r.a.metadata(r.cmd, output.StatusPendingApproval)
+	meta.Command = "batch"
+	meta.CommandID = cmdID
+
+	result := output.BatchOpResultData{
+		Line:           lineNum,
+		Status:         output.StatusPendingApproval,
+		Command:        op.Command,
+		IdempotencyKey: op.IdempotencyKey,
+		CommandID:      cmdID,
+		Data:           pendingData,
+	}
+	envelope := output.SuccessEnvelope[output.BatchOpResultData]{
+		BaseEnvelope: output.BaseEnvelope{
+			Status:      output.StatusPendingApproval,
+			CommandID:   cmdID,
+			Command:     "batch",
+			Transport:   r.a.settings.Transport,
+			GeneratedAt: now,
+		},
+		Data: result,
+	}
+	r.writeEnvelope(envelope)
+	// pending_approval is not an error; return nil so batch continues.
+	return nil
 }
 
 // emitSuccess writes a batch op result envelope for a successful op.

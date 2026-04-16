@@ -17,6 +17,8 @@ const (
 	StatusError CommandStatus = "error"
 	// StatusValidation indicates argument or usage validation failed.
 	StatusValidation CommandStatus = "validation_error"
+	// StatusPendingApproval indicates the command was staged for operator approval.
+	StatusPendingApproval CommandStatus = "pending_approval"
 )
 
 // ErrorCode classifies machine-readable command failures.
@@ -479,6 +481,57 @@ type DoctorData struct {
 
 // DoctorOutput is the schema-aligned doctor envelope.
 type DoctorOutput = SuccessEnvelope[DoctorData]
+
+// ApprovalPendingData is returned when --require-approval stages a request.
+type ApprovalPendingData struct {
+	CommandID      string    `json:"command_id"`
+	Command        string    `json:"command"`
+	StagedAt       time.Time `json:"staged_at"`
+	StagedPath     string    `json:"staged_path"`
+	Payload        any       `json:"payload"`
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+}
+
+// ApprovalListItem is one row from approval list.
+type ApprovalListItem struct {
+	CommandID      string    `json:"command_id"`
+	Command        string    `json:"command"`
+	State          string    `json:"state"`
+	StagedAt       time.Time `json:"staged_at"`
+	IdempotencyKey string    `json:"idempotency_key,omitempty"`
+}
+
+// ApprovalListData is the payload for approval list.
+type ApprovalListData struct {
+	Items []ApprovalListItem `json:"items"`
+}
+
+// ApprovalShowData is the payload for approval show.
+type ApprovalShowData struct {
+	Entry any    `json:"entry"`
+	State string `json:"state"`
+}
+
+// ApprovalStateChangeData is returned by grant/deny/cancel/run.
+type ApprovalStateChangeData struct {
+	CommandID string `json:"command_id"`
+	State     string `json:"state"`
+}
+
+// ApprovalPendingOutput is the schema-aligned pending_approval envelope.
+type ApprovalPendingOutput struct {
+	BaseEnvelope
+	Data ApprovalPendingData `json:"data"`
+}
+
+// ApprovalListOutput is the schema-aligned approval list envelope.
+type ApprovalListOutput = SuccessEnvelope[ApprovalListData]
+
+// ApprovalShowOutput is the schema-aligned approval show envelope.
+type ApprovalShowOutput = SuccessEnvelope[ApprovalShowData]
+
+// ApprovalStateChangeOutput is the schema-aligned state-change envelope.
+type ApprovalStateChangeOutput = SuccessEnvelope[ApprovalStateChangeData]
 
 // BatchOpResultData is one line of batch output — the per-op result envelope.
 type BatchOpResultData struct {

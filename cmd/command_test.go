@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
 	outputtest "github.com/mudrii/golink/internal/output"
@@ -469,6 +470,7 @@ type testDepsOptions struct {
 	loginRunner      func(context.Context, *auth.LoginRequest, string, string, auth.LoginFlowOptions) (*auth.Session, error)
 	transportFactory TransportFactory
 	auditSink        audit.Sink
+	approvalStore    approval.Store
 }
 
 func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int, *bytes.Buffer, *bytes.Buffer) {
@@ -480,6 +482,10 @@ func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int,
 	if store == nil {
 		store = auth.NewMemoryStore()
 	}
+	astore := opts.approvalStore
+	if astore == nil {
+		astore = approval.NewMemoryStore()
+	}
 
 	code := ExecuteContext(context.Background(), args, Dependencies{
 		Stdout:           stdout,
@@ -490,6 +496,7 @@ func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int,
 		IsInteractive:    func() bool { return false },
 		TransportFactory: opts.transportFactory,
 		AuditSink:        opts.auditSink,
+		ApprovalStore:    astore,
 	}, BuildInfo{
 		Version:   "test",
 		Commit:    "abc123",
@@ -510,6 +517,10 @@ func executeTestCommandWithHTTP(t *testing.T, args []string, opts testDepsOption
 	if store == nil {
 		store = auth.NewMemoryStore()
 	}
+	astore := opts.approvalStore
+	if astore == nil {
+		astore = approval.NewMemoryStore()
+	}
 
 	code := ExecuteContext(context.Background(), args, Dependencies{
 		Stdout:           stdout,
@@ -522,6 +533,7 @@ func executeTestCommandWithHTTP(t *testing.T, args []string, opts testDepsOption
 		IsInteractive:    func() bool { return false },
 		TransportFactory: opts.transportFactory,
 		AuditSink:        opts.auditSink,
+		ApprovalStore:    astore,
 	}, BuildInfo{
 		Version:   "test",
 		Commit:    "abc123",
