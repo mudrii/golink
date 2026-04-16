@@ -69,6 +69,39 @@ golink --json post list --count 10
 
 Use `--dry-run` to preview the exact request payload without sending it. Supported on `post create`, `post delete`, `comment add`, `react add`.
 
+## Output modes
+
+golink supports five output modes via `--output`:
+
+| Flag | Mode | Description |
+|---|---|---|
+| _(default)_ | `text` | Human-readable plain text |
+| `--json` or `--output=json` | `json` | Full JSON envelope, schema-validated |
+| `--output=jsonl` | `jsonl` | One JSON object per line; list commands emit one item per line, scalar commands emit a single envelope line |
+| `--output=compact` or `--compact` | `compact` | Stripped envelope (no `command_id`, `generated_at`, `rate_limit`); useful for LLM context budgets |
+| `--output=table` | `table` | Tabwriter-based columnar output for list commands; scalar commands fall back to text |
+
+```sh
+# Schema-validated JSON (agent contract — byte-for-byte stable)
+golink --output=json post list --count 5
+golink --json post list --count 5   # identical to above
+
+# Compact — lower token cost for LLM pipelines
+golink --compact auth status
+golink --output=compact post list --count 5
+
+# JSONL — one object per line, pipeable to jq / stream processors
+golink --output=jsonl post list --count 10 | jq '.text'
+
+# Table — human-readable columns
+golink --output=table post list --count 10
+golink --output=table react list urn:li:share:123
+```
+
+**Schema validation**: only `--output=json` (and legacy `--json`) is validated against `schemas/golink-output.schema.json`. Compact, JSONL, and table modes are lossy renderings of the same data.
+
+**Precedence**: `--compact` > `--output` > `--json` > text default. Using both `--compact` and `--output=<non-compact>` is a validation error.
+
 ## Transport modes
 
 | Mode | Flag | Behavior |

@@ -41,6 +41,8 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 
 	flags := rootCmd.PersistentFlags()
 	flags.Bool("json", false, "emit strict JSON output")
+	flags.String("output", "", "output mode: text|json|jsonl|compact|table")
+	flags.Bool("compact", false, "shorthand for --output=compact")
 	flags.Bool("dry-run", false, "preview mutating requests without executing them")
 	flags.BoolP("verbose", "v", false, "enable debug logging")
 	flags.String("profile", "default", "profile name")

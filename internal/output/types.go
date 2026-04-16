@@ -1,6 +1,7 @@
 package output
 
 import (
+	"strconv"
 	"time"
 )
 
@@ -406,3 +407,80 @@ type UnsupportedOutput = SuccessEnvelope[UnsupportedPayload]
 
 // VersionOutput is the schema-aligned version envelope.
 type VersionOutput = SuccessEnvelope[VersionData]
+
+// Headers implements TabularData for PostListData.
+func (d PostListData) Headers() []string {
+	return []string{"URN", "VISIBILITY", "CREATED", "LIKES", "COMMENTS", "TEXT"}
+}
+
+// Rows implements TabularData for PostListData.
+func (d PostListData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.Items))
+	for _, item := range d.Items {
+		rows = append(rows, []string{
+			item.ID,
+			string(item.Visibility),
+			item.CreatedAt.UTC().Format(time.DateOnly),
+			strconv.Itoa(item.LikeCount),
+			strconv.Itoa(item.CommentCount),
+			item.Text,
+		})
+	}
+	return rows
+}
+
+// Headers implements TabularData for CommentListData.
+func (d CommentListData) Headers() []string {
+	return []string{"ID", "AUTHOR", "CREATED", "TEXT"}
+}
+
+// Rows implements TabularData for CommentListData.
+func (d CommentListData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.Items))
+	for _, item := range d.Items {
+		rows = append(rows, []string{
+			item.ID,
+			item.Author,
+			item.CreatedAt.UTC().Format(time.DateOnly),
+			item.Text,
+		})
+	}
+	return rows
+}
+
+// Headers implements TabularData for ReactionListData.
+func (d ReactionListData) Headers() []string {
+	return []string{"ACTOR", "TYPE", "AT"}
+}
+
+// Rows implements TabularData for ReactionListData.
+func (d ReactionListData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.Items))
+	for _, item := range d.Items {
+		rows = append(rows, []string{
+			item.Actor,
+			string(item.Type),
+			item.At.UTC().Format(time.DateOnly),
+		})
+	}
+	return rows
+}
+
+// Headers implements TabularData for SearchPeopleData.
+func (d SearchPeopleData) Headers() []string {
+	return []string{"URN", "NAME", "HEADLINE", "LOCATION"}
+}
+
+// Rows implements TabularData for SearchPeopleData.
+func (d SearchPeopleData) Rows() [][]string {
+	rows := make([][]string, 0, len(d.People))
+	for _, p := range d.People {
+		rows = append(rows, []string{
+			p.URN,
+			p.FullName,
+			p.Headline,
+			p.Location,
+		})
+	}
+	return rows
+}

@@ -75,3 +75,23 @@ func base(meta EnvelopeMeta) BaseEnvelope {
 		RateLimit:   meta.RateLimit,
 	}
 }
+
+// BuildBase constructs a BaseEnvelope from EnvelopeMeta.
+// Used by callers that need the raw base for renderer dispatch.
+func BuildBase(meta EnvelopeMeta) BaseEnvelope {
+	return base(meta)
+}
+
+// ExtractErrorEnvelope extracts the BaseEnvelope, error message, and code from
+// a typed error payload (ErrorEnvelope or ValidationErrorEnvelope). Returns
+// false if the payload is not a recognised error type.
+func ExtractErrorEnvelope(payload any) (env BaseEnvelope, msg, code string, ok bool) {
+	switch v := payload.(type) {
+	case ErrorEnvelope:
+		return v.BaseEnvelope, v.Error, string(v.Code), true
+	case ValidationErrorEnvelope:
+		return v.BaseEnvelope, v.Error, string(v.Code), true
+	default:
+		return BaseEnvelope{}, "", "", false
+	}
+}

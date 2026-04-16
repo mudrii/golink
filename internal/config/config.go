@@ -29,6 +29,14 @@ var validTransports = map[string]struct{}{
 	"auto":       {},
 }
 
+var validOutputModes = map[string]struct{}{
+	"text":    {},
+	"json":    {},
+	"jsonl":   {},
+	"compact": {},
+	"table":   {},
+}
+
 // Settings contains merged runtime configuration.
 type Settings struct {
 	JSON                 bool
@@ -42,6 +50,9 @@ type Settings struct {
 	APIVersion           string
 	RedirectPort         int
 	DefaultVisibility    string
+	// Output is the resolved output mode: text|json|jsonl|compact|table.
+	// Normalized from --output, --compact, and --json flags during Load().
+	Output string
 }
 
 // Loader resolves settings from flags, environment variables, and config files.
@@ -84,8 +95,29 @@ func (l *Loader) Load() (Settings, error) {
 		return Settings{}, err
 	}
 
+	compact := l.v.GetBool("compact")
+	outputFlag := strings.TrimSpace(l.v.GetString("output"))
+	jsonFlag := l.v.GetBool("json")
+
+	// Resolve output mode: --compact > --output > --json > text default.
+	// Reject --compact combined with an explicit non-compact --output.
+	var resolvedOutput string
+	switch {
+	case compact:
+		if outputFlag != "" && outputFlag != "compact" {
+			return Settings{}, fmt.Errorf("--compact and --output=%s are mutually exclusive", outputFlag)
+		}
+		resolvedOutput = "compact"
+	case outputFlag != "":
+		resolvedOutput = outputFlag
+	case jsonFlag:
+		resolvedOutput = "json"
+	default:
+		resolvedOutput = "text"
+	}
+
 	settings := Settings{
-		JSON:                 l.v.GetBool("json"),
+		JSON:                 resolvedOutput == "json",
 		DryRun:               l.v.GetBool("dry-run"),
 		Verbose:              l.v.GetBool("verbose"),
 		Profile:              l.v.GetString("profile"),
@@ -96,6 +128,7 @@ func (l *Loader) Load() (Settings, error) {
 		APIVersion:           l.v.GetString("api_version"),
 		RedirectPort:         l.v.GetInt("redirect_port"),
 		DefaultVisibility:    l.v.GetString("default_visibility"),
+		Output:               resolvedOutput,
 	}
 
 	if err := settings.Validate(); err != nil {
@@ -121,6 +154,12 @@ func (s Settings) Validate() error {
 
 	if s.Timeout > maximumTimeout {
 		return fmt.Errorf("timeout must be %s or less", maximumTimeout)
+	}
+
+	if s.Output != "" {
+		if _, ok := validOutputModes[s.Output]; !ok {
+			return fmt.Errorf("output must be one of text|json|jsonl|compact|table")
+		}
 	}
 
 	return nil

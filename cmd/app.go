@@ -63,10 +63,14 @@ type app struct {
 }
 
 type commandFailure struct {
-	jsonMode bool
-	exitCode int
-	payload  any
-	text     string
+	jsonMode   bool
+	outputMode string
+	exitCode   int
+	payload    any
+	// errMsg and errCode are used by the renderer for compact/jsonl modes.
+	errMsg  string
+	errCode string
+	text    string
 }
 
 func (e *commandFailure) Error() string {
@@ -81,10 +85,11 @@ func Execute(ctx context.Context, buildInfo BuildInfo) int {
 // ExecuteContext runs golink with injected dependencies for tests or embedding.
 func ExecuteContext(ctx context.Context, args []string, deps Dependencies, buildInfo BuildInfo) int {
 	normalized := normalizeDependencies(deps)
-	jsonMode, transport := preflightFlags(args)
+	jsonMode, transport, outputMode := preflightFlags(args)
 	preloadedSettings := config.Settings{
 		JSON:      jsonMode,
 		Transport: transport,
+		Output:    outputMode,
 	}
 	application := &app{
 		buildInfo: buildInfo,
@@ -110,29 +115,67 @@ func ExecuteContext(ctx context.Context, args []string, deps Dependencies, build
 
 	if failure == nil {
 		message := err.Error()
-		if application.settings.JSON {
+		mode := application.settings.Output
+		switch mode {
+		case output.ModeJSON:
 			envelope := output.ValidationError(application.metadata(bestEffortCommand(rootCmd, args), output.StatusValidation), message, "")
 			if writeErr := output.WriteJSON(normalized.Stderr, envelope); writeErr != nil {
 				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
 				return 1
 			}
-
 			return 2
+		case output.ModeCompact, output.ModeJSONL:
+			meta := application.metadata(bestEffortCommand(rootCmd, args), output.StatusValidation)
+			base := output.BuildBase(meta)
+			if writeErr := output.RenderError(normalized.Stderr, mode, base, message, string(output.ErrorCodeValidation), message); writeErr != nil {
+				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
+				return 1
+			}
+			return 2
+		default:
+			_, _ = fmt.Fprintln(normalized.Stderr, message)
+			return 1
 		}
-
-		_, _ = fmt.Fprintln(normalized.Stderr, message)
-		return 1
 	}
 
-	if failure.jsonMode && failure.payload != nil {
-		if writeErr := output.WriteJSON(normalized.Stderr, failure.payload); writeErr != nil {
-			_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
-			return 1
+	mode := failure.outputMode
+	if mode == "" {
+		// Fall back: use jsonMode for backward-compat with tests that set it directly.
+		if failure.jsonMode {
+			mode = output.ModeJSON
+		} else {
+			mode = output.ModeText
 		}
-	} else if failure.text != "" {
-		if _, writeErr := fmt.Fprintln(normalized.Stderr, failure.text); writeErr != nil {
-			_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
-			return 1
+	}
+
+	switch mode {
+	case output.ModeJSON:
+		if failure.payload != nil {
+			if writeErr := output.WriteJSON(normalized.Stderr, failure.payload); writeErr != nil {
+				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
+				return 1
+			}
+		}
+	case output.ModeCompact, output.ModeJSONL:
+		if failure.payload != nil {
+			// Extract base envelope from the typed payload for the renderer.
+			if env, msg, code, ok := output.ExtractErrorEnvelope(failure.payload); ok {
+				if writeErr := output.RenderError(normalized.Stderr, mode, env, msg, code, failure.text); writeErr != nil {
+					_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
+					return 1
+				}
+			} else {
+				_, _ = fmt.Fprintln(normalized.Stderr, failure.text)
+			}
+		} else if failure.text != "" {
+			_, _ = fmt.Fprintln(normalized.Stderr, failure.text)
+		}
+	default:
+		if failure.text != "" {
+			if _, writeErr := fmt.Fprintln(normalized.Stderr, failure.text); writeErr != nil {
+				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
+				return 1
+			}
 		}
 	}
 
@@ -300,38 +343,37 @@ func (a *app) metadata(cmd *cobra.Command, status output.CommandStatus) output.E
 }
 
 func (a *app) writeSuccess(cmd *cobra.Command, data any, text string) error {
-	if a.settings.JSON {
-		envelope := output.Success(a.metadata(cmd, output.StatusOK), data)
+	meta := a.metadata(cmd, output.StatusOK)
+	mode := a.settings.Output
+	if mode == output.ModeJSON {
+		envelope := output.Success(meta, data)
 		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
 			return fmt.Errorf("write stdout: %w", err)
 		}
-
 		return nil
 	}
-
-	if _, err := fmt.Fprintln(a.deps.Stdout, text); err != nil {
+	base := output.BuildBase(meta)
+	if err := output.RenderSuccess(a.deps.Stdout, mode, base, data, text); err != nil {
 		return fmt.Errorf("write stdout: %w", err)
 	}
-
 	return nil
 }
 
 func (a *app) writeDryRun(cmd *cobra.Command, data any, text string) error {
 	meta := a.metadata(cmd, output.StatusOK)
 	meta.Mode = "dry_run"
-	if a.settings.JSON {
+	mode := a.settings.Output
+	if mode == output.ModeJSON {
 		envelope := output.Success(meta, data)
 		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
 			return fmt.Errorf("write stdout: %w", err)
 		}
-
 		return nil
 	}
-
-	if _, err := fmt.Fprintln(a.deps.Stdout, text); err != nil {
+	base := output.BuildBase(meta)
+	if err := output.RenderSuccess(a.deps.Stdout, mode, base, data, text); err != nil {
 		return fmt.Errorf("write stdout: %w", err)
 	}
-
 	return nil
 }
 
@@ -452,10 +494,13 @@ func (a *app) forbiddenFailure(cmd *cobra.Command, message, details string) erro
 		text += ": " + details
 	}
 	return &commandFailure{
-		jsonMode: a.settings.JSON,
-		exitCode: 4,
-		payload:  output.Error(meta, output.ErrorCodeForbidden, message, details),
-		text:     text,
+		jsonMode:   a.settings.JSON,
+		outputMode: a.settings.Output,
+		exitCode:   4,
+		payload:    output.Error(meta, output.ErrorCodeForbidden, message, details),
+		errMsg:     message,
+		errCode:    string(output.ErrorCodeForbidden),
+		text:       text,
 	}
 }
 
@@ -466,10 +511,13 @@ func (a *app) notFoundFailure(cmd *cobra.Command, message, details string) error
 		text += ": " + details
 	}
 	return &commandFailure{
-		jsonMode: a.settings.JSON,
-		exitCode: 5,
-		payload:  output.Error(meta, output.ErrorCodeNotFound, message, details),
-		text:     text,
+		jsonMode:   a.settings.JSON,
+		outputMode: a.settings.Output,
+		exitCode:   5,
+		payload:    output.Error(meta, output.ErrorCodeNotFound, message, details),
+		errMsg:     message,
+		errCode:    string(output.ErrorCodeNotFound),
+		text:       text,
 	}
 }
 
@@ -480,27 +528,30 @@ func (a *app) rateLimitFailure(cmd *cobra.Command, message, details string) erro
 		text += ": " + details
 	}
 	return &commandFailure{
-		jsonMode: a.settings.JSON,
-		exitCode: 5,
-		payload:  output.Error(meta, output.ErrorCodeRateLimited, message, details),
-		text:     text,
+		jsonMode:   a.settings.JSON,
+		outputMode: a.settings.Output,
+		exitCode:   5,
+		payload:    output.Error(meta, output.ErrorCodeRateLimited, message, details),
+		errMsg:     message,
+		errCode:    string(output.ErrorCodeRateLimited),
+		text:       text,
 	}
 }
 
 func (a *app) writeUnsupported(cmd *cobra.Command, payload output.UnsupportedPayload, text string) error {
-	if a.settings.JSON {
-		envelope := output.Success(a.metadata(cmd, output.StatusUnsupported), payload)
+	meta := a.metadata(cmd, output.StatusUnsupported)
+	mode := a.settings.Output
+	if mode == output.ModeJSON {
+		envelope := output.Success(meta, payload)
 		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
 			return fmt.Errorf("write stdout: %w", err)
 		}
-
 		return nil
 	}
-
-	if _, err := fmt.Fprintln(a.deps.Stdout, text); err != nil {
+	base := output.BuildBase(meta)
+	if err := output.RenderSuccess(a.deps.Stdout, mode, base, payload, text); err != nil {
 		return fmt.Errorf("write stdout: %w", err)
 	}
-
 	return nil
 }
 
@@ -512,10 +563,13 @@ func (a *app) validationFailure(cmd *cobra.Command, message, details string) err
 	}
 
 	return &commandFailure{
-		jsonMode: a.settings.JSON,
-		exitCode: 2,
-		payload:  output.ValidationError(meta, message, details),
-		text:     text,
+		jsonMode:   a.settings.JSON,
+		outputMode: a.settings.Output,
+		exitCode:   2,
+		payload:    output.ValidationError(meta, message, details),
+		errMsg:     message,
+		errCode:    string(output.ErrorCodeValidation),
+		text:       text,
 	}
 }
 
@@ -527,10 +581,13 @@ func (a *app) authFailure(cmd *cobra.Command, message, details string) error {
 	}
 
 	return &commandFailure{
-		jsonMode: a.settings.JSON,
-		exitCode: 4,
-		payload:  output.Error(meta, output.ErrorCodeUnauthorized, message, details),
-		text:     text,
+		jsonMode:   a.settings.JSON,
+		outputMode: a.settings.Output,
+		exitCode:   4,
+		payload:    output.Error(meta, output.ErrorCodeUnauthorized, message, details),
+		errMsg:     message,
+		errCode:    string(output.ErrorCodeUnauthorized),
+		text:       text,
 	}
 }
 
@@ -542,18 +599,22 @@ func (a *app) transportFailure(cmd *cobra.Command, message, details string) erro
 	}
 
 	return &commandFailure{
-		jsonMode: a.settings.JSON,
-		exitCode: 5,
-		payload:  output.Error(meta, output.ErrorCodeTransport, message, details),
-		text:     text,
+		jsonMode:   a.settings.JSON,
+		outputMode: a.settings.Output,
+		exitCode:   5,
+		payload:    output.Error(meta, output.ErrorCodeTransport, message, details),
+		errMsg:     message,
+		errCode:    string(output.ErrorCodeTransport),
+		text:       text,
 	}
 }
 
 // preflightFlags inspects just the flags we need before Cobra has parsed
-// anything (so flag errors can still honor --json). We reuse pflag with
+// anything (so flag errors can still honor --json/--output). We reuse pflag with
 // ContinueOnError so unknown flags from subcommands don't abort the preflight,
 // and fall back to env vars so preflight state matches the final config.
-func preflightFlags(args []string) (jsonMode bool, transport string) {
+// Precedence: --compact > --output > --json > text default.
+func preflightFlags(args []string) (jsonMode bool, transport, outputMode string) {
 	transport = "official"
 	if envValue, ok := os.LookupEnv("GOLINK_JSON"); ok {
 		if value, err := strconv.ParseBool(envValue); err == nil && value {
@@ -566,11 +627,15 @@ func preflightFlags(args []string) (jsonMode bool, transport string) {
 		}
 	}
 
+	var compact bool
+	var outputFlag string
 	fs := pflag.NewFlagSet("preflight", pflag.ContinueOnError)
 	fs.ParseErrorsAllowlist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
 	fs.BoolVar(&jsonMode, "json", jsonMode, "")
 	fs.StringVar(&transport, "transport", transport, "")
+	fs.StringVar(&outputFlag, "output", "", "")
+	fs.BoolVar(&compact, "compact", false, "")
 	_ = fs.Parse(args)
 
 	switch transport {
@@ -578,7 +643,20 @@ func preflightFlags(args []string) (jsonMode bool, transport string) {
 	default:
 		transport = "official"
 	}
-	return jsonMode, transport
+
+	// Resolve output mode using same precedence as config.Loader.
+	switch {
+	case compact:
+		outputMode = "compact"
+	case outputFlag != "":
+		outputMode = outputFlag
+	case jsonMode:
+		outputMode = "json"
+	default:
+		outputMode = "text"
+	}
+
+	return jsonMode, transport, outputMode
 }
 
 func bestEffortCommand(root *cobra.Command, args []string) *cobra.Command {
@@ -601,6 +679,7 @@ func commandLookupArgs(args []string) []string {
 		"--profile":   {},
 		"--timeout":   {},
 		"--transport": {},
+		"--output":    {},
 	}
 
 	for i := 0; i < len(args); i++ {

@@ -95,6 +95,21 @@ Only when it measurably helps. Every goroutine needs a shutdown path. Context ca
 - `cmp.Equal` / `cmp.Diff` for nested struct comparisons
 - **Schema-first contract changes**: edit `schemas/golink-output.schema.json` + add a fixture in `internal/output/schema_test.go` FIRST, then change the Go struct and command code. The schema is the contract.
 
+## Output modes
+
+Five modes via `--output`: `text` (default), `json`, `jsonl`, `compact`, `table`. Also `--compact` (shorthand for `--output=compact`) and `--json` (shorthand for `--output=json`, preserved for back-compat).
+
+**Precedence**: `--compact` > `--output` > `--json` > text default. `--compact` combined with `--output=<non-compact>` is a validation error.
+
+Implementation:
+- `internal/config/config.go`: `Settings.Output` holds the resolved mode; `Settings.JSON` kept in sync for back-compat checks.
+- `internal/output/render.go`: `RenderSuccess` / `RenderError` dispatch on mode. `TabularData` interface (`Headers() []string`, `Rows() [][]string`) implemented by `PostListData`, `CommentListData`, `ReactionListData`, `SearchPeopleData`.
+- `internal/output/format.go`: `BuildBase` and `ExtractErrorEnvelope` helpers used by `cmd/app.go`.
+- `cmd/app.go:writeSuccess` / `writeDryRun` / `writeUnsupported`: delegate to renderer for non-json modes.
+- `cmd/app.go:preflightFlags`: also parses `--output` and `--compact` so pre-cobra failures can honor the mode.
+
+**Schema validation**: only `--output=json` (and `--json`) is schema-validated. Compact, JSONL, and table are lossy renderings — documented in code comments and README.
+
 ## Common patterns
 
 - **Logging**: `slog` (configured in `cmd/root.go:newLogger`). Never log secrets.
