@@ -4,7 +4,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ## Architecture
 
-- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`; org subcommands: `list` (requires `w_organization_social`); top-level: `doctor` (read-only, not audited), `version`
+- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`; org subcommands: `list` (requires `w_organization_social`); post subcommands: `create` (with `--image`, `--as-org`), `list`, `get`, `delete`, `edit`, `reshare`, `schedule`; top-level: `profile`, `doctor` (read-only, not audited), `version`
 - **Transport seam**: `internal/api/transport.go` (interface) → `official.go` (live LinkedIn adapter) / `noop.go` (fallback). Every CLI command goes through `Transport`.
 - **HTTP**: `internal/api/client.go` — `go-retryablehttp`, 429/5xx retry, `Linkedin-Version` + `X-Restli-Protocol-Version` headers, rate-limit parsing, typed `api.Error`
 - **Auth**: native PKCE OAuth (`internal/auth/oauth.go`) + `go-keyring` session store — tokens never touch disk or logs
@@ -14,7 +14,7 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ```
 main.go                entry point + signal handling
-cmd/                   cobra commands (auth, org, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
+cmd/                   cobra commands (auth, profile, org, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
 internal/api/          Transport interface, official adapter, retry client, typed errors
 internal/approval/     approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
@@ -57,10 +57,12 @@ Run `go vet ./...` and `go test -race ./...` after any code change. Only run `go
 | `GOLINK_CLIENT_ID` | yes, for `auth login` | LinkedIn app client ID (PKCE flow) |
 | `GOLINK_API_VERSION` | no | `Linkedin-Version` header value (`YYYYMM`) |
 | `GOLINK_REDIRECT_PORT` | no | Preferred OAuth loopback port; `0` picks any free port |
-| `GOLINK_JSON`, `GOLINK_TRANSPORT` | no | Preflight overrides for `--json` / `--transport` |
+| `GOLINK_JSON`, `GOLINK_TRANSPORT`, `GOLINK_OUTPUT` | no | Preflight overrides for `--json` / `--transport` / `--output` |
 | `GOLINK_IDEMPOTENCY_PATH` | no | Override idempotency store path (default: `$XDG_STATE_HOME/golink/idempotency.jsonl`) |
 | `GOLINK_AUDIT` | no | `on` (default) or `off` to disable the audit log |
 | `GOLINK_AUDIT_PATH` | no | Override audit log file path (default: `$XDG_STATE_HOME/golink/audit.jsonl`) |
+| `GOLINK_APPROVAL_DIR` | no | Override approval store directory (default: `$XDG_STATE_HOME/golink/approvals/`) |
+| `GOLINK_SCHEDULE_DIR` | no | Override schedule store directory (default: `$XDG_STATE_HOME/golink/schedule/`) |
 | `GOLINK_RECORD` | no | Path to a JSONL cassette file; wraps the HTTP client to record every exchange |
 | `GOLINK_REPLAY` | no | Path to a JSONL cassette file; serves responses from cassette without network access (mutually exclusive with `GOLINK_RECORD`) |
 
@@ -102,7 +104,7 @@ Only when it measurably helps. Every goroutine needs a shutdown path. Context ca
 
 - Table-driven with `t.Run`; helpers call `t.Helper()`
 - Fakes over mocks; test behavior not implementation
-- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Now`, `HTTPClient`, `SessionStore`, `BrowserOpener`, `IsInteractive`, `TransportFactory`, `IdempotencyStore`, `ApprovalStore`)
+- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Stderr`, `Now`, `HTTPClient`, `BrowserOpener`, `LoginRunner`, `SessionStore`, `IsInteractive`, `TransportFactory`, `AuditSink`, `IdempotencyStore`, `ApprovalStore`, `ScheduleStore`, `TokenURL`, `UserinfoURL`)
 - `t.Context()` for test-lifetime context; `t.Setenv` for env; `httptest.NewServer` for transport tests
 - `cmp.Equal` / `cmp.Diff` for nested struct comparisons
 - **Schema-first contract changes**: edit `schemas/golink-output.schema.json` + add a fixture in `internal/output/schema_test.go` FIRST, then change the Go struct and command code. The schema is the contract.

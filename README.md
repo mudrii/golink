@@ -133,7 +133,7 @@ golink --json react add urn:li:share:123 --type LIKE
 golink --json post list --count 10
 ```
 
-Use `--dry-run` to preview the exact request payload without sending it. Supported on `post create`, `post delete`, `comment add`, `react add`.
+Use `--dry-run` to preview the exact request payload without sending it. Supported on every mutating command (`post create/delete/edit/reshare/schedule`, `comment add`, `react add`, `execute`).
 
 ## Output modes
 
@@ -372,7 +372,7 @@ Each staged entry is a `<command_id>.<state>.json` file. States: `pending` → `
 
 ## Audit log
 
-Every mutating command (`post create`, `post delete`, `comment add`, `react add`, `auth login`, `auth logout`, `auth refresh`) appends one JSONL line to an audit log after the command completes. Read commands are not audited.
+Every mutating command appends one JSONL line to an audit log after the command completes. Read commands are not audited. See the capability matrix above for the full list — this currently includes `auth login/logout/refresh`, `post create/edit/delete/reshare/schedule`, `comment add`, `react add`, `schedule run/cancel`, `execute`.
 
 **File location** (first match wins):
 
@@ -463,7 +463,7 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 
 ```
 main.go                    entry point + signal handling
-cmd/                       cobra commands (auth, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
+cmd/                       cobra commands (auth, profile, org, post, comment, react, search, social, batch, approval, schedule, plan, execute, doctor, version)
 internal/api/              Transport interface + official LinkedIn adapter + NoopTransport
 internal/approval/         approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/            append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
