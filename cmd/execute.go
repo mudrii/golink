@@ -107,8 +107,12 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 			if effectiveDryRun {
 				auditMode = "dry_run"
 			}
-			cmdID := newCommandID(p.Command, a.deps.Now().UTC())
-			runErr := runner.runOp(cmd.Context(), 1, op)
+			cmdID, runErr := runner.runOp(cmd.Context(), 1, op)
+			if cmdID == "" {
+				// runOp short-circuited before assigning a cmdID (e.g. validation
+				// error). Synthesize one so the audit entry is still queryable.
+				cmdID = newCommandID(p.Command, a.deps.Now().UTC())
+			}
 			if runErr != nil {
 				a.auditMutation(cmd, cmdID, "error", auditMode, "", 0, "", nil)
 				return fmt.Errorf("execute: %w", runErr)
@@ -118,6 +122,5 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 		},
 	}
 
-	cmd.Flags().String("notes", "", "optional notes to embed in the plan (plan subcommand only)")
 	return cmd
 }

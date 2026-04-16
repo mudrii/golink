@@ -202,7 +202,7 @@ func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool,
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			opErr := r.runOp(ctx, ln, op)
+			_, opErr := r.runOp(ctx, ln, op)
 			hasErr := opErr != nil
 
 			results <- result{line: ln, anyErr: hasErr}
@@ -231,21 +231,23 @@ func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool,
 }
 
 // runOp dispatches a single batch op and writes the result envelope to stdout.
-func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) error {
+// Returns the command_id used in the emitted envelope so callers (execute) can
+// correlate their audit entries with the op output.
+func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (string, error) {
 	cmdName := strings.TrimSpace(op.Command)
 
 	if _, ok := batchSupportedCommands[cmdName]; !ok {
-		return r.emitValidationError(lineNum, op, fmt.Sprintf("unsupported command %q; supported: post create, post delete, comment add, react add, post schedule", cmdName))
+		return "", r.emitValidationError(lineNum, op, fmt.Sprintf("unsupported command %q; supported: post create, post delete, comment add, react add, post schedule", cmdName))
 	}
 
 	// Idempotency check.
 	if op.IdempotencyKey != "" {
 		cached, hit, err := r.istore.Lookup(ctx, op.IdempotencyKey, cmdName)
 		if err != nil {
-			return r.emitValidationError(lineNum, op, err.Error())
+			return "", r.emitValidationError(lineNum, op, err.Error())
 		}
 		if hit {
-			return r.emitCachedResult(lineNum, op, cached)
+			return cached.CommandID, r.emitCachedResult(lineNum, op, cached)
 		}
 	}
 
@@ -256,7 +258,7 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) error 
 
 	requireApproval := op.RequireApproval
 	if requireApproval {
-		return r.emitPendingApproval(ctx, lineNum, op)
+		return "", r.emitPendingApproval(ctx, lineNum, op)
 	}
 
 	var opErr error
@@ -278,7 +280,7 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) error 
 	}
 
 	if opErr != nil {
-		return r.emitOpError(lineNum, op, cmdID, opErr)
+		return cmdID, r.emitOpError(lineNum, op, cmdID, opErr)
 	}
 
 	// Record idempotency entry on success.
@@ -295,7 +297,7 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) error 
 		})
 	}
 
-	return r.emitSuccess(lineNum, op, cmdID, httpStatus, resultData)
+	return cmdID, r.emitSuccess(lineNum, op, cmdID, httpStatus, resultData)
 }
 
 func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool) (any, string, int, error) {
