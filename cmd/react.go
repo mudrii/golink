@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -32,6 +33,7 @@ func newReactAddCommand(a *app) *cobra.Command {
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			postURN := trimmedText(args[0])
 			if postURN == "" {
@@ -59,6 +61,16 @@ func newReactAddCommand(a *app) *cobra.Command {
 				return writeErr
 			}
 
+			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "react add"); hit {
+				var data output.ReactionAddData
+				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {
+					a.auditMutation(cmd, cmdID, "ok", "normal", cached.RequestID, cached.HTTPStatus, "", nil)
+					return a.writeSuccessFromCache(cmd, data, fmt.Sprintf("reaction %s added (cached) to %s", data.Type, postURN))
+				}
+			} else if checkErr != nil {
+				return checkErr
+			}
+
 			session, err := a.resolveSession(cmd)
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
@@ -74,7 +86,20 @@ func newReactAddCommand(a *app) *cobra.Command {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.mapTransportError(cmd, "react add", err)
 			}
-			writeErr := a.writeSuccess(cmd, output.ReactionAddData{ReactionData: *data, TargetURN: postURN}, fmt.Sprintf("reaction %s added to %s", data.Type, postURN))
+			result := output.ReactionAddData{ReactionData: *data, TargetURN: postURN}
+			if ikey != "" {
+				resultBytes, _ := json.Marshal(result)
+				a.idempotencyRecord(cmd.Context(), idempotency.Entry{
+					TS:         a.deps.Now().UTC(),
+					Key:        ikey,
+					Command:    "react add",
+					CommandID:  cmdID,
+					Status:     "ok",
+					HTTPStatus: 201,
+					Result:     resultBytes,
+				})
+			}
+			writeErr := a.writeSuccess(cmd, result, fmt.Sprintf("reaction %s added to %s", data.Type, postURN))
 			a.auditMutation(cmd, cmdID, "ok", "normal", "", 201, "", nil)
 			return writeErr
 		},

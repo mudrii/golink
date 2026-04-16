@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/mudrii/golink/internal/api"
+	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -41,6 +42,7 @@ func newPostCreateCommand(a *app) *cobra.Command {
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			text := trimmedText(flags.text)
 			if text == "" {
@@ -73,6 +75,17 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				return writeErr
 			}
 
+			// Idempotency check — replay cached result if available.
+			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post create"); hit {
+				var data output.PostCreateData
+				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {
+					a.auditMutation(cmd, cmdID, "ok", "normal", cached.RequestID, cached.HTTPStatus, "", nil)
+					return a.writeSuccessFromCache(cmd, data, fmt.Sprintf("post created (cached): %s", data.URL))
+				}
+			} else if checkErr != nil {
+				return checkErr
+			}
+
 			session, err := a.resolveSession(cmd)
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
@@ -95,6 +108,18 @@ func newPostCreateCommand(a *app) *cobra.Command {
 			}
 
 			data := output.PostCreateData{PostSummary: *summary}
+			if ikey != "" {
+				resultBytes, _ := json.Marshal(data)
+				a.idempotencyRecord(cmd.Context(), idempotency.Entry{
+					TS:         a.deps.Now().UTC(),
+					Key:        ikey,
+					Command:    "post create",
+					CommandID:  cmdID,
+					Status:     "ok",
+					HTTPStatus: 201,
+					Result:     resultBytes,
+				})
+			}
 			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("post created: %s", summary.URL))
 			a.auditMutation(cmd, cmdID, "ok", "normal", "", 201, "", nil)
 			return writeErr
@@ -184,6 +209,7 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			postURN := trimmedText(args[0])
 			if postURN == "" {
@@ -204,6 +230,16 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 				return writeErr
 			}
 
+			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post delete"); hit {
+				var data output.PostDeleteData
+				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {
+					a.auditMutation(cmd, cmdID, "ok", "normal", cached.RequestID, cached.HTTPStatus, "", nil)
+					return a.writeSuccessFromCache(cmd, data, fmt.Sprintf("post deleted (cached): %s", data.ID))
+				}
+			} else if checkErr != nil {
+				return checkErr
+			}
+
 			session, err := a.resolveSession(cmd)
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
@@ -218,6 +254,18 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.mapTransportError(cmd, "post delete", err)
+			}
+			if ikey != "" {
+				resultBytes, _ := json.Marshal(data)
+				a.idempotencyRecord(cmd.Context(), idempotency.Entry{
+					TS:         a.deps.Now().UTC(),
+					Key:        ikey,
+					Command:    "post delete",
+					CommandID:  cmdID,
+					Status:     "ok",
+					HTTPStatus: 204,
+					Result:     resultBytes,
+				})
 			}
 			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("post deleted: %s", data.ID))
 			a.auditMutation(cmd, cmdID, "ok", "normal", "", 204, "", nil)

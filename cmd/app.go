@@ -20,6 +20,7 @@ import (
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/config"
+	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -51,6 +52,7 @@ type Dependencies struct {
 	IsInteractive    func() bool
 	TransportFactory TransportFactory
 	AuditSink        audit.Sink
+	IdempotencyStore idempotency.Store
 	// TokenURL overrides the LinkedIn token endpoint; defaults to auth.TokenURL.
 	// Set in tests to point at a local httptest server.
 	TokenURL string
@@ -218,6 +220,9 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 	if deps.TokenURL == "" {
 		deps.TokenURL = auth.TokenURL
 	}
+	if deps.IdempotencyStore == nil {
+		deps.IdempotencyStore = idempotency.NewFileStore("")
+	}
 
 	return deps
 }
@@ -358,6 +363,27 @@ func (a *app) writeSuccess(cmd *cobra.Command, data any, text string) error {
 		return nil
 	}
 	base := output.BuildBase(meta)
+	if err := output.RenderSuccess(a.deps.Stdout, mode, base, data, text); err != nil {
+		return fmt.Errorf("write stdout: %w", err)
+	}
+	return nil
+}
+
+// writeSuccessFromCache writes a success envelope with from_cache:true set on
+// the base envelope. Used when idempotency replays a stored result.
+func (a *app) writeSuccessFromCache(cmd *cobra.Command, data any, text string) error {
+	meta := a.metadata(cmd, output.StatusOK)
+	mode := a.settings.Output
+	if mode == output.ModeJSON {
+		envelope := output.Success(meta, data)
+		envelope.FromCache = true
+		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
+			return fmt.Errorf("write stdout: %w", err)
+		}
+		return nil
+	}
+	base := output.BuildBase(meta)
+	base.FromCache = true
 	if err := output.RenderSuccess(a.deps.Stdout, mode, base, data, text); err != nil {
 		return fmt.Errorf("write stdout: %w", err)
 	}
@@ -611,6 +637,34 @@ func (a *app) transportFailure(cmd *cobra.Command, message, details string) erro
 		errMsg:     message,
 		errCode:    string(output.ErrorCodeTransport),
 		text:       text,
+	}
+}
+
+// idempotencyCheck looks up key in the idempotency store for command.
+// Returns (entry, true, nil) on a cache hit — the caller should replay
+// the cached envelope and skip the transport call.
+// Returns (zero, false, validationFailure) on a key-command mismatch.
+// Returns (zero, false, nil) on a miss.
+func (a *app) idempotencyCheck(cmd *cobra.Command, key, command string) (idempotency.Entry, bool, error) {
+	if key == "" {
+		return idempotency.Entry{}, false, nil
+	}
+	entry, hit, err := a.deps.IdempotencyStore.Lookup(cmd.Context(), key, command)
+	if err != nil {
+		if errors.Is(err, idempotency.ErrKeyCommandMismatch) {
+			return idempotency.Entry{}, false, a.validationFailure(cmd, err.Error(), "")
+		}
+		a.logger.Warn("idempotency lookup failed; proceeding without cache", "error", err)
+		return idempotency.Entry{}, false, nil
+	}
+	return entry, hit, nil
+}
+
+// idempotencyRecord persists entry to the store; lookup failures are logged
+// at WARN and never propagate so they don't break the primary command.
+func (a *app) idempotencyRecord(ctx context.Context, entry idempotency.Entry) {
+	if err := a.deps.IdempotencyStore.Record(ctx, entry); err != nil {
+		a.logger.Warn("idempotency record failed", "error", err)
 	}
 }
 

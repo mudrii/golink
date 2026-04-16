@@ -29,6 +29,7 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `search people` | Official transport: `unsupported` | ✅ | Returns `ErrFeatureUnavailable` by design |
 | `doctor` | ✅ | ✅ | Env vars, session state, userinfo probe, feature map, audit log state |
 | `version` | ✅ | ✅ | Reports build metadata |
+| `batch <ops.jsonl>` | ✅ | httptest | Reads JSONL ops file, dispatches each op, streams JSONL results; supports `--fail-fast`, `--strict`, `--concurrency`, `--resume` |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
 
@@ -131,6 +132,73 @@ golink --output=table react list urn:li:share:123
 
 Tokens are stored in the OS keyring — never on disk or in logs.
 
+## Idempotency keys
+
+Any mutating command (`post create`, `post delete`, `comment add`, `react add`) accepts `--idempotency-key <k>`. On the first successful call the result is cached locally; subsequent calls with the same key within 24 hours replay the cached result and set `from_cache: true` in the envelope — the transport is never called again.
+
+```sh
+golink --json post create --text "Hello" --idempotency-key my-post-1
+# Second call returns from_cache:true, no network request
+golink --json post create --text "Hello" --idempotency-key my-post-1
+```
+
+**Store location** (first match wins):
+
+1. `GOLINK_IDEMPOTENCY_PATH=/custom/path.jsonl`
+2. `$XDG_STATE_HOME/golink/idempotency.jsonl`
+3. `~/.local/state/golink/idempotency.jsonl`
+
+The store is an append-only JSONL file created with mode `0600` in a `0700` directory. Keys expire after 24 hours. Using a key with a different command than it was first recorded against returns a `validation_error`.
+
+## Batch operations
+
+`golink batch <ops.jsonl>` reads a JSONL file where each line is an operation:
+
+```jsonl
+{"command":"post create","args":{"text":"Hello batch","visibility":"PUBLIC"},"idempotency_key":"b-1"}
+{"command":"post delete","args":{"post_urn":"urn:li:share:123"}}
+{"command":"comment add","args":{"post_urn":"urn:li:share:456","text":"nice"},"dry_run":true}
+{"command":"react add","args":{"post_urn":"urn:li:share:789","type":"LIKE"},"idempotency_key":"r-1"}
+```
+
+Results stream to stdout as JSONL — one `BatchOpResultOutput` envelope per input line.
+
+Supported commands: `post create`, `post delete`, `comment add`, `react add`.
+
+```sh
+# Basic run
+golink --json batch ops.jsonl
+
+# Stop on first error
+golink --json batch --fail-fast ops.jsonl
+
+# Exit 2 if any op is non-ok (CI gate)
+golink --json batch --strict ops.jsonl
+
+# Up to 4 parallel workers
+golink --json batch --concurrency 4 ops.jsonl
+
+# Skip ops already recorded in ops.jsonl.progress
+golink --json batch --resume ops.jsonl
+
+# Read from stdin
+cat ops.jsonl | golink --json batch -
+```
+
+**Flags**:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--fail-fast` | false | Stop on the first op error (exit 5) |
+| `--continue-on-error` | true | Continue after op errors |
+| `--concurrency` | 1 | Parallel workers (max 4) |
+| `--strict` | false | Exit 2 if any op is non-ok |
+| `--resume` | true | Skip ops already in the `.progress` sidecar file |
+
+Each op may include a per-op `dry_run: true` field to preview that op without executing it, regardless of the global `--dry-run` flag.
+
+Resume: on each successful op, a line is appended to `<ops.jsonl>.progress`. Re-running with `--resume` skips those lines and emits `from_cache:true` envelopes for them.
+
 ## Audit log
 
 Every mutating command (`post create`, `post delete`, `comment add`, `react add`, `auth login`, `auth logout`, `auth refresh`) appends one JSONL line to an audit log after the command completes. Read commands are not audited.
@@ -223,10 +291,11 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 
 ```
 main.go                    entry point + signal handling
-cmd/                       cobra commands (auth, post, comment, react, search, doctor, version)
+cmd/                       cobra commands (auth, post, comment, react, search, batch, doctor, version)
 internal/api/              Transport interface + official LinkedIn adapter + NoopTransport
 internal/auth/             PKCE login, keyring-backed session store
 internal/config/           viper-backed settings with env/flag/file precedence
+internal/idempotency/      append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
 internal/output/           JSON envelope types, schema validation, enum parsers
 schemas/                   golink-output.schema.json — contract for every --json response
 ```

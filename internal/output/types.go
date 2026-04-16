@@ -53,6 +53,7 @@ type BaseEnvelope struct {
 	RequestID   string         `json:"request_id,omitempty"`
 	GeneratedAt time.Time      `json:"generated_at"`
 	RateLimit   *RateLimitInfo `json:"rate_limit,omitempty"`
+	FromCache   bool           `json:"from_cache,omitempty"`
 }
 
 // SuccessEnvelope wraps successful command data.
@@ -478,6 +479,24 @@ type DoctorData struct {
 
 // DoctorOutput is the schema-aligned doctor envelope.
 type DoctorOutput = SuccessEnvelope[DoctorData]
+
+// BatchOpResultData is one line of batch output — the per-op result envelope.
+type BatchOpResultData struct {
+	Line           int           `json:"line"`
+	Status         CommandStatus `json:"status"`
+	Command        string        `json:"command"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	CommandID      string        `json:"command_id,omitempty"`
+	RequestID      string        `json:"request_id,omitempty"`
+	HTTPStatus     int           `json:"http_status,omitempty"`
+	FromCache      bool          `json:"from_cache,omitempty"`
+	Data           any           `json:"data,omitempty"`
+	Error          string        `json:"error,omitempty"`
+	Code           string        `json:"code,omitempty"`
+}
+
+// BatchOpResultOutput is the schema-aligned batch op result envelope.
+type BatchOpResultOutput = SuccessEnvelope[BatchOpResultData]
 
 // Headers implements TabularData for DoctorData (renders the feature map).
 func (d DoctorData) Headers() []string {

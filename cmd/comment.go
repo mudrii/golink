@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -32,6 +33,7 @@ func newCommentAddCommand(a *app) *cobra.Command {
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			postURN := trimmedText(args[0])
 			if postURN == "" {
@@ -63,6 +65,16 @@ func newCommentAddCommand(a *app) *cobra.Command {
 				return writeErr
 			}
 
+			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "comment add"); hit {
+				var data output.CommentAddData
+				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {
+					a.auditMutation(cmd, cmdID, "ok", "normal", cached.RequestID, cached.HTTPStatus, "", nil)
+					return a.writeSuccessFromCache(cmd, data, fmt.Sprintf("comment added (cached): %s", data.ID))
+				}
+			} else if checkErr != nil {
+				return checkErr
+			}
+
 			session, err := a.resolveSession(cmd)
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "UNAUTHORIZED", nil)
@@ -79,7 +91,20 @@ func newCommentAddCommand(a *app) *cobra.Command {
 				return a.mapTransportError(cmd, "comment add", err)
 			}
 
-			writeErr := a.writeSuccess(cmd, output.CommentAddData{CommentData: *comment}, fmt.Sprintf("comment added: %s", comment.ID))
+			data := output.CommentAddData{CommentData: *comment}
+			if ikey != "" {
+				resultBytes, _ := json.Marshal(data)
+				a.idempotencyRecord(cmd.Context(), idempotency.Entry{
+					TS:         a.deps.Now().UTC(),
+					Key:        ikey,
+					Command:    "comment add",
+					CommandID:  cmdID,
+					Status:     "ok",
+					HTTPStatus: 201,
+					Result:     resultBytes,
+				})
+			}
+			writeErr := a.writeSuccess(cmd, data, fmt.Sprintf("comment added: %s", comment.ID))
 			a.auditMutation(cmd, cmdID, "ok", "normal", "", 201, "", nil)
 			return writeErr
 		},

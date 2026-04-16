@@ -13,14 +13,15 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 ## Packages
 
 ```
-main.go            entry point + signal handling
-cmd/               cobra commands (auth, post, comment, react, search, doctor, version)
-internal/api/      Transport interface, official adapter, retry client, typed errors
-internal/audit/    append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
-internal/auth/     PKCE OAuth + keyring session store
-internal/config/   viper settings with env/flag/file precedence
-internal/output/   JSON envelopes, schema validator, enum parsers
-schemas/           golink-output.schema.json (the --json contract)
+main.go                entry point + signal handling
+cmd/                   cobra commands (auth, post, comment, react, search, batch, doctor, version)
+internal/api/          Transport interface, official adapter, retry client, typed errors
+internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
+internal/auth/         PKCE OAuth + keyring session store
+internal/config/       viper settings with env/flag/file precedence
+internal/idempotency/  append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
+internal/output/       JSON envelopes, schema validator, enum parsers
+schemas/               golink-output.schema.json (the --json contract)
 ```
 
 Domain-organized. Avoid `helpers`, `util`, `common`.
@@ -53,6 +54,7 @@ Run `go vet ./...` and `go test -race ./...` after any code change. Only run `go
 | `GOLINK_API_VERSION` | no | `Linkedin-Version` header value (`YYYYMM`) |
 | `GOLINK_REDIRECT_PORT` | no | Preferred OAuth loopback port; `0` picks any free port |
 | `GOLINK_JSON`, `GOLINK_TRANSPORT` | no | Preflight overrides for `--json` / `--transport` |
+| `GOLINK_IDEMPOTENCY_PATH` | no | Override idempotency store path (default: `$XDG_STATE_HOME/golink/idempotency.jsonl`) |
 | `GOLINK_AUDIT` | no | `on` (default) or `off` to disable the audit log |
 | `GOLINK_AUDIT_PATH` | no | Override audit log file path (default: `$XDG_STATE_HOME/golink/audit.jsonl`) |
 
@@ -93,7 +95,7 @@ Only when it measurably helps. Every goroutine needs a shutdown path. Context ca
 
 - Table-driven with `t.Run`; helpers call `t.Helper()`
 - Fakes over mocks; test behavior not implementation
-- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Now`, `HTTPClient`, `SessionStore`, `BrowserOpener`, `IsInteractive`, `TransportFactory`)
+- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Now`, `HTTPClient`, `SessionStore`, `BrowserOpener`, `IsInteractive`, `TransportFactory`, `IdempotencyStore`)
 - `t.Context()` for test-lifetime context; `t.Setenv` for env; `httptest.NewServer` for transport tests
 - `cmp.Equal` / `cmp.Diff` for nested struct comparisons
 - **Schema-first contract changes**: edit `schemas/golink-output.schema.json` + add a fixture in `internal/output/schema_test.go` FIRST, then change the Go struct and command code. The schema is the contract.

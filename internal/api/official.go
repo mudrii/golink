@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mudrii/golink/internal/output"
@@ -13,9 +14,11 @@ import (
 // resolves the authenticated member's URN once per process and reuses it for
 // author defaulting in list endpoints.
 type Official struct {
-	client    *Client
-	authorURN string
-	now       func() time.Time
+	client         *Client
+	authorURN      string
+	now            func() time.Time
+	rlMu           sync.Mutex
+	lastRateLimit_ *output.RateLimitInfo
 }
 
 // OfficialConfig provides the wiring required to build an Official transport.
@@ -44,9 +47,28 @@ func NewOfficial(cfg OfficialConfig) *Official {
 // Name returns "official".
 func (*Official) Name() string { return "official" }
 
+// LastRateLimit returns the most recently observed rate-limit metadata, or nil.
+// Implements RateLimitAware.
+func (o *Official) LastRateLimit() *output.RateLimitInfo {
+	o.rlMu.Lock()
+	defer o.rlMu.Unlock()
+	return o.lastRateLimit_
+}
+
+// do wraps client.Do and records the response rate-limit headers.
+func (o *Official) do(ctx context.Context, method, path string, body any) (*Response, error) {
+	resp, err := o.client.Do(ctx, method, path, body)
+	if err == nil && resp.RateLimit != nil {
+		o.rlMu.Lock()
+		o.lastRateLimit_ = resp.RateLimit
+		o.rlMu.Unlock()
+	}
+	return resp, err
+}
+
 // ProfileMe fetches the authenticated member profile via OIDC userinfo.
 func (o *Official) ProfileMe(ctx context.Context) (*output.ProfileData, error) {
-	resp, err := o.client.Do(ctx, "GET", "/v2/userinfo", nil)
+	resp, err := o.do(ctx, "GET", "/v2/userinfo", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +131,7 @@ func (o *Official) CreatePost(ctx context.Context, req CreatePostRequest) (*outp
 		},
 	}
 
-	resp, err := o.client.Do(ctx, "POST", "/rest/posts", payload)
+	resp, err := o.do(ctx, "POST", "/rest/posts", payload)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +184,7 @@ func (o *Official) ListPosts(ctx context.Context, authorURN string, count, start
 	}
 
 	path := fmt.Sprintf("/rest/posts?q=author&author=%s&count=%d&start=%d", encoded, count, start)
-	resp, err := o.client.Do(ctx, "GET", path, nil)
+	resp, err := o.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +232,7 @@ func (o *Official) GetPost(ctx context.Context, postURN string) (*output.PostGet
 	if err != nil {
 		return nil, err
 	}
-	resp, err := o.client.Do(ctx, "GET", "/rest/posts/"+encoded, nil)
+	resp, err := o.do(ctx, "GET", "/rest/posts/"+encoded, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +267,7 @@ func (o *Official) DeletePost(ctx context.Context, postURN string) (*output.Post
 	if err != nil {
 		return nil, err
 	}
-	_, err = o.client.Do(ctx, "DELETE", "/rest/posts/"+encoded, nil)
+	_, err = o.do(ctx, "DELETE", "/rest/posts/"+encoded, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +299,7 @@ func (o *Official) AddComment(ctx context.Context, postURN, text string) (*outpu
 		"object":  activityURN,
 		"message": map[string]any{"text": text},
 	}
-	resp, err := o.client.Do(ctx, "POST", "/rest/socialActions/"+encoded+"/comments", payload)
+	resp, err := o.do(ctx, "POST", "/rest/socialActions/"+encoded+"/comments", payload)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +345,7 @@ func (o *Official) ListComments(ctx context.Context, postURN string, count, star
 	}
 
 	path := fmt.Sprintf("/rest/socialActions/%s/comments?count=%d&start=%d", encoded, count, start)
-	resp, err := o.client.Do(ctx, "GET", path, nil)
+	resp, err := o.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +405,7 @@ func (o *Official) AddReaction(ctx context.Context, postURN string, rtype output
 		"root":         postURN,
 		"reactionType": string(rtype),
 	}
-	_, err = o.client.Do(ctx, "POST", "/rest/reactions?actor="+encodedActor, payload)
+	_, err = o.do(ctx, "POST", "/rest/reactions?actor="+encodedActor, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +425,7 @@ func (o *Official) ListReactions(ctx context.Context, postURN string) (*output.R
 		return nil, err
 	}
 	path := fmt.Sprintf("/rest/reactions/(entity:%s)?q=entity&sort=(value:REVERSE_CHRONOLOGICAL)", encoded)
-	resp, err := o.client.Do(ctx, "GET", path, nil)
+	resp, err := o.do(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}

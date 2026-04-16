@@ -27,7 +27,8 @@
     { "$ref": "#/$defs/doctorOutput" },
     { "$ref": "#/$defs/unsupportedOutput" },
     { "$ref": "#/$defs/validationErrorOutput" },
-    { "$ref": "#/$defs/errorOutput" }
+    { "$ref": "#/$defs/errorOutput" },
+    { "$ref": "#/$defs/batchOpResultOutput" }
   ],
   "$defs": {
     "commandStatus": {
@@ -79,7 +80,8 @@
         "mode": { "type": "string", "enum": ["normal", "dry_run"] },
         "request_id": { "type": "string" },
         "generated_at": { "$ref": "#/$defs/dateTime" },
-        "rate_limit": { "$ref": "#/$defs/rateLimitInfo" }
+        "rate_limit": { "$ref": "#/$defs/rateLimitInfo" },
+        "from_cache": { "type": "boolean" }
       },
       "required": ["status", "command_id", "command", "transport", "generated_at"]
     },
@@ -783,6 +785,35 @@
         "error": { "type": "string", "minLength": 1 },
         "code": { "const": "VALIDATION_ERROR" },
         "details": { "type": "string" }
+      }
+    },
+    "batchOpResultData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "status", "command"],
+      "properties": {
+        "line": { "type": "integer", "minimum": 1 },
+        "status": { "$ref": "#/$defs/commandStatus" },
+        "command": { "type": "string" },
+        "idempotency_key": { "type": "string" },
+        "command_id": { "type": "string" },
+        "request_id": { "type": "string" },
+        "http_status": { "type": "integer" },
+        "from_cache": { "type": "boolean" },
+        "data": {},
+        "error": { "type": "string" },
+        "code": { "type": "string" }
+      }
+    },
+    "batchOpResultOutput": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "allOf": [{ "$ref": "#/$defs/baseEnvelopeProperties" }],
+      "required": ["status", "command_id", "command", "transport", "generated_at", "data"],
+      "properties": {
+        "status": { "const": "ok" },
+        "command": { "const": "batch" },
+        "data": { "$ref": "#/$defs/batchOpResultData" }
       }
     }
   }

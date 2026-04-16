@@ -6,6 +6,12 @@ import (
 	"github.com/mudrii/golink/internal/output"
 )
 
+// RateLimitAware is implemented by transports that expose the most recently
+// observed rate-limit headers. The batch runner uses this for in-process pacing.
+type RateLimitAware interface {
+	LastRateLimit() *output.RateLimitInfo
+}
+
 // Transport is the contract that both official and unofficial LinkedIn
 // adapters must implement. Each method returns domain types that the CLI
 // renders directly into --json response envelopes.
