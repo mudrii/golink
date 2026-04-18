@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/mudrii/golink/internal/api"
@@ -37,6 +38,8 @@ type BuildInfo struct {
 	Commit    string
 	BuildDate string
 }
+
+var commandIDFallbackSeq uint64
 
 // TransportFactory constructs the Transport used by networked commands.
 // It receives the resolved settings and an optional session (may be empty
@@ -316,7 +319,8 @@ func newCommandID(command string, now time.Time) string {
 
 	randomBytes := make([]byte, 4)
 	if _, err := rand.Read(randomBytes); err != nil {
-		return fmt.Sprintf("cmd_%s_%d", commandSlug, now.UTC().UnixNano())
+		seq := atomic.AddUint64(&commandIDFallbackSeq, 1)
+		return fmt.Sprintf("cmd_%s_%d_%06d", commandSlug, now.UTC().Unix(), seq)
 	}
 
 	return fmt.Sprintf("cmd_%s_%d%s", commandSlug, now.UTC().Unix(), hex.EncodeToString(randomBytes))
@@ -441,23 +445,21 @@ func (a *app) resolveSession(cmd *cobra.Command) (auth.Session, error) {
 	return *session, nil
 }
 
-// maybeRefreshSession silently attempts to refresh the access token when it is
-// within 5 minutes of expiry and a refresh token is available. On success the
-// updated session is persisted and returned. On failure the original session is
-// returned unchanged and the error is logged at WARN so the caller can fall
-// through to existing 401 handling.
-func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) auth.Session {
+// maybeRefreshSession attempts to refresh the access token when it is within
+// 5 minutes of expiry and a refresh token is available. On success the
+// updated session is persisted and returned. On failure, the error is returned
+// for explicit handling by the caller.
+func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) (auth.Session, error) {
 	if session.RefreshToken == "" {
-		return session
+		return session, nil
 	}
 	if session.ExpiresAt.Sub(a.deps.Now()) >= 5*time.Minute {
-		return session
+		return session, nil
 	}
 
 	token, err := auth.RefreshAccessToken(ctx, a.deps.HTTPClient, a.deps.TokenURL, a.settings.ClientID, session.RefreshToken)
 	if err != nil {
-		a.logger.Warn("auto-refresh failed; proceeding with existing session", "error", err)
-		return session
+		return session, err
 	}
 
 	session.AccessToken = token.AccessToken
@@ -478,13 +480,16 @@ func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) aut
 		a.logger.Warn("auto-refresh: failed to persist refreshed session", "error", err)
 	}
 
-	return session
+	return session, nil
 }
 
 // resolveTransport returns the Transport for the active settings and session,
 // auto-refreshing the access token when near expiry.
 func (a *app) resolveTransport(ctx context.Context, session auth.Session) (api.Transport, error) {
-	session = a.maybeRefreshSession(ctx, session)
+	session, err := a.maybeRefreshSession(ctx, session)
+	if err != nil {
+		return nil, err
+	}
 	return a.deps.TransportFactory(ctx, a.settings, session, a.logger)
 }
 

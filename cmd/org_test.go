@@ -31,7 +31,7 @@ func authenticatedStoreWithScopes(t *testing.T, scopes []string) auth.Store {
 }
 
 func TestOrgListSuccess(t *testing.T) {
-	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social", "w_organization_social"})
+	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social_feed", "w_organization_social_feed"})
 
 	code, stdout, stderr := executeTestCommand(t,
 		[]string{"--json", "org", "list"},
@@ -75,8 +75,8 @@ func TestOrgListSuccess(t *testing.T) {
 }
 
 func TestOrgListMissingScope(t *testing.T) {
-	// Session without w_organization_social scope.
-	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social"})
+	// Session without organization social write scope.
+	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social_feed"})
 
 	code, stdout, stderr := executeTestCommand(t,
 		[]string{"--json", "org", "list"},
@@ -115,8 +115,8 @@ func TestOrgListNoSession(t *testing.T) {
 }
 
 func TestPostCreateAsOrgMissingScope(t *testing.T) {
-	// Session without w_organization_social scope.
-	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social"})
+	// Session without organization social write scope.
+	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social_feed"})
 
 	code, stdout, stderr := executeTestCommand(t,
 		[]string{"--json", "post", "create", "--text", "hello", "--as-org", "urn:li:organization:111"},
@@ -179,7 +179,7 @@ func TestPostCreateAsOrgDryRun(t *testing.T) {
 }
 
 func TestPostCreateAsOrgLive(t *testing.T) {
-	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social", "w_organization_social"})
+	store := authenticatedStoreWithScopes(t, []string{"openid", "profile", "email", "w_member_social_feed", "w_organization_social_feed"})
 
 	code, stdout, stderr := executeTestCommand(t,
 		[]string{"--json", "post", "create", "--text", "org post", "--as-org", "urn:li:organization:111"},

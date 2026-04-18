@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var defaultScopes = []string{"openid", "profile", "email", "w_member_social"}
+var defaultScopes = []string{"openid", "profile", "email", "w_member_social_feed"}
 
 func newAuthCommand(a *app) *cobra.Command {
 	authCmd := &cobra.Command{
@@ -145,37 +145,12 @@ func newAuthStatusCommand(a *app) *cobra.Command {
 }
 
 func (a *app) writeAuthLoginStart(cmd *cobra.Command, data output.AuthLoginData) error {
-	if a.settings.JSON {
-		envelope := output.Success(a.metadata(cmd, output.StatusOK), data)
-		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
-			return fmt.Errorf("write stdout: %w", err)
-		}
-
-		return nil
-	}
-
-	if _, err := fmt.Fprintf(a.deps.Stdout, "Open this URL to continue authentication:\n%s\n", data.URL); err != nil {
-		return fmt.Errorf("write stdout: %w", err)
-	}
-
-	return nil
+	return a.writeSuccess(cmd, data, fmt.Sprintf("Open this URL to continue authentication:\n%s", data.URL))
 }
 
 func (a *app) writeAuthLoginResult(cmd *cobra.Command, data output.AuthLoginResultData) error {
-	if a.settings.JSON {
-		envelope := output.Success(a.metadata(cmd, output.StatusOK), data)
-		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
-			return fmt.Errorf("write stdout: %w", err)
-		}
-
-		return nil
-	}
-
-	if _, err := fmt.Fprintf(a.deps.Stdout, "Authenticated profile %s with scopes: %s\n", data.Profile, strings.Join(data.ScopesGranted, ", ")); err != nil {
-		return fmt.Errorf("write stdout: %w", err)
-	}
-
-	return nil
+	return a.writeSuccess(cmd, data,
+		fmt.Sprintf("Authenticated profile %s with scopes: %s", data.Profile, strings.Join(data.ScopesGranted, ", ")))
 }
 
 func newAuthRefreshCommand(a *app) *cobra.Command {
@@ -258,18 +233,8 @@ func newAuthRefreshCommand(a *app) *cobra.Command {
 }
 
 func (a *app) writeAuthRefresh(cmd *cobra.Command, data output.AuthRefreshData) error {
-	if a.settings.JSON {
-		envelope := output.Success(a.metadata(cmd, output.StatusOK), data)
-		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
-			return fmt.Errorf("write stdout: %w", err)
-		}
-		return nil
-	}
-
-	if _, err := fmt.Fprintf(a.deps.Stdout, "Refreshed token for profile %s; expires %s\n", data.Profile, data.ExpiresAt); err != nil {
-		return fmt.Errorf("write stdout: %w", err)
-	}
-	return nil
+	return a.writeSuccess(cmd, data,
+		fmt.Sprintf("Refreshed token for profile %s; expires %s", data.Profile, data.ExpiresAt))
 }
 
 func newAuthLogoutCommand(a *app) *cobra.Command {

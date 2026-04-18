@@ -217,7 +217,7 @@ func (s *FileStore) Get(_ context.Context, commandID string) (Entry, error) {
 			if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
 				continue
 			}
-			if !strings.Contains(de.Name(), commandID) {
+			if !filenameHasCommandID(de.Name(), commandID) {
 				continue
 			}
 			data, err := os.ReadFile(filepath.Join(dir, de.Name()))
@@ -234,6 +234,21 @@ func (s *FileStore) Get(_ context.Context, commandID string) (Entry, error) {
 		}
 	}
 	return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, commandID)
+}
+
+// filenameHasCommandID returns true when fileName encodes commandID as
+// the suffix after the last hyphen in the schedule filename.
+// Expected filename format is `<timestamp>-<commandID>.json`.
+func filenameHasCommandID(fileName, commandID string) bool {
+	if !strings.HasSuffix(fileName, ".json") {
+		return false
+	}
+	base := strings.TrimSuffix(fileName, ".json")
+	last := strings.LastIndex(base, "-")
+	if last < 0 {
+		return base == commandID
+	}
+	return base[last+1:] == commandID
 }
 
 // Due returns pending entries with scheduled_at <= now, up to limit, sorted by scheduled_at.
@@ -418,7 +433,7 @@ func (s *FileStore) findInMain(commandID string) (Entry, string, error) {
 		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
 			continue
 		}
-		if !strings.Contains(de.Name(), commandID) {
+		if !filenameHasCommandID(de.Name(), commandID) {
 			continue
 		}
 		path := filepath.Join(s.dir, de.Name())

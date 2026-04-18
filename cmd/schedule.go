@@ -8,6 +8,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/mudrii/golink/internal/api"
+	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/mudrii/golink/internal/schedule"
 	"github.com/spf13/cobra"
@@ -169,29 +171,24 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 				toRun = due
 			}
 
-			// Resolve session + transport once for the entire run.
-			session, err := a.resolveSession(cmd)
-			if err != nil {
-				return err
-			}
-			transport, err := a.resolveTransport(ctx, session)
-			if err != nil {
-				return a.transportFailure(cmd, "failed to build transport", err.Error())
-			}
-
 			results := make([]output.ScheduleRunResult, 0, len(toRun))
-			succeeded, failed := 0, 0
+			succeeded, failed, skipped := 0, 0, 0
 
 			for i := range toRun {
-				result, runErr := runOneEntry(ctx, a, cmd, toRun[i], transport, session.MemberURN)
+				result, runErr := runOneEntry(ctx, a, cmd, toRun[i])
 				results = append(results, result)
-				if runErr != nil {
+				switch result.Status {
+				case "skipped":
+					skipped++
+				case "failed":
 					failed++
+				default:
+					succeeded++
+				}
+				if runErr != nil {
 					if flagFailFast {
 						break
 					}
-				} else {
-					succeeded++
 				}
 			}
 
@@ -199,11 +196,11 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 				Ran:       len(results),
 				Succeeded: succeeded,
 				Failed:    failed,
-				Skipped:   0,
+				Skipped:   skipped,
 				Results:   results,
 			}
 			return a.writeSuccess(cmd, data,
-				fmt.Sprintf("ran %d entries: %d succeeded, %d failed", len(results), succeeded, failed))
+				fmt.Sprintf("ran %d entries: %d succeeded, %d failed, %d skipped", len(results), succeeded, failed, skipped))
 		},
 	}
 
@@ -215,14 +212,12 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 
 // runOneEntry executes a single scheduled post entry. On success it moves the
 // entry to completed. On failure it marks the entry failed with last_error.
-// It returns the ScheduleRunResult and an error when the entry failed.
+// It returns a non-nil error only when the entry actually failed.
 func runOneEntry(
 	_ context.Context,
 	a *app,
 	cmd *cobra.Command,
 	e schedule.Entry,
-	transport api.Transport,
-	memberURN string,
 ) (output.ScheduleRunResult, error) {
 	cobCtx := cmd.Context()
 
@@ -235,6 +230,37 @@ func runOneEntry(
 			CommandID: e.CommandID,
 			Status:    "skipped",
 			Error:     fmt.Sprintf("cannot transition to running: %v", err),
+		}, nil
+	}
+
+	// Idempotency check before creating.
+	if e.IdempotencyKey != "" {
+		entry, hit, _ := a.deps.IdempotencyStore.Lookup(cobCtx, e.IdempotencyKey, "post create")
+		if hit {
+			postURN := cachedPostURN(entry)
+			if postURN == "" {
+				postURN = entry.RequestID
+			}
+			// Already ran — mark completed and return cached urn.
+			_ = a.deps.ScheduleStore.MarkCompleted(cobCtx, e.CommandID)
+			a.auditMutation(cmd, cmdID, "ok", "normal", entry.RequestID, entry.HTTPStatus, "", nil)
+			return output.ScheduleRunResult{
+				CommandID: e.CommandID,
+				Status:    "succeeded",
+				PostURN:   postURN,
+			}, nil
+		}
+	}
+
+	session, transport, err := a.resolveStoredSessionAndTransport(cobCtx, cmd, e.Profile, e.Transport)
+	if err != nil {
+		errMsg := err.Error()
+		_ = a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID, errMsg, a.deps.Now().UTC())
+		a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeUnauthorized), nil)
+		return output.ScheduleRunResult{
+			CommandID: e.CommandID,
+			Status:    "failed",
+			Error:     errMsg,
 		}, err
 	}
 
@@ -258,7 +284,7 @@ func runOneEntry(
 			}, statErr
 		}
 
-		uploadURL, imageURN, initErr := transport.InitializeImageUpload(cobCtx, memberURN)
+		uploadURL, imageURN, initErr := transport.InitializeImageUpload(cobCtx, session.MemberURN)
 		if initErr != nil {
 			_ = a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID, initErr.Error(), a.deps.Now().UTC())
 			a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
@@ -283,21 +309,6 @@ func runOneEntry(
 		}
 	}
 
-	// Idempotency check before creating.
-	if e.IdempotencyKey != "" {
-		entry, hit, _ := a.deps.IdempotencyStore.Lookup(cobCtx, e.IdempotencyKey, "post create")
-		if hit {
-			// Already ran — mark completed and return cached urn.
-			_ = a.deps.ScheduleStore.MarkCompleted(cobCtx, e.CommandID)
-			a.auditMutation(cmd, cmdID, "ok", "normal", entry.RequestID, entry.HTTPStatus, "", nil)
-			return output.ScheduleRunResult{
-				CommandID: e.CommandID,
-				Status:    "succeeded",
-				PostURN:   entry.RequestID,
-			}, nil
-		}
-	}
-
 	summary, err := transport.CreatePost(cobCtx, createReq)
 	if err != nil {
 		errMsg := err.Error()
@@ -310,6 +321,19 @@ func runOneEntry(
 		}, err
 	}
 
+	if e.IdempotencyKey != "" {
+		resultBytes, _ := json.Marshal(output.PostCreateData{PostSummary: *summary})
+		a.idempotencyRecord(cobCtx, idempotency.Entry{
+			TS:         a.deps.Now().UTC(),
+			Key:        e.IdempotencyKey,
+			Command:    "post create",
+			CommandID:  e.CommandID,
+			Status:     "ok",
+			HTTPStatus: 201,
+			Result:     resultBytes,
+		})
+	}
+
 	_ = a.deps.ScheduleStore.MarkCompleted(cobCtx, e.CommandID)
 	a.auditMutation(cmd, cmdID, "ok", "normal", summary.ID, 201, "", nil)
 
@@ -318,6 +342,25 @@ func runOneEntry(
 		Status:    "succeeded",
 		PostURN:   summary.ID,
 	}, nil
+}
+
+func cachedPostURN(entry idempotency.Entry) string {
+	if len(entry.Result) == 0 {
+		return ""
+	}
+
+	var data output.PostCreateData
+	if err := json.Unmarshal(entry.Result, &data); err == nil && strings.TrimSpace(data.ID) != "" {
+		return data.ID
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(entry.Result, &raw); err != nil {
+		return ""
+	}
+
+	postURN, _ := raw["id"].(string)
+	return strings.TrimSpace(postURN)
 }
 
 func newScheduleCancelCommand(a *app) *cobra.Command {

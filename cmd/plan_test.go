@@ -1,11 +1,17 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/mudrii/golink/internal/api"
 	"github.com/mudrii/golink/internal/audit"
+	"github.com/mudrii/golink/internal/auth"
+	"github.com/mudrii/golink/internal/config"
 	"github.com/mudrii/golink/internal/output"
 )
 
@@ -168,16 +174,7 @@ func TestPlanOutput_schemaValidates(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d; stderr: %s", code, stderr)
 	}
-	var m map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &m); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if m["status"] != "ok" {
-		t.Errorf("status = %v, want ok", m["status"])
-	}
-	if m["command"] != "plan" {
-		t.Errorf("command = %v, want plan", m["command"])
-	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
 }
 
 func TestExecute_invalidPlanFile(t *testing.T) {
@@ -254,6 +251,62 @@ func TestExecute_auditRecordsPlanSHA256(t *testing.T) {
 		if e.PlanSHA256 == "" {
 			t.Errorf("audit entry %q missing plan_sha256", e.Command)
 		}
+	}
+}
+
+func TestExecute_UsesPlanProfileAndTransport(t *testing.T) {
+	store := auth.NewMemoryStore()
+	for _, session := range []auth.Session{
+		{
+			Profile:     "default",
+			Transport:   "official",
+			AccessToken: "default-token",
+			MemberURN:   "urn:li:person:default",
+			ExpiresAt:   time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			Profile:     "plan-profile",
+			Transport:   "auto",
+			AccessToken: "plan-token",
+			MemberURN:   "urn:li:person:plan",
+			ExpiresAt:   time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+	} {
+		if err := store.SaveSession(t.Context(), session); err != nil {
+			t.Fatalf("save session: %v", err)
+		}
+	}
+
+	payload := `{"schema":"golink.plan/v1","created_at":"2026-04-17T12:00:00Z","command":"post create","args":{"text":"hello","visibility":"PUBLIC"},"transport":"auto","profile":"plan-profile"}`
+	tmp := writeTempFile(t, []byte(payload))
+
+	called := false
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "--profile=default", "--transport=official", "execute", tmp},
+		testDepsOptions{
+			store: store,
+			transportFactory: func(_ context.Context, settings config.Settings, session auth.Session, _ *slog.Logger) (api.Transport, error) {
+				called = true
+				if settings.Profile != "plan-profile" {
+					t.Fatalf("settings profile = %q, want plan-profile", settings.Profile)
+				}
+				if settings.Transport != "auto" {
+					t.Fatalf("settings transport = %q, want auto", settings.Transport)
+				}
+				if session.Profile != "plan-profile" {
+					t.Fatalf("session profile = %q, want plan-profile", session.Profile)
+				}
+				if session.MemberURN != "urn:li:person:plan" {
+					t.Fatalf("session member = %q, want urn:li:person:plan", session.MemberURN)
+				}
+				return &fakeTransport{name: settings.Transport}, nil
+			},
+		})
+	if code != 0 {
+		t.Fatalf("exit %d; stderr: %s stdout: %s", code, stderr, stdout)
+	}
+	if !called {
+		t.Fatal("expected transport factory to be called")
 	}
 }
 

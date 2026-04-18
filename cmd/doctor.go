@@ -23,24 +23,24 @@ const userinfoURL = "https://api.linkedin.com/v2/userinfo"
 // featureRule maps a command name to the scopes required for "supported" status,
 // or a fixed reason when the feature is always unavailable on official transport.
 type featureRule struct {
-	command       string
-	requiredScope string // empty means entitlement-gated or always-unsupported
-	fixedReason   string // non-empty means always unsupported regardless of scopes
+	command        string
+	requiredScopes []string // empty means entitlement-gated or always-unsupported
+	fixedReason    string   // non-empty means always unsupported regardless of scopes
 }
 
 var featureRules = []featureRule{
-	{command: "profile me", requiredScope: "openid"},
-	{command: "post create", requiredScope: "w_member_social"},
+	{command: "profile me", requiredScopes: []string{"openid", "profile"}},
+	{command: "post create", requiredScopes: memberWriteScopes},
 	{command: "post list", fixedReason: "r_member_social is closed by LinkedIn (entitlement-gated)"},
 	{command: "post get", fixedReason: "r_member_social is closed by LinkedIn (entitlement-gated)"},
-	{command: "post delete", requiredScope: "w_member_social"},
-	{command: "comment add", requiredScope: "w_member_social"},
+	{command: "post delete", requiredScopes: memberWriteScopes},
+	{command: "comment add", requiredScopes: memberWriteScopes},
 	{command: "comment list", fixedReason: "r_member_social is closed by LinkedIn (entitlement-gated)"},
-	{command: "react add", requiredScope: "w_member_social"},
+	{command: "react add", requiredScopes: memberWriteScopes},
 	{command: "react list", fixedReason: "r_member_social is closed by LinkedIn (entitlement-gated)"},
 	{command: "search people", fixedReason: "not available on official transport (use --transport=unofficial)"},
-	{command: "org list", requiredScope: "w_organization_social"},
-	{command: "post create --as-org", requiredScope: "w_organization_social"},
+	{command: "org list", requiredScopes: orgWriteScopes},
+	{command: "post create --as-org", requiredScopes: orgWriteScopes},
 }
 
 func newDoctorCommand(a *app) *cobra.Command {
@@ -306,11 +306,6 @@ func runUserinfoProbe(ctx context.Context, client *http.Client, timeout time.Dur
 
 // buildFeatureMap evaluates each command family against the granted scopes.
 func buildFeatureMap(scopes []string, session *auth.Session) []output.DoctorFeature {
-	scopeSet := make(map[string]struct{}, len(scopes))
-	for _, s := range scopes {
-		scopeSet[s] = struct{}{}
-	}
-
 	features := make([]output.DoctorFeature, 0, len(featureRules)+1)
 	for _, rule := range featureRules {
 		f := output.DoctorFeature{Command: rule.command}
@@ -318,26 +313,14 @@ func buildFeatureMap(scopes []string, session *auth.Session) []output.DoctorFeat
 		case rule.fixedReason != "":
 			f.Status = "unsupported"
 			f.Reason = rule.fixedReason
-		case rule.requiredScope == "":
+		case len(rule.requiredScopes) == 0:
 			f.Status = "unsupported"
 		default:
-			// profile me: either openid or profile satisfies it
-			if rule.command == "profile me" {
-				_, hasOpenID := scopeSet["openid"]
-				_, hasProfile := scopeSet["profile"]
-				if hasOpenID || hasProfile {
-					f.Status = "supported"
-				} else {
-					f.Status = "unsupported"
-					f.Reason = "requires openid or profile scope"
-				}
+			if hasAnyScope(scopes, rule.requiredScopes...) {
+				f.Status = "supported"
 			} else {
-				if _, ok := scopeSet[rule.requiredScope]; ok {
-					f.Status = "supported"
-				} else {
-					f.Status = "unsupported"
-					f.Reason = fmt.Sprintf("requires %s scope which is not granted", rule.requiredScope)
-				}
+				f.Status = "unsupported"
+				f.Reason = fmt.Sprintf("requires %s which is not granted", formatScopeRequirement(rule.requiredScopes...))
 			}
 		}
 		features = append(features, f)

@@ -258,6 +258,9 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 
 	requireApproval := op.RequireApproval
 	if requireApproval {
+		if cmdName == "post schedule" {
+			return "", r.emitValidationError(lineNum, op, "--require-approval is not supported with post schedule")
+		}
 		return "", r.emitPendingApproval(ctx, lineNum, op)
 	}
 
@@ -422,7 +425,7 @@ func (r *batchRunner) runReactAdd(ctx context.Context, op batchOp, dryRun bool) 
 }
 
 func (r *batchRunner) runPostSchedule(ctx context.Context, op batchOp) (any, string, int, error) {
-	cmdID := newCommandID("post_schedule", r.a.deps.Now().UTC())
+	cmdID := newCommandID("post schedule", r.a.deps.Now().UTC())
 
 	atStr := stringArg(op.Args, "at")
 	if atStr == "" {
@@ -513,6 +516,7 @@ func (r *batchRunner) emitPendingApproval(ctx context.Context, lineNum int, op b
 			Text:       text,
 			Visibility: vis,
 			Media:      stringArg(op.Args, "media"),
+			AuthorURN:  stringArg(op.Args, "author_urn"),
 		}
 	case "post delete":
 		postURN := stringArg(op.Args, "post_urn")

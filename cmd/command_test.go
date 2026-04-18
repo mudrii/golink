@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,7 +88,7 @@ func TestAuthLoginJSON(t *testing.T) {
 				Transport:      transport,
 				AccessToken:    "token",
 				ConnectedAt:    time.Date(2026, 4, 16, 12, 0, 1, 0, time.UTC),
-				Scopes:         []string{"openid", "profile", "email", "w_member_social"},
+				Scopes:         []string{"openid", "profile", "email", "w_member_social_feed"},
 				MemberURN:      "urn:li:person:abc123",
 				ProfileID:      "abc123",
 				Name:           "Ion Mudreac",
@@ -108,6 +109,109 @@ func TestAuthLoginJSON(t *testing.T) {
 
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), lines[0])
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), lines[1])
+}
+
+func TestAuthLoginHonorsSelectedOutputMode(t *testing.T) {
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+
+	loginRunner := func(_ context.Context, _ *auth.LoginRequest, profile string, transport string, _ auth.LoginFlowOptions) (*auth.Session, error) {
+		return &auth.Session{
+			Profile:     profile,
+			Transport:   transport,
+			AccessToken: "token",
+			ConnectedAt: time.Date(2026, 4, 16, 12, 0, 1, 0, time.UTC),
+			Scopes:      []string{"openid", "profile", "email", "w_member_social_feed"},
+		}, nil
+	}
+
+	tests := []struct {
+		name         string
+		args         []string
+		assertStdout func(t *testing.T, stdout *bytes.Buffer)
+	}{
+		{
+			name: "compact emits compact json for both login phases",
+			args: []string{"--output=compact", "auth", "login"},
+			assertStdout: func(t *testing.T, stdout *bytes.Buffer) {
+				t.Helper()
+
+				lines := bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))
+				if len(lines) != 2 {
+					t.Fatalf("expected 2 compact json lines, got %d: %s", len(lines), stdout.String())
+				}
+
+				start := decodeAuthLoginCompactLine(t, lines[0])
+				if start.Command != "auth login" {
+					t.Fatalf("expected auth login command, got %q", start.Command)
+				}
+				if start.Data.URL == "" {
+					t.Fatal("expected login start URL in compact output")
+				}
+
+				result := decodeAuthLoginCompactLine(t, lines[1])
+				if result.Data.Status != "success" {
+					t.Fatalf("expected success status, got %q", result.Data.Status)
+				}
+				if result.Data.Profile != "default" {
+					t.Fatalf("expected default profile, got %q", result.Data.Profile)
+				}
+			},
+		},
+		{
+			name: "jsonl emits structured lines for both login phases",
+			args: []string{"--output=jsonl", "auth", "login"},
+			assertStdout: func(t *testing.T, stdout *bytes.Buffer) {
+				t.Helper()
+
+				lines := bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))
+				if len(lines) != 2 {
+					t.Fatalf("expected 2 jsonl lines, got %d: %s", len(lines), stdout.String())
+				}
+
+				start := decodeAuthLoginCompactLine(t, lines[0])
+				if start.Data.URL == "" {
+					t.Fatal("expected login start URL in jsonl output")
+				}
+
+				result := decodeAuthLoginCompactLine(t, lines[1])
+				if result.Data.Status != "success" {
+					t.Fatalf("expected success status, got %q", result.Data.Status)
+				}
+			},
+		},
+		{
+			name: "table falls back to text for scalar login phases",
+			args: []string{"--output=table", "auth", "login"},
+			assertStdout: func(t *testing.T, stdout *bytes.Buffer) {
+				t.Helper()
+
+				out := stdout.String()
+				if !strings.Contains(out, "Open this URL to continue authentication:\nhttp") {
+					t.Fatalf("expected text login prompt, got %q", out)
+				}
+				if !strings.Contains(out, "Authenticated profile default with scopes: openid, profile, email, w_member_social_feed\n") {
+					t.Fatalf("expected text login success, got %q", out)
+				}
+				if strings.Contains(out, `{"status"`) {
+					t.Fatalf("expected table mode scalar fallback text, got %q", out)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := executeTestCommand(t, tc.args, testDepsOptions{loginRunner: loginRunner})
+			if code != 0 {
+				t.Fatalf("expected exit code 0, got %d stderr=%s", code, stderr)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("expected empty stderr, got %s", stderr)
+			}
+
+			tc.assertStdout(t, stdout)
+		})
+	}
 }
 
 func TestAuthLoginTimeoutReturnsAuthError(t *testing.T) {
@@ -349,7 +453,7 @@ func TestAuthRefreshSuccess(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":5184000,"scope":"openid profile email w_member_social"}`)
+		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":5184000,"scope":"openid profile email w_member_social_feed"}`)
 	}))
 	defer tokenServer.Close()
 
@@ -392,6 +496,51 @@ func TestAuthRefreshSuccess(t *testing.T) {
 	}
 	if payload.Data.Profile != "default" {
 		t.Errorf("expected default profile, got %q", payload.Data.Profile)
+	}
+}
+
+func TestAuthRefreshCompactOutput(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":5184000,"scope":"openid profile email"}`)
+	}))
+	defer tokenServer.Close()
+
+	store := auth.NewMemoryStore()
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:      "default",
+		Transport:    "official",
+		AccessToken:  "old-token",
+		ExpiresAt:    time.Date(2026, 4, 16, 12, 4, 0, 0, time.UTC),
+		RefreshToken: "refresh-token",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+
+	code, stdout, stderr := executeTestCommandWithHTTP(t, []string{"--output=compact", "auth", "refresh"}, testDepsOptions{
+		store: store,
+	}, tokenServer)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("expected empty stderr, got %s", stderr)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal compact output: %v (body=%s)", err, stdout.Bytes())
+	}
+	if payload["command"] != "auth refresh" {
+		t.Fatalf("expected command auth refresh, got %v", payload["command"])
+	}
+	if _, ok := payload["command_id"]; ok {
+		t.Fatal("compact output must not include command_id")
+	}
+	if _, ok := payload["generated_at"]; ok {
+		t.Fatal("compact output must not include generated_at")
 	}
 }
 
@@ -632,4 +781,25 @@ func schemaPath(t *testing.T) string {
 	t.Helper()
 
 	return filepath.Clean(filepath.Join("..", "schemas", "golink-output.schema.json"))
+}
+
+type authLoginCompactLine struct {
+	Status  string `json:"status"`
+	Command string `json:"command"`
+	Data    struct {
+		URL     string `json:"url"`
+		Status  string `json:"status"`
+		Profile string `json:"profile"`
+	} `json:"data"`
+}
+
+func decodeAuthLoginCompactLine(t *testing.T, line []byte) authLoginCompactLine {
+	t.Helper()
+
+	var payload authLoginCompactLine
+	if err := json.Unmarshal(line, &payload); err != nil {
+		t.Fatalf("unmarshal login output: %v; line=%s", err, string(line))
+	}
+
+	return payload
 }

@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/mudrii/golink/internal/api"
 	"github.com/mudrii/golink/internal/approval"
+	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/spf13/cobra"
@@ -209,13 +212,9 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 				}
 			}
 
-			session, err := a.resolveSession(cmd)
+			session, transport, err := a.resolveStoredSessionAndTransport(cmd.Context(), cmd, entry.Profile, entry.Transport)
 			if err != nil {
 				return err
-			}
-			transport, err := a.resolveTransport(cmd.Context(), session)
-			if err != nil {
-				return a.transportFailure(cmd, "failed to build transport", err.Error())
 			}
 
 			// Reconstruct payload from the entry. The payload is stored as any
@@ -232,30 +231,68 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 			cmdName := entry.Command
 			var resultData any
 			var httpStatus int
+			var auditAuthorURN string
 
 			switch cmdName {
 			case "post create":
 				text, _ := payloadMap["text"].(string)
-				visStr, _ := payloadMap["visibility"].(string)
+				visStr := "PUBLIC"
+				if visValue, ok := payloadMap["visibility"]; ok {
+					var ok bool
+					visStr, ok = visValue.(string)
+					if !ok {
+						return a.validationFailure(cmd, "approval run: invalid visibility in payload", "expected string")
+					}
+					if visStr == "" {
+						visStr = "PUBLIC"
+					}
+				}
 				media, _ := payloadMap["media"].(string)
+				authorURN, _ := payloadMap["author_urn"].(string)
 				if text == "" {
 					return a.validationFailure(cmd, "approval run: missing text in payload", "")
 				}
 				visibility, parseErr := output.ParseVisibility(visStr)
 				if parseErr != nil {
-					visibility = output.VisibilityPublic
+					return a.validationFailure(cmd, "approval run: invalid visibility in payload", parseErr.Error())
 				}
-				summary, runErr := transport.CreatePost(cmd.Context(), api.CreatePostRequest{
+				createReq := api.CreatePostRequest{
 					Text:       text,
 					Visibility: visibility,
 					Media:      media,
-				})
+					AuthorURN:  authorURN,
+				}
+				if uploadPreview, ok := payloadMap["would_upload"].(map[string]any); ok {
+					imagePath, _ := uploadPreview["path"].(string)
+					imageAlt, _ := uploadPreview["alt"].(string)
+					if imagePath == "" {
+						return a.validationFailure(cmd, "approval run: missing image path in payload", "")
+					}
+					if _, statErr := os.Stat(imagePath); statErr != nil {
+						return a.validationFailure(cmd, "cannot read image file", statErr.Error())
+					}
+					uploadURL, imageURN, initErr := transport.InitializeImageUpload(cmd.Context(), session.MemberURN)
+					if initErr != nil {
+						a.auditMutationWithAuthor(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil, authorURN)
+						return a.mapTransportError(cmd, "post create image upload init", initErr)
+					}
+					if uploadErr := transport.UploadImageBinary(cmd.Context(), uploadURL, imagePath); uploadErr != nil {
+						a.auditMutationWithAuthor(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil, authorURN)
+						return a.mapTransportError(cmd, "post create image upload binary", uploadErr)
+					}
+					createReq.MediaPayload = &api.MediaPayload{
+						ID:  imageURN,
+						Alt: imageAlt,
+					}
+				}
+				summary, runErr := transport.CreatePost(cmd.Context(), createReq)
 				if runErr != nil {
-					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
+					a.auditMutationWithAuthor(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil, authorURN)
 					return a.mapTransportError(cmd, "post create", runErr)
 				}
 				resultData = output.PostCreateData{PostSummary: *summary}
 				httpStatus = 201
+				auditAuthorURN = authorURN
 
 			case "post delete":
 				postURN, _ := payloadMap["post_urn"].(string)
@@ -288,7 +325,11 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 								vis, perr := output.ParseVisibility(v)
 								if perr == nil {
 									editReq.Visibility = &vis
+								} else {
+									return a.validationFailure(cmd, "approval run: invalid visibility in payload", perr.Error())
 								}
+							} else if set["visibility"] != nil {
+								return a.validationFailure(cmd, "approval run: invalid visibility in payload", "expected string")
 							}
 						}
 					}
@@ -304,13 +345,23 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 			case "post reshare":
 				parentURN, _ := payloadMap["parent_urn"].(string)
 				commentary, _ := payloadMap["commentary"].(string)
-				visStr, _ := payloadMap["visibility"].(string)
+				visStr := "PUBLIC"
+				if visValue, ok := payloadMap["visibility"]; ok {
+					var ok bool
+					visStr, ok = visValue.(string)
+					if !ok {
+						return a.validationFailure(cmd, "approval run: invalid visibility in payload", "expected string")
+					}
+					if visStr == "" {
+						visStr = "PUBLIC"
+					}
+				}
 				if parentURN == "" {
 					return a.validationFailure(cmd, "approval run: missing parent_urn in payload", "")
 				}
 				visibility, parseErr := output.ParseVisibility(visStr)
 				if parseErr != nil {
-					visibility = output.VisibilityPublic
+					return a.validationFailure(cmd, "approval run: invalid visibility in payload", parseErr.Error())
 				}
 				summary, runErr := transport.ResharePost(cmd.Context(), api.ResharePostRequest{
 					ParentURN:  parentURN,
@@ -340,13 +391,20 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 
 			case "react add":
 				postURN, _ := payloadMap["post_urn"].(string)
-				rtStr, _ := payloadMap["type"].(string)
+				rtStr := string(output.ReactionLike)
+				if rtValue, ok := payloadMap["type"]; ok {
+					var ok bool
+					rtStr, ok = rtValue.(string)
+					if !ok {
+						return a.validationFailure(cmd, "approval run: invalid reaction type in payload", "expected string")
+					}
+				}
 				if postURN == "" {
 					return a.validationFailure(cmd, "approval run: missing post_urn in payload", "")
 				}
 				rtype, parseErr := output.ParseReactionType(rtStr)
 				if parseErr != nil {
-					rtype = output.ReactionLike
+					return a.validationFailure(cmd, "approval run: invalid reaction type in payload", parseErr.Error())
 				}
 				data, runErr := transport.AddReaction(cmd.Context(), postURN, rtype)
 				if runErr != nil {
@@ -379,8 +437,60 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 				a.logger.Warn("approval complete rename failed", "error", completeErr)
 			}
 
-			a.auditMutation(cmd, commandID, "ok", "normal", "", httpStatus, "", nil)
+			if auditAuthorURN != "" {
+				a.auditMutationWithAuthor(cmd, commandID, "ok", "normal", "", httpStatus, "", nil, auditAuthorURN)
+			} else {
+				a.auditMutation(cmd, commandID, "ok", "normal", "", httpStatus, "", nil)
+			}
 			return a.writeSuccess(cmd, resultData, fmt.Sprintf("approval run: executed %s", cmdName))
 		},
 	}
+}
+
+func (a *app) resolveStoredSessionAndTransport(ctx context.Context, cmd *cobra.Command, profile, transport string) (auth.Session, api.Transport, error) {
+	resolvedProfile := profile
+	if resolvedProfile == "" {
+		resolvedProfile = a.settings.Profile
+	}
+
+	session, err := a.deps.SessionStore.LoadSession(ctx, resolvedProfile)
+	if err != nil {
+		if errors.Is(err, auth.ErrSessionNotFound) {
+			return auth.Session{}, nil, a.authFailure(cmd,
+				"Token expired or invalid. Re-run: golink auth login",
+				fmt.Sprintf("no active session for stored profile %s", resolvedProfile))
+		}
+		return auth.Session{}, nil, a.transportFailure(cmd, "failed to resolve session", err.Error())
+	}
+
+	authenticated, err := session.IsAuthenticated(a.deps.Now())
+	if err != nil {
+		return auth.Session{}, nil, a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", err.Error())
+	}
+	if !authenticated {
+		return auth.Session{}, nil, a.authFailure(cmd,
+			"Token expired or invalid. Re-run: golink auth login",
+			fmt.Sprintf("session for stored profile %s has no usable access token", resolvedProfile))
+	}
+
+	settings := a.settings
+	if profile != "" {
+		settings.Profile = profile
+	}
+	if transport != "" {
+		settings.Transport = transport
+	}
+
+	resolvedSession, refreshErr := a.maybeRefreshSession(ctx, *session)
+	if refreshErr != nil {
+		return auth.Session{}, nil, a.authFailure(cmd,
+			"Token expired or invalid. Re-run: golink auth login",
+			fmt.Sprintf("failed to refresh session: %v", refreshErr))
+	}
+	resolvedTransport, err := a.deps.TransportFactory(ctx, settings, resolvedSession, a.logger)
+	if err != nil {
+		return auth.Session{}, nil, a.transportFailure(cmd, "failed to build transport", err.Error())
+	}
+
+	return resolvedSession, resolvedTransport, nil
 }

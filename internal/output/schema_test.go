@@ -29,7 +29,7 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 					"is_authenticated": true,
 					"profile": "default",
 					"transport": "official",
-					"scopes": ["openid", "profile", "email", "w_member_social"],
+					"scopes": ["openid", "profile", "email", "w_member_social_feed"],
 					"expires_at": "2026-04-16T11:00:00Z",
 					"refresh_expires_at": "2027-04-16T10:00:00Z",
 					"auth_flow": "pkce"
@@ -50,7 +50,7 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 					"refreshed_at": "2026-04-16T10:05:00Z",
 					"expires_at": "2026-06-15T10:05:00Z",
 					"refresh_expires_at": "2027-04-16T10:00:00Z",
-					"scopes_granted": ["openid", "profile", "email", "w_member_social"]
+					"scopes_granted": ["openid", "profile", "email", "w_member_social_feed"]
 				}
 			}`),
 		},
@@ -83,7 +83,7 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 					"profile": "default",
 					"transport": "official",
 					"connected_at": "2026-04-16T10:05:00Z",
-					"scopes_granted": ["openid", "profile", "email", "w_member_social"]
+					"scopes_granted": ["openid", "profile", "email", "w_member_social_feed"]
 				}
 			}`),
 		},
@@ -417,7 +417,7 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 						"refresh_available": true,
 						"refresh_expires_at": "2027-04-17T12:00:00Z",
 						"refresh_in_days": 365,
-						"scopes": ["openid", "profile", "email", "w_member_social"],
+						"scopes": ["openid", "profile", "email", "w_member_social_feed"],
 						"auth_flow": "pkce",
 						"connected_at": "2026-04-10T12:00:00Z"
 					},

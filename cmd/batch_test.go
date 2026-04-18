@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"github.com/mudrii/golink/internal/api"
+	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
+	"github.com/mudrii/golink/internal/schedule"
+	"github.com/spf13/cobra"
 )
 
 // countingTransport wraps fakeTransport and counts calls.
@@ -307,6 +310,50 @@ func TestBatchStrictExitCode(t *testing.T) {
 	}
 }
 
+func TestBatchPostScheduleRequireApprovalRejected(t *testing.T) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	astore := approval.NewMemoryStore()
+	opsPath := writeOpsFile(t, []string{
+		`{"command":"post schedule","args":{"at":"2026-04-17T14:00:00Z","text":"scheduled"},"require_approval":true}`,
+	})
+
+	code := ExecuteContext(context.Background(), []string{"--json", "batch", opsPath}, Dependencies{
+		Stdout:           stdout,
+		Stderr:           stderr,
+		Now:              func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
+		SessionStore:     authenticatedStore(t),
+		IsInteractive:    func() bool { return false },
+		TransportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		AuditSink:        audit.NewMemorySink(),
+		IdempotencyStore: idempotency.NewMemoryStore(),
+		ApprovalStore:    astore,
+	}, BuildInfo{Version: "test"})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d stderr=%s", code, stderr)
+	}
+
+	lines := parseBatchLines(t, stdout)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 output line, got %d", len(lines))
+	}
+	data := lines[0]["data"].(map[string]any)
+	if data["status"] != "validation_error" {
+		t.Fatalf("expected validation_error, got %v", data["status"])
+	}
+	if !strings.Contains(data["error"].(string), "not supported") {
+		t.Fatalf("unexpected error: %v", data["error"])
+	}
+
+	items, err := astore.List(context.Background())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no staged approvals, got %d", len(items))
+	}
+}
+
 func TestBatchStdinInput(t *testing.T) {
 	ct := &countingTransport{inner: &fakeTransport{name: "official"}}
 	istore := idempotency.NewMemoryStore()
@@ -334,5 +381,110 @@ func TestBatchStdinInput(t *testing.T) {
 	combined := stdout.String() + stderr.String()
 	if !strings.Contains(combined, "batch") {
 		t.Errorf("expected 'batch' in help output, got: %s", combined)
+	}
+}
+
+func TestBatchRunOpDeleteDryRunAndValidation(t *testing.T) {
+	t.Helper()
+
+	runner := &batchRunner{
+		a:         &app{deps: normalizeDependencies(Dependencies{Now: fixedNow, ScheduleStore: schedule.NewMemoryStore()})},
+		cmd:       &cobra.Command{},
+		transport: &fakeTransport{name: "official"},
+	}
+
+	data, cmdID, status, err := runner.runPostDelete(context.Background(), batchOp{
+		Args: map[string]any{"post_urn": "urn:li:post:123"},
+	}, true)
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if cmdID == "" {
+		t.Fatal("cmdID empty")
+	}
+	if status != 0 {
+		t.Fatalf("dry-run status = %d", status)
+	}
+	if _, ok := data.(output.PostDeleteDryRunData); !ok {
+		t.Fatalf("dry-run type = %T", data)
+	}
+
+	if _, _, _, err := runner.runPostDelete(context.Background(), batchOp{
+		Args: map[string]any{},
+	}, false); err == nil {
+		t.Fatal("expected missing post_urn error")
+	}
+}
+
+func TestBatchRunOpCommentAndReactionDryRun(t *testing.T) {
+	t.Helper()
+
+	runner := &batchRunner{
+		a:         &app{deps: normalizeDependencies(Dependencies{Now: fixedNow, ScheduleStore: schedule.NewMemoryStore()})},
+		cmd:       &cobra.Command{},
+		transport: &fakeTransport{name: "official"},
+	}
+
+	commentData, _, _, err := runner.runCommentAdd(context.Background(), batchOp{
+		Args: map[string]any{
+			"post_urn": "urn:li:post:456",
+			"text":     "hello comment",
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("comment dry-run: %v", err)
+	}
+	if _, ok := commentData.(output.CommentAddDryRunData); !ok {
+		t.Fatalf("comment type = %T", commentData)
+	}
+
+	reactionData, _, _, err := runner.runReactAdd(context.Background(), batchOp{
+		Args: map[string]any{"post_urn": "urn:li:post:789"},
+	}, true)
+	if err != nil {
+		t.Fatalf("react dry-run: %v", err)
+	}
+	if _, ok := reactionData.(output.ReactionAddDryRunData); !ok {
+		t.Fatalf("react type = %T", reactionData)
+	}
+}
+
+func TestBatchRunPostScheduleValidation(t *testing.T) {
+	runner := &batchRunner{
+		a: &app{deps: normalizeDependencies(Dependencies{
+			Now:           fixedNow,
+			ScheduleStore: schedule.NewMemoryStore(),
+		})},
+		cmd:       &cobra.Command{},
+		transport: &fakeTransport{name: "official"},
+	}
+
+	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+		Args: map[string]any{"text": "missing time"},
+	}); err == nil {
+		t.Fatal("expected missing time validation error")
+	}
+	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+		Args: map[string]any{"at": fixedNow().Add(-time.Minute).Format(time.RFC3339), "text": "late"},
+	}); err == nil {
+		t.Fatal("expected past at validation error")
+	}
+	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+		Args: map[string]any{
+			"text":       "relative path",
+			"image_path": "/tmp/example.jpg",
+			"at":         fixedNow().Add(2 * time.Hour).Format(time.RFC3339),
+		},
+	}); err != nil {
+		t.Fatal("unexpected error for absolute path schedule")
+	}
+	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+		Args: map[string]any{
+			"text":       "relative path",
+			"image_path": "relative/path.jpg",
+			"at":         fixedNow().Add(2 * time.Hour).Format(time.RFC3339),
+		},
+	}); err == nil {
+		t.Fatal("expected relative image path validation error")
 	}
 }

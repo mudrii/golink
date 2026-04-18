@@ -26,6 +26,7 @@ import (
 )
 
 const maxInlineBodyBytes = 1024
+const maxCassetteLineBytes = 1 * 1024 * 1024 // 1 MiB
 
 // Entry is one line of a JSONL cassette file.
 type Entry struct {
@@ -69,6 +70,7 @@ func LoadCassette(path string) (*Cassette, error) {
 
 	c := &Cassette{index: make(map[replayKey]EntryResponse)}
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), maxCassetteLineBytes)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
@@ -94,12 +96,13 @@ func newCassette() *Cassette {
 	return &Cassette{index: make(map[replayKey]EntryResponse)}
 }
 
-// Save appends the cassette entries to path (append-only).
+// Save persists the current in-memory cassette entries to path.
+// Repeated calls are idempotent and overwrite previous file contents.
 func (c *Cassette) Save(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open cassette for write: %w", err)
 	}

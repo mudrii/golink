@@ -30,17 +30,10 @@ func newOrgListCommand(a *app) *cobra.Command {
 				return err
 			}
 
-			hasOrgScope := false
-			for _, s := range session.Scopes {
-				if s == "w_organization_social" {
-					hasOrgScope = true
-					break
-				}
-			}
-			if !hasOrgScope {
+			if !sessionHasAnyScope(session, orgWriteScopes...) {
 				return a.validationFailure(cmd,
-					"org list requires the w_organization_social scope",
-					"run `golink auth login` with w_organization_social added to the LinkedIn app")
+					fmt.Sprintf("org list requires %s", formatScopeRequirement(orgWriteScopes...)),
+					"run `golink auth login` with the organization social scope added to the LinkedIn app")
 			}
 
 			transport, err := a.resolveTransport(cmd.Context(), session)

@@ -23,3 +23,8 @@ Thumbs.db
 # Codex / agent artifacts
 .codex/
 AGENTS.md
+
+# claude / agents artifacts
+.claude/
+docs/
+CLAUDE.md

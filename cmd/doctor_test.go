@@ -25,7 +25,7 @@ func validDoctorSession(now time.Time) auth.Session {
 		ExpiresAt:        now.Add(30 * 24 * time.Hour),
 		RefreshToken:     "rtok",
 		RefreshExpiresAt: now.Add(365 * 24 * time.Hour),
-		Scopes:           []string{"openid", "profile", "email", "w_member_social"},
+		Scopes:           []string{"openid", "profile", "email", "w_member_social_feed"},
 		AuthFlow:         "pkce",
 		ConnectedAt:      now.Add(-7 * 24 * time.Hour),
 		MemberURN:        "urn:li:person:abc123",
@@ -275,13 +275,13 @@ func TestDoctorStrictOKExit0(t *testing.T) {
 }
 
 func TestDoctorFeatureMapScopes(t *testing.T) {
-	// Scopes: openid + w_member_social → post create supported, post list always unsupported.
+	// Scopes: openid + member social write scope → post create supported, post list always unsupported.
 	t.Setenv("GOLINK_CLIENT_ID", "client-123")
 
 	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
 	store := auth.NewMemoryStore()
 	sess := validDoctorSession(now)
-	sess.Scopes = []string{"openid", "w_member_social"}
+	sess.Scopes = []string{"openid", "w_member_social_feed"}
 	if err := store.SaveSession(context.Background(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
@@ -358,5 +358,67 @@ func TestDoctorNotAudited(t *testing.T) {
 
 	if len(sink.Entries()) != 0 {
 		t.Fatalf("doctor must not be audited, got %d entries", len(sink.Entries()))
+	}
+}
+
+func TestWriteDoctorText(t *testing.T) {
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	var out bytes.Buffer
+	data := outputtest.DoctorData{
+		APIVersion: "2026-04-17",
+		Environment: outputtest.DoctorEnvironment{
+			GOLINKClientID:   true,
+			GOLINKAPIVersion: "2026-04-17",
+			ConfigPath:       "/tmp/config.yaml",
+		},
+		Session: outputtest.DoctorSession{
+			Profile:          "default",
+			Authenticated:    true,
+			ExpiresAt:        now.Add(time.Hour).Format(time.RFC3339),
+			ExpiresInHours:   1,
+			RefreshAvailable: true,
+			RefreshExpiresAt: now.Add(48 * time.Hour).Format(time.RFC3339),
+			RefreshInDays:    2,
+			ConnectedAt:      now.Add(-24 * time.Hour).Format(time.RFC3339),
+			Scopes:           []string{"openid", "profile"},
+			AuthFlow:         "pkce",
+		},
+		Probe: outputtest.DoctorProbe{
+			Attempted: true,
+			Status:    200,
+			Member:    "urn:li:person:abc123",
+		},
+		Features: []outputtest.DoctorFeature{
+			{Command: "post create", Status: "supported"},
+			{Command: "post delete", Status: "unsupported", Reason: "missing scope"},
+		},
+		Audit: outputtest.DoctorAudit{
+			Path:    "/tmp/audit.log",
+			Enabled: true,
+		},
+		Warnings: []string{"access token expires soon"},
+		Errors:   []string{"probe timeout"},
+		Health:   "error",
+	}
+
+	if err := writeDoctorText(&out, data); err != nil {
+		t.Fatalf("writeDoctorText: %v", err)
+	}
+	got := out.String()
+	if got == "" {
+		t.Fatal("expected rendered doctor text output")
+	}
+	for _, needle := range []string{
+		"golink doctor — diagnostics",
+		"Session (profile: default)",
+		"LinkedIn probe",
+		"Feature support",
+		"Warnings",
+		"Errors",
+		"Health: error",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("missing section %q", needle)
+		}
 	}
 }

@@ -6,7 +6,7 @@ LinkedIn CLI for humans and LLM agents.
 
 ## Overview
 
-golink talks to LinkedIn through a transport-pluggable architecture. The default **official** transport wraps LinkedIn's Posts API and Community Management API with retry + rate-limit awareness. An **unofficial** transport slot exists behind `--transport=unofficial` but ships as a typed `ErrFeatureUnavailable` no-op until wired; `--transport=auto` falls back transparently where the official adapter is out of scope.
+golink talks to LinkedIn through a transport-pluggable architecture. The default **official** transport wraps LinkedIn's Posts API and Community Management API with retry + rate-limit awareness. An **unofficial** transport slot exists behind `--transport=unofficial` but ships as a typed `ErrFeatureUnavailable` no-op until wired; `--transport=auto` currently resolves through the official adapter and preserves unsupported responses until fallback behavior is implemented.
 
 ## Capability matrix
 
@@ -47,14 +47,14 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `plan comment add` | ✅ | unit | Generate a comment-add plan document |
 | `plan react add` | ✅ | unit | Generate a react-add plan document |
 | `execute <plan.json>` | ✅ | unit | Execute a golink.plan/v1 document via the normal Transport path |
-| `org list` | ✅ | httptest | List organizations where the session member is ADMINISTRATOR; requires `w_organization_social` scope |
-| `post create --as-org <urn>` | ✅ | httptest | Post as an organization; requires `w_organization_social` scope |
+| `org list` | ✅ | httptest | List organizations where the session member is ADMINISTRATOR; accepts `w_organization_social_feed` and legacy `w_organization_social` |
+| `post create --as-org <urn>` | ✅ | httptest | Post as an organization; accepts `w_organization_social_feed` and legacy `w_organization_social` |
 
 "httptest" means the code path is covered by an integration test against a local HTTP server that mimics the LinkedIn endpoint; a real request to `api.linkedin.com` requires your own developer app.
 
 ## Organization posting
 
-To post as a LinkedIn organization page you need the `w_organization_social` scope added to your LinkedIn app. The session member must be an ADMINISTRATOR of the organization.
+To post as a LinkedIn organization page you should request `w_organization_social_feed` on your LinkedIn app. `golink` also accepts the legacy `w_organization_social` scope for older apps. The session member must be an ADMINISTRATOR of the organization.
 
 ```sh
 # List organizations you administer
@@ -77,7 +77,7 @@ golink --json plan post create \
 golink execute plan.json
 ```
 
-`golink doctor` reflects `org list` and `post create --as-org` availability based on whether `w_organization_social` is in the session scopes.
+`golink doctor` reflects `org list` and `post create --as-org` availability based on whether an organization social write scope is in the session scopes.
 
 ## Scheduling
 
@@ -143,7 +143,7 @@ golink supports five output modes via `--output`:
 |---|---|---|
 | _(default)_ | `text` | Human-readable plain text |
 | `--json` or `--output=json` | `json` | Full JSON envelope, schema-validated |
-| `--output=jsonl` | `jsonl` | One JSON object per line; list commands emit one item per line, scalar commands emit a single envelope line |
+| `--output=jsonl` | `jsonl` | One JSON object per line; list commands emit one item per line, scalar commands emit a single envelope line unless the command is intentionally multi-event (for example `auth login`) |
 | `--output=compact` or `--compact` | `compact` | Stripped envelope (no `command_id`, `generated_at`, `rate_limit`); useful for LLM context budgets |
 | `--output=table` | `table` | Tabwriter-based columnar output for list commands; scalar commands fall back to text |
 
@@ -409,7 +409,7 @@ Environment
 Session
   status     authenticated
   profile    urn:li:member:12345678 (Ada Lovelace)
-  scopes     openid profile email w_member_social
+  scopes     openid profile email w_member_social_feed
   expires_at 2026-04-24 12:00:00 UTC
 
 Probe: GET /v2/userinfo
@@ -455,8 +455,8 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 ## Prerequisites for live API access
 
 - A [LinkedIn Developer App](https://www.linkedin.com/developers/) with native PKCE enabled (contact LinkedIn support to enable PKCE for your app)
-- The `w_member_social` scope (self-serve via the developer portal)
-- Endpoint-family specific scopes as required (`r_member_social`, `w_member_social_feed`, organization-scoped permissions)
+- The current member social write scope: `w_member_social_feed` (`golink` also accepts legacy `w_member_social` where tokens still carry it)
+- Endpoint-family specific scopes as required (`r_member_social`, organization social feed permissions, and any LinkedIn product-specific approvals)
 - Go 1.26.2+ for building from source
 
 ## Project layout

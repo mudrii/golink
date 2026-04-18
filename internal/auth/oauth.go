@@ -21,11 +21,9 @@ import (
 const (
 	// AuthorizationURL is LinkedIn's native-PKCE authorization endpoint used
 	// for the public-client flow — authorization + token exchange without a
-	// client_secret. This path is NOT in the public LinkedIn developer docs
-	// (which document only /oauth/v2/authorization + confidential-client
-	// PKCE). If LinkedIn retires native-PKCE, callers will need to register
-	// a confidential app and pass client_secret in token exchange. See
-	// README auth section for the empirical contract.
+	// client_secret. LinkedIn documents this native-client flow separately
+	// from the confidential-client OAuth pages and requires the default
+	// system browser plus a loopback redirect listener.
 	AuthorizationURL = "https://www.linkedin.com/oauth/native-pkce/authorization"
 	// TokenURL is the LinkedIn OAuth token endpoint.
 	TokenURL = "https://www.linkedin.com/oauth/v2/accessToken"
@@ -200,7 +198,7 @@ func CompleteLogin(
 		}
 	}
 	if len(session.Scopes) == 0 {
-		session.Scopes = []string{"openid", "profile", "email", "w_member_social"}
+		session.Scopes = []string{"openid", "profile", "email", "w_member_social_feed"}
 	}
 
 	if err := session.Validate(); err != nil {

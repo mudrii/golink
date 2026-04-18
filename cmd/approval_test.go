@@ -1,15 +1,87 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
+	"os"
 	"testing"
+	"time"
 
+	"github.com/mudrii/golink/internal/api"
 	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/audit"
+	"github.com/mudrii/golink/internal/auth"
+	"github.com/mudrii/golink/internal/config"
 	outputtest "github.com/mudrii/golink/internal/output"
 )
 
 // schemaPath is defined in batch_test.go; reused here.
+
+func authenticatedStoreForProfile(t *testing.T, profile, transport, memberURN string, scopes ...string) auth.Store {
+	t.Helper()
+
+	store := auth.NewMemoryStore()
+	if err := store.SaveSession(context.Background(), auth.Session{
+		Profile:     profile,
+		Transport:   transport,
+		AccessToken: "token-" + profile,
+		Scopes:      scopes,
+		MemberURN:   memberURN,
+		ExpiresAt:   time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	return store
+}
+
+type approvalRecordingTransport struct {
+	fakeTransport
+	t              *testing.T
+	wantAuthorURN  string
+	wantOwnerURN   string
+	wantUploadPath string
+	wantUploadAlt  string
+	sawCreate      bool
+	sawInit        bool
+	sawUpload      bool
+}
+
+func (tpt *approvalRecordingTransport) CreatePost(_ context.Context, req api.CreatePostRequest) (*outputtest.PostSummary, error) {
+	tpt.sawCreate = true
+	if req.AuthorURN != tpt.wantAuthorURN {
+		tpt.t.Fatalf("author_urn = %q, want %q", req.AuthorURN, tpt.wantAuthorURN)
+	}
+	if tpt.wantUploadPath != "" {
+		if req.MediaPayload == nil {
+			tpt.t.Fatal("media payload missing")
+		}
+		if req.MediaPayload.Alt != tpt.wantUploadAlt {
+			tpt.t.Fatalf("media alt = %q, want %q", req.MediaPayload.Alt, tpt.wantUploadAlt)
+		}
+	} else if req.MediaPayload != nil {
+		tpt.t.Fatalf("unexpected media payload: %+v", req.MediaPayload)
+	}
+
+	return tpt.fakeTransport.CreatePost(context.Background(), req)
+}
+
+func (tpt *approvalRecordingTransport) InitializeImageUpload(_ context.Context, ownerURN string) (string, string, error) {
+	tpt.sawInit = true
+	if ownerURN != tpt.wantOwnerURN {
+		tpt.t.Fatalf("image upload owner = %q, want %q", ownerURN, tpt.wantOwnerURN)
+	}
+	return tpt.fakeTransport.InitializeImageUpload(context.Background(), ownerURN)
+}
+
+func (tpt *approvalRecordingTransport) UploadImageBinary(_ context.Context, _, filePath string) error {
+	tpt.sawUpload = true
+	if filePath != tpt.wantUploadPath {
+		tpt.t.Fatalf("upload path = %q, want %q", filePath, tpt.wantUploadPath)
+	}
+	return nil
+}
 
 func TestPostCreateRequireApproval_ExitCode3(t *testing.T) {
 	sink := audit.NewMemorySink()
@@ -183,6 +255,258 @@ func TestApprovalRun_ExecutesViaTransport(t *testing.T) {
 	items2, _ := astore.List(t.Context())
 	if items2[0].State != approval.StateCompleted {
 		t.Errorf("expected completed, got %s", items2[0].State)
+	}
+}
+
+func TestApprovalRun_UsesStoredProfileTransportAndAuthorURN(t *testing.T) {
+	astore := approval.NewMemoryStore()
+
+	code, _, stderr := executeTestCommand(t,
+		[]string{
+			"--json",
+			"--profile", "staged-profile",
+			"--transport", "unofficial",
+			"--accept-unofficial-risk",
+			"post", "create",
+			"--text", "Hello staged org",
+			"--as-org", "urn:li:organization:111",
+			"--require-approval",
+		},
+		testDepsOptions{approvalStore: astore})
+	if code != 3 {
+		t.Fatalf("expected exit 3, got %d stderr=%s", code, stderr)
+	}
+
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 staged entry, got %d", len(items))
+	}
+	cmdID := items[0].CommandID
+
+	code, _, stderr = executeTestCommand(t,
+		[]string{"--json", "approval", "grant", cmdID},
+		testDepsOptions{approvalStore: astore})
+	if code != 0 {
+		t.Fatalf("grant exit %d stderr=%s", code, stderr)
+	}
+
+	transport := &approvalRecordingTransport{
+		fakeTransport: fakeTransport{name: "unofficial"},
+		t:             t,
+		wantAuthorURN: "urn:li:organization:111",
+	}
+
+	var (
+		gotProfile   string
+		gotTransport string
+		gotSession   string
+	)
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", cmdID},
+		testDepsOptions{
+			store: authenticatedStoreForProfile(t,
+				"staged-profile",
+				"unofficial",
+				"urn:li:person:stage123",
+				"openid", "profile", "email", "w_member_social", "w_organization_social",
+			),
+			approvalStore: astore,
+			transportFactory: func(_ context.Context, settings config.Settings, session auth.Session, _ *slog.Logger) (api.Transport, error) {
+				gotProfile = settings.Profile
+				gotTransport = settings.Transport
+				gotSession = session.Profile
+				return transport, nil
+			},
+		})
+	if code != 0 {
+		t.Fatalf("run exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if gotProfile != "staged-profile" {
+		t.Fatalf("transport factory profile = %q, want staged-profile", gotProfile)
+	}
+	if gotTransport != "unofficial" {
+		t.Fatalf("transport factory transport = %q, want unofficial", gotTransport)
+	}
+	if gotSession != "staged-profile" {
+		t.Fatalf("transport factory session profile = %q, want staged-profile", gotSession)
+	}
+	if !transport.sawCreate {
+		t.Fatal("expected CreatePost to be called")
+	}
+}
+
+func TestApprovalRun_ReplaysStoredImageUploadPayload(t *testing.T) {
+	astore := approval.NewMemoryStore()
+	imagePath := t.TempDir() + "/photo.jpg"
+	if err := os.WriteFile(imagePath, []byte("image-bytes"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	entry := approval.Entry{
+		CommandID: "approval-image",
+		Command:   "post create",
+		CreatedAt: time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		Profile:   "image-profile",
+		Transport: "official",
+		Payload: outputtest.PostPayloadPreview{
+			Endpoint:   "POST /rest/posts",
+			Text:       "Replay image payload",
+			Visibility: outputtest.VisibilityPublic,
+			AuthorURN:  "urn:li:organization:222",
+			WouldUpload: &outputtest.ImageUploadPreview{
+				Path:           imagePath,
+				PlaceholderURN: "urn:li:image:<to-be-uploaded>",
+				Alt:            "poster alt",
+			},
+		},
+	}
+	if _, err := astore.Stage(t.Context(), entry); err != nil {
+		t.Fatalf("stage approval: %v", err)
+	}
+	if err := astore.Grant(t.Context(), entry.CommandID); err != nil {
+		t.Fatalf("grant approval: %v", err)
+	}
+
+	transport := &approvalRecordingTransport{
+		fakeTransport:  fakeTransport{name: "official"},
+		t:              t,
+		wantAuthorURN:  "urn:li:organization:222",
+		wantOwnerURN:   "urn:li:person:image123",
+		wantUploadPath: imagePath,
+		wantUploadAlt:  "poster alt",
+	}
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", entry.CommandID},
+		testDepsOptions{
+			store: authenticatedStoreForProfile(t,
+				"image-profile",
+				"official",
+				"urn:li:person:image123",
+				"openid", "profile", "email", "w_member_social", "w_organization_social",
+			),
+			approvalStore: astore,
+			transportFactory: func(_ context.Context, settings config.Settings, session auth.Session, _ *slog.Logger) (api.Transport, error) {
+				if settings.Profile != "image-profile" {
+					t.Fatalf("settings profile = %q, want image-profile", settings.Profile)
+				}
+				if settings.Transport != "official" {
+					t.Fatalf("settings transport = %q, want official", settings.Transport)
+				}
+				if session.Profile != "image-profile" {
+					t.Fatalf("session profile = %q, want image-profile", session.Profile)
+				}
+				return transport, nil
+			},
+		})
+	if code != 0 {
+		t.Fatalf("run exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if !transport.sawInit {
+		t.Fatal("expected InitializeImageUpload to be called")
+	}
+	if !transport.sawUpload {
+		t.Fatal("expected UploadImageBinary to be called")
+	}
+	if !transport.sawCreate {
+		t.Fatal("expected CreatePost to be called")
+	}
+
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(items) != 1 || items[0].State != approval.StateCompleted {
+		t.Fatalf("approval state = %+v, want completed entry", items)
+	}
+}
+
+func TestPostCreateRequireApproval_PreservesImagePayload(t *testing.T) {
+	astore := approval.NewMemoryStore()
+	imagePath := t.TempDir() + "/photo.jpg"
+	if err := os.WriteFile(imagePath, []byte("image-bytes"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	code, _, stderr := executeTestCommand(t,
+		[]string{
+			"--json",
+			"--profile", "image-profile",
+			"post", "create",
+			"--text", "Replay image payload",
+			"--image", imagePath,
+			"--image-alt", "poster alt",
+			"--as-org", "urn:li:organization:222",
+			"--require-approval",
+		},
+		testDepsOptions{approvalStore: astore})
+	if code != 3 {
+		t.Fatalf("expected exit 3, got %d stderr=%s", code, stderr)
+	}
+
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 staged entry, got %d", len(items))
+	}
+	cmdID := items[0].CommandID
+
+	code, _, stderr = executeTestCommand(t,
+		[]string{"--json", "approval", "grant", cmdID},
+		testDepsOptions{approvalStore: astore})
+	if code != 0 {
+		t.Fatalf("grant exit %d stderr=%s", code, stderr)
+	}
+
+	transport := &approvalRecordingTransport{
+		fakeTransport:  fakeTransport{name: "official"},
+		t:              t,
+		wantAuthorURN:  "urn:li:organization:222",
+		wantOwnerURN:   "urn:li:person:image123",
+		wantUploadPath: imagePath,
+		wantUploadAlt:  "poster alt",
+	}
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", cmdID},
+		testDepsOptions{
+			store: authenticatedStoreForProfile(t,
+				"image-profile",
+				"official",
+				"urn:li:person:image123",
+				"openid", "profile", "email", "w_member_social", "w_organization_social",
+			),
+			approvalStore: astore,
+			transportFactory: func(_ context.Context, settings config.Settings, session auth.Session, _ *slog.Logger) (api.Transport, error) {
+				if settings.Profile != "image-profile" {
+					t.Fatalf("settings profile = %q, want image-profile", settings.Profile)
+				}
+				if settings.Transport != "official" {
+					t.Fatalf("settings transport = %q, want official", settings.Transport)
+				}
+				if session.Profile != "image-profile" {
+					t.Fatalf("session profile = %q, want image-profile", session.Profile)
+				}
+				return transport, nil
+			},
+		})
+	if code != 0 {
+		t.Fatalf("run exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if !transport.sawInit {
+		t.Fatal("expected InitializeImageUpload to be called")
+	}
+	if !transport.sawUpload {
+		t.Fatal("expected UploadImageBinary to be called")
+	}
+	if !transport.sawCreate {
+		t.Fatal("expected CreatePost to be called")
 	}
 }
 

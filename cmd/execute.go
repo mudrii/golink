@@ -59,6 +59,17 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 			dryRunFlag, _ := cmd.Flags().GetBool("dry-run")
 			effectiveDryRun := dryRunFlag || p.DryRun
 
+			originalSettings := a.settings
+			defer func() {
+				a.settings = originalSettings
+				a.activePlan = nil
+			}()
+			if p.Profile != "" {
+				a.settings.Profile = p.Profile
+			}
+			if p.Transport != "" {
+				a.settings.Transport = p.Transport
+			}
 			// Override dry-run in settings so downstream commands honour it.
 			if effectiveDryRun {
 				a.settings.DryRun = true

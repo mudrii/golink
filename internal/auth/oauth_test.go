@@ -171,7 +171,7 @@ func TestCompleteLogin(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(TokenResponse{
 			AccessToken: "token-123",
 			ExpiresIn:   3600,
-			Scope:       "openid profile email w_member_social",
+			Scope:       "openid profile email w_member_social_feed",
 		})
 	})
 	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +237,7 @@ func TestCompleteLogin(t *testing.T) {
 	if session.ProfileID != "abc123" {
 		t.Fatalf("unexpected profile id: %q", session.ProfileID)
 	}
-	if !strings.Contains(strings.Join(session.Scopes, " "), "w_member_social") {
+	if !strings.Contains(strings.Join(session.Scopes, " "), "w_member_social_feed") {
 		t.Fatalf("unexpected scopes: %#v", session.Scopes)
 	}
 }

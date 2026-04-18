@@ -692,6 +692,12 @@ func (o *Official) EditPost(ctx context.Context, req EditPostRequest) (*output.P
 	}
 
 	now := o.now().UTC()
+	updatedAt := now
+	if lastModified := strings.TrimSpace(resp.Header.Get("Last-Modified")); lastModified != "" {
+		if t, err := http.ParseTime(lastModified); err == nil && !t.IsZero() {
+			updatedAt = t.UTC()
+		}
+	}
 
 	// LinkedIn returns 204 on success — build result from the request inputs.
 	if resp.Status == http.StatusNoContent || len(resp.Body) == 0 {
@@ -712,16 +718,17 @@ func (o *Official) EditPost(ctx context.Context, req EditPostRequest) (*output.P
 				URL:        fmt.Sprintf("https://www.linkedin.com/feed/update/%s", postURN),
 				AuthorURN:  o.authorURN,
 			},
-			UpdatedAt: now,
+			UpdatedAt: updatedAt,
 		}, nil
 	}
 
 	var raw struct {
-		ID         string `json:"id"`
-		Commentary string `json:"commentary"`
-		Author     string `json:"author"`
-		Visibility string `json:"visibility"`
-		CreatedAt  int64  `json:"createdAt"`
+		ID          string `json:"id"`
+		Commentary  string `json:"commentary"`
+		Author      string `json:"author"`
+		Visibility  string `json:"visibility"`
+		CreatedAt   int64  `json:"createdAt"`
+		UpdatedAtMS int64  `json:"updatedAt"`
 	}
 	if err := resp.UnmarshalJSON(&raw); err != nil {
 		return nil, fmt.Errorf("decode edit post response: %w", err)
@@ -735,6 +742,9 @@ func (o *Official) EditPost(ctx context.Context, req EditPostRequest) (*output.P
 	if id == "" {
 		id = postURN
 	}
+	if raw.UpdatedAtMS > 0 {
+		updatedAt = time.UnixMilli(raw.UpdatedAtMS).UTC()
+	}
 	return &output.PostEditData{
 		PostSummary: output.PostSummary{
 			ID:         id,
@@ -744,7 +754,7 @@ func (o *Official) EditPost(ctx context.Context, req EditPostRequest) (*output.P
 			URL:        fmt.Sprintf("https://www.linkedin.com/feed/update/%s", id),
 			AuthorURN:  raw.Author,
 		},
-		UpdatedAt: now,
+		UpdatedAt: updatedAt,
 	}, nil
 }
 

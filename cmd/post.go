@@ -108,6 +108,13 @@ func newPostCreateCommand(a *app) *cobra.Command {
 					Media:      flags.media,
 					AuthorURN:  asOrg,
 				}
+				if imagePath != "" {
+					payload.WouldUpload = &output.ImageUploadPreview{
+						Path:           imagePath,
+						PlaceholderURN: "urn:li:image:<to-be-uploaded>",
+						Alt:            strings.TrimSpace(flags.imageAlt),
+					}
+				}
 				return a.approvalPending(cmd, cmdID, payload, ikey)
 			}
 
@@ -130,17 +137,10 @@ func newPostCreateCommand(a *app) *cobra.Command {
 
 			// Scope check for org posting — must happen after session is resolved.
 			if asOrg != "" {
-				hasScope := false
-				for _, s := range session.Scopes {
-					if s == "w_organization_social" {
-						hasScope = true
-						break
-					}
-				}
-				if !hasScope {
+				if !sessionHasAnyScope(session, orgWriteScopes...) {
 					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 					return a.validationFailure(cmd,
-						"posting as an organization requires the w_organization_social scope",
+						fmt.Sprintf("posting as an organization requires %s", formatScopeRequirement(orgWriteScopes...)),
 						"run `golink auth login` with the scope added to the LinkedIn app")
 				}
 			}
@@ -209,7 +209,7 @@ func newPostCreateCommand(a *app) *cobra.Command {
 	cmd.Flags().StringVar(&flags.media, "media", "", "optional media path")
 	cmd.Flags().StringVar(&flags.image, "image", "", "path to a local image to attach (single image)")
 	cmd.Flags().StringVar(&flags.imageAlt, "image-alt", "", "alt text for the attached image")
-	cmd.Flags().StringVar(&flags.asOrg, "as-org", "", "post as an organization (urn:li:organization:...); requires w_organization_social scope")
+	cmd.Flags().StringVar(&flags.asOrg, "as-org", "", "post as an organization (urn:li:organization:...); requires organization social write scope")
 
 	return cmd
 }

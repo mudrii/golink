@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/mudrii/golink/internal/api"
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
+	"github.com/mudrii/golink/internal/config"
+	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/mudrii/golink/internal/schedule"
 )
@@ -42,16 +45,21 @@ func (f *failingTransport) CreatePost(_ context.Context, _ api.CreatePostRequest
 func scheduleAuthStore(t *testing.T) auth.Store {
 	t.Helper()
 	store := auth.NewMemoryStore()
+	saveScheduleSession(t, store, "default", "official", "urn:li:person:sched123")
+	return store
+}
+
+func saveScheduleSession(t *testing.T, store auth.Store, profile, transport, memberURN string) {
+	t.Helper()
 	if err := store.SaveSession(context.Background(), auth.Session{
-		Profile:     "default",
-		Transport:   "official",
-		AccessToken: "test-token",
-		MemberURN:   "urn:li:person:sched123",
+		Profile:     profile,
+		Transport:   transport,
+		AccessToken: "token-" + profile,
+		MemberURN:   memberURN,
 		ExpiresAt:   fixedNow().Add(24 * time.Hour),
 	}); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
-	return store
 }
 
 func newScheduleTestDeps(sched schedule.Store) Dependencies {
@@ -62,6 +70,18 @@ func newScheduleTestDeps(sched schedule.Store) Dependencies {
 		AuditSink:     audit.NewMemorySink(),
 		ScheduleStore: sched,
 	}
+}
+
+type markRunningOverrideStore struct {
+	schedule.Store
+	blocked map[string]error
+}
+
+func (s *markRunningOverrideStore) MarkRunning(ctx context.Context, commandID string) error {
+	if err, ok := s.blocked[commandID]; ok {
+		return err
+	}
+	return s.Store.MarkRunning(ctx, commandID)
 }
 
 // decodeSchedulePost decodes a schedule post JSON envelope from stdout.
@@ -392,6 +412,99 @@ func TestScheduleRun_NoDueEntries(t *testing.T) {
 	}
 }
 
+func TestScheduleRun_UsesStoredProfileAndTransportPerEntry(t *testing.T) {
+	sched := schedule.NewMemoryStore()
+	ctx := context.Background()
+	_ = sched.Add(ctx, schedule.Entry{
+		CommandID: "alpha-run", ScheduledAt: fixedNow().Add(-2 * time.Minute), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "alpha", Transport: "official",
+		Request: schedule.Request{Text: "alpha text", Visibility: "PUBLIC"},
+	})
+	_ = sched.Add(ctx, schedule.Entry{
+		CommandID: "beta-run", ScheduledAt: fixedNow().Add(-time.Minute), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "beta", Transport: "unofficial",
+		Request: schedule.Request{Text: "beta text", Visibility: "PUBLIC"},
+	})
+
+	store := auth.NewMemoryStore()
+	saveScheduleSession(t, store, "alpha", "official", "urn:li:person:alpha")
+	saveScheduleSession(t, store, "beta", "unofficial", "urn:li:person:beta")
+
+	stdout := &bytes.Buffer{}
+	deps := newScheduleTestDeps(sched)
+	deps.Stdout = stdout
+	deps.SessionStore = store
+
+	var calls []string
+	deps.TransportFactory = func(_ context.Context, settings config.Settings, session auth.Session, _ *slog.Logger) (api.Transport, error) {
+		calls = append(calls, settings.Profile+"/"+settings.Transport+"/"+session.Profile)
+		return &fakeTransport{name: settings.Transport}, nil
+	}
+
+	code := ExecuteContext(ctx, []string{"--json", "schedule", "run"}, deps, BuildInfo{})
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d: %s", code, stdout.String())
+	}
+
+	data := decodeScheduleRun(t, stdout)
+	if data.Succeeded != 2 {
+		t.Fatalf("want succeeded=2, got %+v", data)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("want 2 transport factory calls, got %d (%v)", len(calls), calls)
+	}
+	if calls[0] != "alpha/official/alpha" || calls[1] != "beta/unofficial/beta" {
+		t.Fatalf("transport factory calls = %v, want [alpha/official/alpha beta/unofficial/beta]", calls)
+	}
+}
+
+func TestScheduleRun_CachedReplayUsesStoredResultPostURN(t *testing.T) {
+	sched := schedule.NewMemoryStore()
+	ctx := context.Background()
+	_ = sched.Add(ctx, schedule.Entry{
+		CommandID: "cached-run", ScheduledAt: fixedNow().Add(-time.Minute), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "cached-profile", Transport: "official", IdempotencyKey: "sched-key",
+		Request: schedule.Request{Text: "cached text", Visibility: "PUBLIC"},
+	})
+
+	istore := idempotency.NewMemoryStore()
+	resultBytes, err := json.Marshal(output.PostCreateData{
+		PostSummary: output.PostSummary{ID: "urn:li:share:cached"},
+	})
+	if err != nil {
+		t.Fatalf("marshal cached result: %v", err)
+	}
+	if err := istore.Record(ctx, idempotency.Entry{
+		TS:         time.Now().UTC(),
+		Key:        "sched-key",
+		Command:    "post create",
+		CommandID:  "cached-post",
+		HTTPStatus: 201,
+		RequestID:  "req-999",
+		Result:     resultBytes,
+	}); err != nil {
+		t.Fatalf("record idempotency: %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	deps := newScheduleTestDeps(sched)
+	deps.Stdout = stdout
+	deps.IdempotencyStore = istore
+
+	code := ExecuteContext(ctx, []string{"--json", "schedule", "run"}, deps, BuildInfo{})
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d: %s", code, stdout.String())
+	}
+
+	data := decodeScheduleRun(t, stdout)
+	if data.Ran != 1 || len(data.Results) != 1 {
+		t.Fatalf("unexpected run payload: %+v", data)
+	}
+	if data.Results[0].PostURN != "urn:li:share:cached" {
+		t.Fatalf("post_urn = %q, want urn:li:share:cached", data.Results[0].PostURN)
+	}
+}
+
 func TestScheduleRun_FailingEntryIncrementsRetryCount(t *testing.T) {
 	sched := schedule.NewMemoryStore()
 	ctx := context.Background()
@@ -437,5 +550,59 @@ func TestScheduleRun_FailingEntryIncrementsRetryCount(t *testing.T) {
 	}
 	if e.RetryCount != 1 {
 		t.Errorf("want retry_count=1, got %d", e.RetryCount)
+	}
+}
+
+func TestScheduleRun_SkippedEntryDoesNotCountAsFailureOrTriggerFailFast(t *testing.T) {
+	baseStore := schedule.NewMemoryStore()
+	sched := &markRunningOverrideStore{
+		Store:   baseStore,
+		blocked: map[string]error{"skip-run": fmt.Errorf("already claimed")},
+	}
+	ctx := context.Background()
+
+	_ = sched.Add(ctx, schedule.Entry{
+		CommandID: "skip-run", ScheduledAt: fixedNow().Add(-2 * time.Minute), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "default", Transport: "official",
+		Request: schedule.Request{Text: "skip me", Visibility: "PUBLIC"},
+	})
+	_ = sched.Add(ctx, schedule.Entry{
+		CommandID: "succeed-run", ScheduledAt: fixedNow().Add(-time.Minute), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "default", Transport: "official",
+		Request: schedule.Request{Text: "run me", Visibility: "PUBLIC"},
+	})
+
+	stdout := &bytes.Buffer{}
+	deps := newScheduleTestDeps(sched)
+	deps.Stdout = stdout
+	deps.SessionStore = scheduleAuthStore(t)
+	deps.TransportFactory = factoryReturning(&fakeTransport{name: "official"})
+
+	code := ExecuteContext(ctx, []string{"--json", "schedule", "run", "--fail-fast"}, deps, BuildInfo{})
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d stdout=%s", code, stdout.String())
+	}
+
+	data := decodeScheduleRun(t, stdout)
+	if data.Ran != 2 {
+		t.Fatalf("want ran=2, got %+v", data)
+	}
+	if data.Succeeded != 1 {
+		t.Errorf("want succeeded=1, got %d", data.Succeeded)
+	}
+	if data.Failed != 0 {
+		t.Errorf("want failed=0, got %d", data.Failed)
+	}
+	if data.Skipped != 1 {
+		t.Errorf("want skipped=1, got %d", data.Skipped)
+	}
+	if len(data.Results) != 2 {
+		t.Fatalf("want 2 results, got %d", len(data.Results))
+	}
+	if data.Results[0].Status != "skipped" {
+		t.Fatalf("first result status = %q, want skipped", data.Results[0].Status)
+	}
+	if data.Results[1].Status != "succeeded" {
+		t.Fatalf("second result status = %q, want succeeded", data.Results[1].Status)
 	}
 }
