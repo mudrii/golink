@@ -124,10 +124,15 @@ func RenderError(w io.Writer, mode string, envelope BaseEnvelope, errMsg, code, 
 	case ModeJSON, "":
 		enc := json.NewEncoder(w)
 		enc.SetEscapeHTML(false)
-		// Full envelope — caller has already built the typed payload.
-		// This path is not reached directly; WriteJSON is used for json mode.
-		// Kept here for completeness.
-		if err := enc.Encode(envelope); err != nil {
+		if err := enc.Encode(struct {
+			BaseEnvelope
+			Error string    `json:"error"`
+			Code  ErrorCode `json:"code"`
+		}{
+			BaseEnvelope: envelope,
+			Error:        errMsg,
+			Code:         ErrorCode(code),
+		}); err != nil {
 			return fmt.Errorf("encode json error: %w", err)
 		}
 		return nil
@@ -198,7 +203,7 @@ func renderTable(w io.Writer, td TabularData) error {
 		cells := make([]string, len(headers))
 		for i := range headers {
 			if i < len(row) {
-				cells[i] = truncateCell(row[i])
+				cells[i] = truncateCell(sanitizeCell(row[i]))
 			}
 		}
 		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
@@ -209,8 +214,13 @@ func renderTable(w io.Writer, td TabularData) error {
 
 // truncateCell truncates a cell value to maxCellWidth chars with ellipsis.
 func truncateCell(s string) string {
-	if len(s) <= maxCellWidth {
+	runes := []rune(s)
+	if len(runes) <= maxCellWidth {
 		return s
 	}
-	return s[:maxCellWidth] + "..."
+	return string(runes[:maxCellWidth]) + "..."
+}
+
+func sanitizeCell(s string) string {
+	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(s)
 }

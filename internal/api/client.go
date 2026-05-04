@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -23,6 +24,10 @@ const (
 	defaultBaseURL        = "https://api.linkedin.com"
 	restliProtocolVersion = "2.0.0"
 	rateLimitWarnBelow    = 50
+	// maxResponseBodyBytes caps API response body size to prevent memory
+	// exhaustion from a malicious or misbehaving upstream. 8 MiB is generous
+	// for LinkedIn list endpoints; well above any documented payload.
+	maxResponseBodyBytes = 8 << 20
 )
 
 // ClientConfig controls the construction of the retryable HTTP client.
@@ -42,12 +47,13 @@ type ClientConfig struct {
 // Client performs authenticated LinkedIn REST requests with retry, rate-limit
 // awareness, and structured error decoding.
 type Client struct {
-	retryable *retryablehttp.Client
-	base      *url.URL
-	token     func(ctx context.Context) (string, error)
-	apiVers   string
-	logger    *slog.Logger
-	userAgent string
+	retryable  *retryablehttp.Client
+	httpClient *http.Client
+	base       *url.URL
+	token      func(ctx context.Context) (string, error)
+	apiVers    string
+	logger     *slog.Logger
+	userAgent  string
 }
 
 // NewClient constructs a Client using the supplied configuration.
@@ -122,6 +128,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			return false, ctx.Err()
 		}
 		if respErr != nil {
+			if errors.Is(respErr, context.Canceled) || errors.Is(respErr, context.DeadlineExceeded) {
+				return false, respErr
+			}
 			return true, nil
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
@@ -139,12 +148,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	return &Client{
-		retryable: client,
-		base:      base,
-		token:     cfg.Token,
-		apiVers:   strings.TrimSpace(cfg.APIVersion),
-		logger:    logger,
-		userAgent: userAgent,
+		retryable:  client,
+		httpClient: client.HTTPClient,
+		base:       base,
+		token:      cfg.Token,
+		apiVers:    strings.TrimSpace(cfg.APIVersion),
+		logger:     logger,
+		userAgent:  userAgent,
 	}, nil
 }
 
@@ -209,9 +219,13 @@ func (c *Client) Do(ctx context.Context, method, relativePath string, body any) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	payload, err := io.ReadAll(resp.Body)
+	limited := io.LimitReader(resp.Body, maxResponseBodyBytes+1)
+	payload, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if int64(len(payload)) > maxResponseBodyBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxResponseBodyBytes)
 	}
 
 	requestID := resp.Header.Get("x-restli-id")
@@ -267,7 +281,8 @@ func (c *Client) resolveURL(relativePath string) (*url.URL, error) {
 }
 
 func decodeError(status int, body []byte, requestID string) *Error {
-	apiErr := &Error{Status: status, RequestID: requestID, Message: strings.TrimSpace(string(body))}
+	rawDetails := strings.TrimSpace(string(body))
+	apiErr := &Error{Status: status, RequestID: requestID, Message: rawDetails}
 	var envelope struct {
 		Status           int    `json:"status"`
 		Code             string `json:"code"`
@@ -284,8 +299,8 @@ func decodeError(status int, body []byte, requestID string) *Error {
 		case envelope.ServiceErrorCode != "":
 			apiErr.Code = envelope.ServiceErrorCode
 		}
-		if envelope.Message != "" && apiErr.Details == "" {
-			apiErr.Details = envelope.Message
+		if envelope.Message != "" && rawDetails != "" && rawDetails != envelope.Message {
+			apiErr.Details = rawDetails
 		}
 	}
 	return apiErr

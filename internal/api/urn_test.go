@@ -11,6 +11,7 @@ func TestEncodeURN(t *testing.T) {
 	}{
 		{"ugcPost", "urn:li:ugcPost:7123", "urn%3Ali%3AugcPost%3A7123", false},
 		{"share", "urn:li:share:45", "urn%3Ali%3Ashare%3A45", false},
+		{"percent encoded input", "urn:li:share:%3A45", "urn%3Ali%3Ashare%3A%253A45", false},
 		{"empty", "", "", true},
 		{"no prefix", "7123", "", true},
 	} {

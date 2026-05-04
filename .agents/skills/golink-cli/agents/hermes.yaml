@@ -1,0 +1,8 @@
+interface:
+  display_name: "golink CLI"
+  short_description: "Deterministic golink automation for agents"
+  default_prompt: "Use $golink-cli to operate golink with explicit flags, JSON output, idempotency keys, and approval-first LinkedIn publishing."
+policy:
+  prefer_json_output: true
+  prefer_idempotency_keys: true
+  require_explicit_flags: true

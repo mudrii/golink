@@ -1,0 +1,7 @@
+interface:
+  display_name: "golink CLI"
+  short_description: "Operate golink with safe JSON workflows"
+  default_prompt: "Use $golink-cli to run golink safely with JSON output, dry-runs, approval gates, and explicit LinkedIn publishing commands."
+policy:
+  prefer_json_output: true
+  require_dry_run_before_mutation: true

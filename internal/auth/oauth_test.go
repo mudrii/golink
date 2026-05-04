@@ -14,7 +14,7 @@ import (
 )
 
 func TestBuildLoginRequest(t *testing.T) {
-	request, err := BuildLoginRequest(context.Background(), "client-123", 0, []string{"openid", "profile"})
+	request, err := BuildLoginRequest(t.Context(), "client-123", 0, []string{"openid", "profile"})
 	if err != nil {
 		t.Fatalf("build login request: %v", err)
 	}
@@ -35,6 +35,51 @@ func TestBuildLoginRequest(t *testing.T) {
 	}
 	if got := parsed.Query().Get("code_challenge_method"); got != "S256" {
 		t.Fatalf("unexpected challenge method: %q", got)
+	}
+	if len(request.State) < 43 {
+		t.Fatalf("oauth state too short: %d", len(request.State))
+	}
+	if len(request.CodeVerifier) < 43 {
+		t.Fatalf("code verifier too short: %d", len(request.CodeVerifier))
+	}
+	if got := parsed.Query().Get("code_challenge"); len(got) != 43 {
+		t.Fatalf("unexpected code challenge length: %d", len(got))
+	}
+}
+
+func TestBuildLoginRequestWithOptionsOAuth2(t *testing.T) {
+	request, err := BuildLoginRequestWithOptions(t.Context(), LoginRequestOptions{
+		ClientID:      "client-123",
+		PreferredPort: 0,
+		Scopes:        []string{"w_member_social", "r_profile_basicinfo"},
+		AuthFlow:      "oauth2",
+	})
+	if err != nil {
+		t.Fatalf("build login request: %v", err)
+	}
+	if request.CallbackListener == nil {
+		t.Fatal("expected callback listener")
+	}
+	defer func() { _ = request.CallbackListener.Close() }()
+
+	parsed, err := url.Parse(request.URL)
+	if err != nil {
+		t.Fatalf("parse request url: %v", err)
+	}
+	if got := parsed.Scheme + "://" + parsed.Host + parsed.Path; got != OAuth2AuthorizationURL {
+		t.Fatalf("unexpected authorization endpoint: %q", got)
+	}
+	if got := parsed.Query().Get("scope"); got != "w_member_social r_profile_basicinfo" {
+		t.Fatalf("unexpected scopes: %q", got)
+	}
+	if got := parsed.Query().Get("code_challenge"); got != "" {
+		t.Fatalf("unexpected code_challenge: %q", got)
+	}
+	if got := parsed.Query().Get("code_challenge_method"); got != "" {
+		t.Fatalf("unexpected code_challenge_method: %q", got)
+	}
+	if request.CodeVerifier != "" {
+		t.Fatalf("expected no verifier for oauth2 flow, got %q", request.CodeVerifier)
 	}
 }
 
@@ -75,6 +120,125 @@ func TestWaitForOAuthCallback(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for callback result")
+	}
+}
+
+func TestWaitForOAuthCallback_StateMismatch(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, waitErr := WaitForOAuthCallback(ctx, listener, "state-123")
+		errCh <- waitErr
+	}()
+
+	callbackURL := fmt.Sprintf("http://%s/callback?code=abc&state=wrong-state", listener.Addr().String())
+	response, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("get callback: %v", err)
+	}
+	_ = response.Body.Close()
+
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "state mismatch") {
+		t.Fatalf("expected state mismatch, got %v", err)
+	}
+}
+
+func TestWaitForOAuthCallback_ErrorParam(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, waitErr := WaitForOAuthCallback(ctx, listener, "state-123")
+		errCh <- waitErr
+	}()
+
+	callbackURL := fmt.Sprintf("http://%s/callback?state=state-123&error=access_denied&error_description=declined", listener.Addr().String())
+	response, err := http.Get(callbackURL)
+	if err != nil {
+		t.Fatalf("get callback: %v", err)
+	}
+	_ = response.Body.Close()
+
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "authorization failed: declined") {
+		t.Fatalf("expected authorization error, got %v", err)
+	}
+}
+
+func TestWaitForOAuthCallback_WrongMethod(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, waitErr := WaitForOAuthCallback(ctx, listener, "state-123")
+		errCh <- waitErr
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/callback", listener.Addr().String()), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post callback: %v", err)
+	}
+	_ = response.Body.Close()
+
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "unexpected callback method") {
+		t.Fatalf("expected method error, got %v", err)
+	}
+}
+
+func TestWaitForOAuthCallback_HostMismatch(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, waitErr := WaitForOAuthCallback(ctx, listener, "state-123")
+		errCh <- waitErr
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/callback?code=abc&state=state-123", listener.Addr().String()), http.NoBody)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Host = "localhost"
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get callback: %v", err)
+	}
+	_ = response.Body.Close()
+
+	if err := <-errCh; err == nil || !strings.Contains(err.Error(), "unexpected callback host") {
+		t.Fatalf("expected host validation error, got %v", err)
 	}
 }
 
@@ -197,7 +361,7 @@ func TestCompleteLogin(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	request, err := BuildLoginRequest(context.Background(), "client-123", 0, []string{"openid", "profile", "email"})
+	request, err := BuildLoginRequest(t.Context(), "client-123", 0, []string{"openid", "profile", "email"})
 	if err != nil {
 		t.Fatalf("build login request: %v", err)
 	}
@@ -206,15 +370,17 @@ func TestCompleteLogin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	callbackDone := make(chan error, 1)
 	go func() {
 		time.Sleep(25 * time.Millisecond)
 		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
 		response, callbackErr := http.Get(callbackURL)
 		if callbackErr != nil {
-			t.Errorf("callback get: %v", callbackErr)
+			callbackDone <- callbackErr
 			return
 		}
 		_ = response.Body.Close()
+		callbackDone <- nil
 	}()
 
 	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
@@ -239,5 +405,218 @@ func TestCompleteLogin(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(session.Scopes, " "), "w_member_social_feed") {
 		t.Fatalf("unexpected scopes: %#v", session.Scopes)
+	}
+	if err := <-callbackDone; err != nil {
+		t.Fatalf("callback get: %v", err)
+	}
+}
+
+func TestCompleteLoginOAuth2UsesClientSecret(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if got := r.Form.Get("client_secret"); got != "secret-123" {
+			t.Fatalf("unexpected client_secret: %q", got)
+		}
+		if got := r.Form.Get("code_verifier"); got != "" {
+			t.Fatalf("unexpected code verifier: %q", got)
+		}
+
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "token-123",
+			ExpiresIn:   3600,
+			Scope:       "w_member_social r_profile_basicinfo",
+		})
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+	mux.HandleFunc("/profile", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "profile123"})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	request, err := BuildLoginRequestWithOptions(t.Context(), LoginRequestOptions{
+		ClientID:      "client-123",
+		PreferredPort: 0,
+		Scopes:        []string{"w_member_social", "r_profile_basicinfo"},
+		AuthFlow:      "oauth2",
+	})
+	if err != nil {
+		t.Fatalf("build login request: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	callbackDone := make(chan error, 1)
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
+		response, callbackErr := http.Get(callbackURL)
+		if callbackErr != nil {
+			callbackDone <- callbackErr
+			return
+		}
+		_ = response.Body.Close()
+		callbackDone <- nil
+	}()
+
+	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
+		HTTPClient:      server.Client(),
+		Interactive:     false,
+		TokenURL:        server.URL + "/oauth/token",
+		ClientSecret:    "secret-123",
+		AuthFlow:        "oauth2",
+		UserInfoURL:     server.URL + "/userinfo",
+		ProfileURL:      server.URL + "/profile",
+		RequestedScopes: []string{"w_member_social", "r_profile_basicinfo"},
+	})
+	if err != nil {
+		t.Fatalf("complete login: %v", err)
+	}
+	if session.AuthFlow != "oauth2" {
+		t.Fatalf("AuthFlow = %q", session.AuthFlow)
+	}
+	if session.MemberURN != "urn:li:person:profile123" {
+		t.Fatalf("MemberURN = %q", session.MemberURN)
+	}
+	if err := <-callbackDone; err != nil {
+		t.Fatalf("callback get: %v", err)
+	}
+}
+
+func TestCompleteLogin_UsesManualMemberURNWhenUserInfoUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "token-123",
+			ExpiresIn:   3600,
+			Scope:       "w_member_social_feed",
+		})
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+	mux.HandleFunc("/profile", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	request, err := BuildLoginRequest(t.Context(), "client-123", 0, []string{"w_member_social_feed"})
+	if err != nil {
+		t.Fatalf("build login request: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	callbackDone := make(chan error, 1)
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
+		response, callbackErr := http.Get(callbackURL)
+		if callbackErr != nil {
+			callbackDone <- callbackErr
+			return
+		}
+		_ = response.Body.Close()
+		callbackDone <- nil
+	}()
+
+	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
+		HTTPClient:      server.Client(),
+		Interactive:     false,
+		TokenURL:        server.URL + "/oauth/token",
+		UserInfoURL:     server.URL + "/userinfo",
+		ProfileURL:      server.URL + "/profile",
+		RequestedScopes: []string{"w_member_social_feed"},
+		ManualMemberURN: "urn:li:person:manual123",
+	})
+	if err != nil {
+		t.Fatalf("complete login: %v", err)
+	}
+	if session.MemberURN != "urn:li:person:manual123" {
+		t.Fatalf("MemberURN = %q", session.MemberURN)
+	}
+	if session.ProfileID != "manual123" {
+		t.Fatalf("ProfileID = %q", session.ProfileID)
+	}
+	if strings.Join(session.Scopes, " ") != "w_member_social_feed" {
+		t.Fatalf("Scopes = %#v", session.Scopes)
+	}
+	if err := <-callbackDone; err != nil {
+		t.Fatalf("callback get: %v", err)
+	}
+}
+
+func TestCompleteLogin_UsesProfileIDWhenUserInfoUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "token-123",
+			ExpiresIn:   3600,
+			Scope:       "w_member_social r_profile_basicinfo",
+		})
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+	mux.HandleFunc("/profile", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer token-123" {
+			t.Fatalf("unexpected authorization header: %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "profile123"})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	request, err := BuildLoginRequest(t.Context(), "client-123", 0, []string{"w_member_social", "r_profile_basicinfo"})
+	if err != nil {
+		t.Fatalf("build login request: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	callbackDone := make(chan error, 1)
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
+		response, callbackErr := http.Get(callbackURL)
+		if callbackErr != nil {
+			callbackDone <- callbackErr
+			return
+		}
+		_ = response.Body.Close()
+		callbackDone <- nil
+	}()
+
+	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
+		HTTPClient:      server.Client(),
+		Interactive:     false,
+		TokenURL:        server.URL + "/oauth/token",
+		UserInfoURL:     server.URL + "/userinfo",
+		ProfileURL:      server.URL + "/profile",
+		RequestedScopes: []string{"w_member_social", "r_profile_basicinfo"},
+	})
+	if err != nil {
+		t.Fatalf("complete login: %v", err)
+	}
+	if session.MemberURN != "urn:li:person:profile123" {
+		t.Fatalf("MemberURN = %q", session.MemberURN)
+	}
+	if session.ProfileID != "profile123" {
+		t.Fatalf("ProfileID = %q", session.ProfileID)
+	}
+	if err := <-callbackDone; err != nil {
+		t.Fatalf("callback get: %v", err)
 	}
 }

@@ -93,7 +93,7 @@ func newPostScheduleCommand(a *app) *cobra.Command {
 				return a.transportFailure(cmd, "failed to store scheduled post", err.Error())
 			}
 
-			a.auditMutation(cmd, cmdID, "scheduled", "normal", "", 0, "", nil)
+			a.auditMutation(cmd, cmdID, "ok", "normal", "", 0, "", nil)
 
 			data := output.ScheduledPostData{
 				CommandID:      entry.CommandID,

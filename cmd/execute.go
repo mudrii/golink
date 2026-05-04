@@ -5,7 +5,6 @@ package cmd
 // (audit, idempotency, approval) still applies.
 
 import (
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -114,22 +113,11 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 				op.DryRun = &t
 			}
 
-			auditMode := "normal"
-			if effectiveDryRun {
-				auditMode = "dry_run"
-			}
-			cmdID, runErr := runner.runOp(cmd.Context(), 1, op)
-			if cmdID == "" {
-				// runOp short-circuited before assigning a cmdID (e.g. validation
-				// error). Synthesize one so the audit entry is still queryable.
-				cmdID = newCommandID(p.Command, a.deps.Now().UTC())
-			}
-			if runErr != nil {
-				a.auditMutation(cmd, cmdID, "error", auditMode, "", 0, "", nil)
-				return fmt.Errorf("execute: %w", runErr)
-			}
-			a.auditMutation(cmd, cmdID, "ok", auditMode, "", 0, "", nil)
-			return nil
+			// runner.runOp records its own audit entry per dispatched op; no
+			// extra auditMutation call here. cmdID is propagated to callers via
+			// the emitted envelope and runOp's return value.
+			_, runErr := runner.runOp(cmd.Context(), 1, op)
+			return runErr
 		},
 	}
 

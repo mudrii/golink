@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -34,6 +36,12 @@ var ErrNotFound = errors.New("schedule entry not found")
 
 // ErrInvalidState is returned when a state transition is not allowed.
 var ErrInvalidState = errors.New("schedule entry is in invalid state for this operation")
+
+// ErrAlreadyAdded is returned when Add refuses to overwrite an existing entry
+// with the same command_id.
+var ErrAlreadyAdded = errors.New("schedule entry already exists")
+
+var commandIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 // Request holds the post request parameters stored at schedule time.
 type Request struct {
@@ -140,6 +148,9 @@ func (s *FileStore) Add(_ context.Context, entry Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(entry.CommandID); err != nil {
+		return err
+	}
 	if err := s.ensureDir(); err != nil {
 		return err
 	}
@@ -150,9 +161,25 @@ func (s *FileStore) Add(_ context.Context, entry Entry) error {
 		return fmt.Errorf("schedule marshal: %w", err)
 	}
 
+	if existing, _, err := s.findInMain(entry.CommandID); err == nil {
+		return fmt.Errorf("schedule add: %w: %s already %s", ErrAlreadyAdded, existing.CommandID, existing.State)
+	}
+
 	path := s.filePath(entry)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("schedule add: %w: %s", ErrAlreadyAdded, entry.CommandID)
+		}
 		return fmt.Errorf("schedule write: %w", err)
+	}
+	if _, writeErr := f.Write(data); writeErr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("schedule write: %w", writeErr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		return fmt.Errorf("schedule close: %w", closeErr)
 	}
 	return nil
 }
@@ -204,6 +231,9 @@ func (s *FileStore) Get(_ context.Context, commandID string) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(commandID); err != nil {
+		return Entry{}, err
+	}
 	dirs := []string{s.dir, s.completedDir()}
 	for _, dir := range dirs {
 		des, err := os.ReadDir(dir)
@@ -323,15 +353,14 @@ func (s *FileStore) MarkCompleted(_ context.Context, commandID string) error {
 		return fmt.Errorf("schedule completed mkdir: %w", err)
 	}
 
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("schedule marshal completed: %w", err)
-	}
 	dst := s.completedPath(entry)
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		return fmt.Errorf("schedule write completed: %w", err)
+	if err := s.writeEntryAtomic(path, entry); err != nil {
+		return err
 	}
-	return os.Remove(path)
+	if err := os.Rename(path, dst); err != nil {
+		return fmt.Errorf("schedule move completed: %w", err)
+	}
+	return nil
 }
 
 // MarkFailed transitions running → failed; increments retry_count and stores error.
@@ -422,6 +451,9 @@ func (s *FileStore) Next(_ context.Context) (Entry, error) {
 // findInMain locates a file by commandID in the main schedule directory.
 // Must be called with mu held.
 func (s *FileStore) findInMain(commandID string) (Entry, string, error) {
+	if err := validateCommandID(commandID); err != nil {
+		return Entry{}, "", err
+	}
 	des, err := os.ReadDir(s.dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -462,12 +494,35 @@ func (s *FileStore) updateEntry(commandID string, mutate func(*Entry) error) err
 	if err := mutate(&entry); err != nil {
 		return err
 	}
+	if err := s.writeEntryAtomic(path, entry); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *FileStore) writeEntryAtomic(path string, entry Entry) error {
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("schedule marshal update: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("schedule temp write update: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("schedule write update: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("schedule close update: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("schedule rename update: %w", err)
 	}
 	return nil
 }
@@ -487,6 +542,12 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) Add(_ context.Context, entry Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(entry.CommandID); err != nil {
+		return err
+	}
+	if existing, ok := m.entries[entry.CommandID]; ok {
+		return fmt.Errorf("schedule add: %w: %s already %s", ErrAlreadyAdded, entry.CommandID, existing.State)
+	}
 	entry.State = StatePending
 	m.entries[entry.CommandID] = entry
 	return nil
@@ -511,6 +572,9 @@ func (m *MemoryStore) List(_ context.Context) ([]Entry, error) {
 func (m *MemoryStore) Get(_ context.Context, commandID string) (Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return Entry{}, err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -542,6 +606,9 @@ func (m *MemoryStore) Due(_ context.Context, now time.Time, limit int) ([]Entry,
 func (m *MemoryStore) MarkRunning(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -558,6 +625,9 @@ func (m *MemoryStore) MarkRunning(_ context.Context, commandID string) error {
 func (m *MemoryStore) MarkCompleted(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -574,6 +644,9 @@ func (m *MemoryStore) MarkCompleted(_ context.Context, commandID string) error {
 func (m *MemoryStore) MarkFailed(_ context.Context, commandID, lastError string, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -594,6 +667,9 @@ func (m *MemoryStore) MarkFailed(_ context.Context, commandID, lastError string,
 func (m *MemoryStore) MarkRetrying(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -611,6 +687,9 @@ func (m *MemoryStore) MarkRetrying(_ context.Context, commandID string) error {
 func (m *MemoryStore) MarkCancelled(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -642,6 +721,13 @@ func (m *MemoryStore) Next(_ context.Context) (Entry, error) {
 		return Entry{}, fmt.Errorf("%w: no pending entries", ErrNotFound)
 	}
 	return *earliest, nil
+}
+
+func validateCommandID(commandID string) error {
+	if !commandIDPattern.MatchString(commandID) {
+		return fmt.Errorf("invalid command_id %q", commandID)
+	}
+	return nil
 }
 
 // ResolvePath returns the effective schedule directory.

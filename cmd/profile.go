@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -21,16 +20,12 @@ func newProfileCommand(a *app) *cobra.Command {
 		Short: "Show the authenticated profile",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			session, err := a.deps.SessionStore.LoadSession(cmd.Context(), a.settings.Profile)
+			session, err := a.resolveSession(cmd)
 			if err != nil {
-				if errors.Is(err, auth.ErrSessionNotFound) {
-					return a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", "no active session for the selected profile")
-				}
-
-				return a.transportFailure(cmd, "failed to resolve profile session", err.Error())
+				return err
 			}
 
-			data, err := profileDataFromSession(*session)
+			data, err := profileDataFromSession(session)
 			if err != nil {
 				return a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", err.Error())
 			}

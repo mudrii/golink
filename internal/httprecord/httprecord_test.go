@@ -2,6 +2,7 @@ package httprecord_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -168,5 +169,92 @@ func TestHeaderRedaction(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "secret-token") {
 		t.Error("Authorization token found in cassette — should be redacted")
+	}
+}
+
+func TestCassetteRedactsPersonalData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"sub":"urn:li:person:abc123","email":"ion@example.com","localizedFirstName":"Ion","text":"private response"}`))
+	}))
+	defer srv.Close()
+
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+	recorder, _ := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
+
+	body := strings.NewReader(`{"author":"urn:li:person:abc123","email":"ion@example.com","text":"private request"}`)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/v2/ugcPosts?author=urn:li:person:abc123&email=ion@example.com", body)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Transport: recorder}).Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	raw, err := os.ReadFile(cassettePath)
+	if err != nil {
+		t.Fatalf("read cassette: %v", err)
+	}
+	cassette := string(raw)
+	for _, leaked := range []string{
+		"urn:li:person:abc123",
+		"ion@example.com",
+		"private request",
+		"private response",
+		"Ion",
+	} {
+		if strings.Contains(cassette, leaked) {
+			t.Fatalf("cassette leaked %q: %s", leaked, cassette)
+		}
+	}
+
+	replayer, err := httprecord.Wrap(nil, "", cassettePath)
+	if err != nil {
+		t.Fatalf("Wrap replay: %v", err)
+	}
+	replayReq, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/v2/ugcPosts?author=urn:li:person:abc123&email=ion@example.com", strings.NewReader(`{"author":"urn:li:person:abc123","email":"ion@example.com","text":"private request"}`))
+	replayReq.Header.Set("Content-Type", "application/json")
+	replayResp, err := (&http.Client{Transport: replayer}).Do(replayReq)
+	if err != nil {
+		t.Fatalf("replay request: %v", err)
+	}
+	replayBody, _ := io.ReadAll(replayResp.Body)
+	_ = replayResp.Body.Close()
+	if !strings.Contains(string(replayBody), "REDACTED") {
+		t.Fatalf("expected redacted replay body, got %s", replayBody)
+	}
+}
+
+func TestLoadedCassetteSaveRedactsPersonalData(t *testing.T) {
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "in.jsonl")
+	outPath := filepath.Join(dir, "out.jsonl")
+
+	rawBody := `{"email":"ion@example.com","text":"private response"}`
+	line := `{"seq":1,"method":"GET","url":"https://api.linkedin.com/v2/userinfo?member=urn:li:person:abc123","body_sha256":"abc","request_body":"email=ion@example.com","response":{"status":200,"headers":{"Set-Cookie":["session=secret"]},"body_base64":"` +
+		base64.StdEncoding.EncodeToString([]byte(rawBody)) + `"}}` + "\n"
+	if err := os.WriteFile(inPath, []byte(line), 0o600); err != nil {
+		t.Fatalf("write cassette: %v", err)
+	}
+
+	cassette, err := httprecord.LoadCassette(inPath)
+	if err != nil {
+		t.Fatalf("load cassette: %v", err)
+	}
+	if err := cassette.Save(outPath); err != nil {
+		t.Fatalf("save cassette: %v", err)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read saved cassette: %v", err)
+	}
+	for _, leaked := range []string{"urn:li:person:abc123", "ion@example.com", "private response", "session=secret"} {
+		if strings.Contains(string(raw), leaked) {
+			t.Fatalf("saved cassette leaked %q: %s", leaked, raw)
+		}
 	}
 }

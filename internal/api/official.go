@@ -621,7 +621,9 @@ func (o *Official) InitializeImageUpload(ctx context.Context, ownerURN string) (
 
 // UploadImageBinary PUTs the file bytes to the LinkedIn signed upload URL.
 // The signed URL must NOT receive an Authorization header — LinkedIn signs
-// the URL itself and rejects requests that also carry a Bearer token.
+// the URL itself and rejects requests that also carry a Bearer token. This
+// path therefore bypasses the retryable client wrapper (which injects auth)
+// and applies its own bounded retry on 429 and 5xx responses.
 func (o *Official) UploadImageBinary(ctx context.Context, uploadURL, filePath string) error {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -634,27 +636,60 @@ func (o *Official) UploadImageBinary(ctx context.Context, uploadURL, filePath st
 		return fmt.Errorf("image file is empty")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("build upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	httpClient := o.client.retryable.HTTPClient
+	httpClient := o.client.httpClient
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("upload image binary: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("upload image binary: unexpected status %d", resp.StatusCode)
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(data))
+		if reqErr != nil {
+			return fmt.Errorf("build upload request: %w", reqErr)
+		}
+		req.Header.Set("Content-Type", "application/octet-stream")
+
+		resp, doErr := httpClient.Do(req)
+		if doErr != nil {
+			lastErr = fmt.Errorf("upload image binary: %w", doErr)
+			if !uploadRetryWait(ctx, attempt, maxAttempts) {
+				return lastErr
+			}
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+			return nil
+		}
+
+		lastErr = fmt.Errorf("upload image binary: unexpected status %d", resp.StatusCode)
+		retriable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		if !retriable || !uploadRetryWait(ctx, attempt, maxAttempts) {
+			return lastErr
+		}
 	}
-	return nil
+	return lastErr
+}
+
+// uploadRetryWait sleeps a bounded exponential backoff and reports whether the
+// caller should attempt another request. Returns false when the context is
+// cancelled or attempts have been exhausted.
+func uploadRetryWait(ctx context.Context, attempt, maxAttempts int) bool {
+	if attempt >= maxAttempts {
+		return false
+	}
+	backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // EditPost PATCHes an existing post's commentary and/or visibility.
@@ -833,8 +868,14 @@ func (o *Official) ListOrganizations(ctx context.Context) (*output.OrgListData, 
 			continue
 		}
 
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return nil, ctx.Err()
+		}
+
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(i int, id string) {
 			defer wg.Done()
 			defer func() { <-sem }()

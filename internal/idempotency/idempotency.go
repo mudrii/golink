@@ -51,6 +51,8 @@ type Store interface {
 type FileStore struct {
 	mu   sync.Mutex
 	path string
+	// Now is overridable for testing. Defaults to time.Now when nil.
+	Now func() time.Time
 }
 
 // NewFileStore returns a FileStore that writes to path.
@@ -60,6 +62,13 @@ func NewFileStore(path string) *FileStore {
 		path = ResolvePath()
 	}
 	return &FileStore{path: path}
+}
+
+func (s *FileStore) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Lookup scans the file for the most recent entry matching key.
@@ -74,7 +83,7 @@ func (s *FileStore) Lookup(_ context.Context, key, command string) (Entry, bool,
 		return Entry{}, false, fmt.Errorf("idempotency lookup: %w", err)
 	}
 
-	cutoff := time.Now().UTC().Add(-defaultWindow)
+	cutoff := s.now().Add(-defaultWindow)
 	var found *Entry
 	for i := range entries {
 		e := &entries[i]
@@ -144,7 +153,7 @@ func (s *FileStore) Prune(_ context.Context, window time.Duration, maxLines int)
 		return fmt.Errorf("idempotency prune read: %w", err)
 	}
 
-	cutoff := time.Now().UTC().Add(-window)
+	cutoff := s.now().Add(-window)
 	kept := entries[:0]
 	for i := range entries {
 		if !entries[i].TS.Before(cutoff) {
@@ -174,6 +183,7 @@ func (s *FileStore) readAll() ([]Entry, error) {
 
 	var entries []Entry
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -194,24 +204,31 @@ func (s *FileStore) writeAll(entries []Entry) error {
 		return fmt.Errorf("idempotency mkdir: %w", err)
 	}
 
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tmp, err := os.CreateTemp(dir, filepath.Base(s.path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("idempotency open for write: %w", err)
 	}
+	tmpPath := tmp.Name()
 
-	enc := json.NewEncoder(f)
+	enc := json.NewEncoder(tmp)
 	var writeErr error
 	for i := range entries {
 		if writeErr = enc.Encode(&entries[i]); writeErr != nil {
 			break
 		}
 	}
-	closeErr := f.Close()
+	closeErr := tmp.Close()
 	if writeErr != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("idempotency write: %w", writeErr)
 	}
 	if closeErr != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("idempotency close: %w", closeErr)
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("idempotency rename: %w", err)
 	}
 	return nil
 }
@@ -220,6 +237,8 @@ func (s *FileStore) writeAll(entries []Entry) error {
 type MemoryStore struct {
 	mu      sync.Mutex
 	entries []Entry
+	// Now is overridable for testing. Defaults to time.Now when nil.
+	Now func() time.Time
 }
 
 // NewMemoryStore returns an empty MemoryStore.
@@ -227,12 +246,19 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{}
 }
 
+func (m *MemoryStore) now() time.Time {
+	if m.Now != nil {
+		return m.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 // Lookup scans memory for the most recent matching key within the default window.
 func (m *MemoryStore) Lookup(_ context.Context, key, command string) (Entry, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	cutoff := time.Now().UTC().Add(-defaultWindow)
+	cutoff := m.now().Add(-defaultWindow)
 	var found *Entry
 	for i := range m.entries {
 		e := &m.entries[i]

@@ -7,7 +7,6 @@ package cmd
 import (
 	"encoding/json"
 	"strings"
-	"time"
 
 	"github.com/mudrii/golink/internal/output"
 	"github.com/mudrii/golink/internal/plan"
@@ -290,7 +289,7 @@ func emitPlan(a *app, cmd *cobra.Command, command string, args map[string]any) e
 
 	meta := a.metadata(cmd, output.StatusOK)
 	meta.Command = "plan"
-	meta.GeneratedAt = time.Now().UTC()
+	meta.GeneratedAt = a.deps.Now().UTC()
 
 	envelope := output.Success(meta, planData)
 	return output.WriteJSON(a.deps.Stdout, envelope)

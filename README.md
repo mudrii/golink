@@ -2,7 +2,7 @@
 
 LinkedIn CLI for humans and LLM agents.
 
-> **Status: alpha / requires LinkedIn app credentials.** The command tree, OAuth PKCE login, JSON envelope contract, retryable HTTP client, and LinkedIn REST adapter are implemented and tested. Live use requires a LinkedIn developer app with the documented scopes; without credentials you can still exercise every `--dry-run` and schema-validated envelope.
+> **Status: alpha / requires LinkedIn app credentials.** The command tree, OAuth login, JSON envelope contract, retryable HTTP client, and LinkedIn REST adapter are implemented and tested. Live use requires a LinkedIn developer app with the documented scopes; without credentials you can still exercise every `--dry-run` and schema-validated envelope.
 
 ## Overview
 
@@ -36,7 +36,7 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `approval deny <id>` | ✅ | unit | Deny a pending entry |
 | `approval run <id>` | ✅ | unit | Execute an approved entry via transport |
 | `approval cancel <id>` | ✅ | unit | Remove a pending entry |
-| `--require-approval` | ✅ | unit | Stage any mutating command for review (exits 3) |
+| `--require-approval` | ✅ | unit | Stage supported mutating commands for review (exits 3) |
 | `social metadata <urn>...` | ✅ | httptest | Batch engagement read: comment count, reaction totals per type, comments-state for up to 100 post URNs in one call |
 | `post schedule --at ...` | ✅ | unit | Queue a post for later publication (client-side queue) |
 | `schedule list / show / run / cancel / next` | ✅ | unit | Manage the scheduled-post queue |
@@ -104,6 +104,9 @@ go install github.com/mudrii/golink@latest
 ```
 
 Requires Go 1.26.2+.
+
+For full product, dependency, and LinkedIn Developer app setup instructions, see
+[`LINKEDIN_SETUP.md`](./LINKEDIN_SETUP.md).
 
 ## Quick start
 
@@ -190,6 +193,10 @@ golink --output=table react list urn:li:share:123
 | Variable | Required | Description |
 |---|---|---|
 | `GOLINK_CLIENT_ID` | Yes | LinkedIn app client ID (used for `auth login` and `auth refresh`) |
+| `GOLINK_CLIENT_SECRET` | Only when `GOLINK_AUTH_FLOW=oauth2` | LinkedIn app client secret for standard OAuth 2.0 token exchange. Do not store it in the repo. |
+| `GOLINK_AUTH_FLOW` | No | `pkce` (default) uses LinkedIn native PKCE; `oauth2` uses the standard confidential-client OAuth endpoint with `GOLINK_CLIENT_SECRET` and a fixed `GOLINK_REDIRECT_PORT`. |
+| `GOLINK_AUTH_SCOPES` | No | Override login scopes (space- or comma-separated). Use when LinkedIn rejects OpenID scopes for native PKCE. |
+| `GOLINK_MEMBER_URN` | No | Manual member URN fallback, e.g. `urn:li:person:abc123`, used when OIDC userinfo is unavailable. |
 | `GOLINK_API_VERSION` | No | `Linkedin-Version` header, e.g. `202604` |
 | `GOLINK_REDIRECT_PORT` | No | Preferred OAuth loopback port; `0` picks any free port |
 | `GOLINK_JSON`, `GOLINK_TRANSPORT`, `GOLINK_OUTPUT` | No | Preflight overrides for `--json` / `--transport` / `--output` |
@@ -203,13 +210,37 @@ Tokens are stored in the OS keyring — never on disk or in logs.
 > **Redirect URI gotcha.** LinkedIn matches OAuth redirects on the exact
 > registered URL including the port. Register `http://127.0.0.1:<port>/callback`
 > for whatever port `GOLINK_REDIRECT_PORT` resolves to; `0` only works if the
-> app is configured with every port you might fall through to (rare). The
-> login flow uses LinkedIn's undocumented `native-pkce/authorization` path
-> so no `client_secret` is required in token exchange.
+> app is configured with every port you might fall through to (rare). Native
+> PKCE needs no `client_secret`; standard OAuth 2.0 requires
+> `GOLINK_AUTH_FLOW=oauth2` and `GOLINK_CLIENT_SECRET`.
+
+> **Native PKCE scope gotcha.** Some LinkedIn apps reject OpenID scopes
+> (`openid profile email`) on the native PKCE endpoint. For those apps, set
+> `GOLINK_AUTH_SCOPES="w_member_social r_profile_basicinfo"`. golink will
+> try `GET /v2/me?fields=id` as a non-OIDC profile fallback. If that endpoint
+> is unavailable for your app, also provide
+> `GOLINK_MEMBER_URN=urn:li:person:<id>` so golink can still build post author
+> URNs.
+
+> **Standard OAuth 2.0 fallback.** If your LinkedIn app shows
+> `Not enough permissions to access Native PKCE protocol`, use the confidential
+> OAuth flow instead:
+>
+> ```sh
+> export GOLINK_AUTH_FLOW=oauth2
+> export GOLINK_CLIENT_SECRET=<paste locally>
+> export GOLINK_AUTH_SCOPES="w_member_social r_profile_basicinfo"
+> export GOLINK_REDIRECT_PORT=8080
+> ```
+>
+> Add `http://127.0.0.1:8080/callback` to the app's Authorized redirect URLs.
+> LinkedIn requires an exact match: same scheme (`http`), host (`127.0.0.1`),
+> port (`8080`), and path (`/callback`). `localhost` and `127.0.0.1` are not
+> interchangeable for this check.
 
 ## Idempotency keys
 
-Any mutating command (`post create`, `post delete`, `comment add`, `react add`) accepts `--idempotency-key <k>`. On the first successful call the result is cached locally; subsequent calls with the same key within 24 hours replay the cached result and set `from_cache: true` in the envelope — the transport is never called again.
+Mutating commands that dispatch a single operation (`post create`, `post delete`, `post edit`, `post reshare`, `post schedule`, `comment add`, `react add`, and `execute`) accept `--idempotency-key <k>`. On the first successful call the result is cached locally; subsequent calls with the same key within 24 hours replay the cached result and set `from_cache: true` in the envelope — the transport is never called again.
 
 ```sh
 golink --json post create --text "Hello" --idempotency-key my-post-1
@@ -231,6 +262,7 @@ The store is an append-only JSONL file created with mode `0600` in a `0700` dire
 
 ```jsonl
 {"command":"post create","args":{"text":"Hello batch","visibility":"PUBLIC"},"idempotency_key":"b-1"}
+{"command":"post schedule","args":{"at":"2026-05-06T09:00:00Z","text":"Queued post","visibility":"PUBLIC"}}
 {"command":"post delete","args":{"post_urn":"urn:li:share:123"}}
 {"command":"comment add","args":{"post_urn":"urn:li:share:456","text":"nice"},"dry_run":true}
 {"command":"react add","args":{"post_urn":"urn:li:share:789","type":"LIKE"},"idempotency_key":"r-1"}
@@ -238,7 +270,7 @@ The store is an append-only JSONL file created with mode `0600` in a `0700` dire
 
 Results stream to stdout as JSONL — one `BatchOpResultOutput` envelope per input line.
 
-Supported commands: `post create`, `post delete`, `comment add`, `react add`.
+Supported commands: `post create`, `post schedule`, `post delete`, `comment add`, `react add`.
 
 ```sh
 # Basic run
@@ -270,7 +302,7 @@ cat ops.jsonl | golink --json batch -
 | `--strict` | false | Exit 2 if any op is non-ok |
 | `--resume` | true | Skip ops already in the `.progress` sidecar file |
 
-Each op may include a per-op `dry_run: true` field to preview that op without executing it, regardless of the global `--dry-run` flag.
+Each op may include a per-op `dry_run: true` field to preview that op without executing it, regardless of the global `--dry-run` flag. `post schedule` accepts `at`, `text`, optional `visibility`, and optional media fields `image_path` and `image_alt`; `image_path` must be absolute when present.
 
 Resume: on each successful op, a line is appended to `<ops.jsonl>.progress`. Re-running with `--resume` skips those lines and emits `from_cache:true` envelopes for them.
 
@@ -322,11 +354,11 @@ GOLINK_REPLAY=cassette.jsonl golink --json post list
 `GOLINK_RECORD` and `GOLINK_REPLAY` are mutually exclusive — setting both is a startup error.
 
 **Cassette format**: newline-delimited JSON (JSONL). Each line records one HTTP exchange:
-- `method`, `url`, `body_sha256` — request identity (match key for replay)
-- `request_body` — request body inlined if ≤ 1 KB, otherwise omitted
-- `response.status`, `response.headers`, `response.body_base64` — full response
+- `method`, `url`, `body_sha256` — request identity (match key for replay); personal identifiers in `url` are redacted before writing
+- `request_body` — redacted JSON/form request body inlined if ≤ 1 KB, otherwise omitted
+- `response.status`, `response.headers`, `response.body_base64` — response metadata and a redacted response body
 
-**Security**: `Authorization`, `Cookie`, and `Set-Cookie` headers are redacted from cassettes before writing. Access tokens never appear in cassette files.
+**Security**: `Authorization`, `Cookie`, and `Set-Cookie` headers are redacted from cassettes before writing. Access tokens, refresh tokens, emails, member URNs, names, locations, local file paths, and post/comment text are redacted from persisted cassette URLs and bodies.
 
 **Replay semantics**: responses are matched by `method + url + body_sha256`. A miss aborts with an error — the replayer never falls back to the network.
 
@@ -354,9 +386,9 @@ golink --json approval deny <command_id>
 golink --json approval cancel <command_id>
 ```
 
-Supported on: `post create`, `post delete`, `comment add`, `react add`.
+Supported on: `post create`, `post delete`, `post edit`, `post reshare`, `comment add`, `react add`.
 
-Also supported in batch ops via `require_approval: true` on a per-op basis:
+Also supported in batch ops via `require_approval: true` on a per-op basis for commands that support approval. `post schedule` rejects `require_approval` because it only stages a local scheduled entry.
 
 ```jsonl
 {"command":"post create","args":{"text":"Hello batch"},"require_approval":true}
@@ -384,9 +416,9 @@ The file is created with mode `0600` in a `0700` directory on first write.
 
 **Opt-out**: set `GOLINK_AUDIT=off` (or `audit: false` in `~/.config/golink/config.yaml`).
 
-**What is recorded**: timestamp, profile, transport, command, command ID, mode (`normal`/`dry_run`), outcome status, request ID when available, HTTP status, error code, and (for dry-run) the would-be payload preview.
+**What is recorded**: timestamp, profile, transport, command, command ID, mode (`normal`/`dry_run`), outcome status, request ID when available, HTTP status, error code, and (for dry-run) a redacted would-be payload preview.
 
-**What is never recorded**: access tokens, refresh tokens, PKCE codes or state, email addresses, or any other secrets.
+**What is never recorded**: access tokens, refresh tokens, PKCE codes or state, email addresses, member URNs, post/comment text, or any other secrets.
 
 Audit-write failures are logged at WARN and never abort the command.
 
@@ -399,41 +431,39 @@ golink doctor
 ```
 
 ```
+golink doctor — diagnostics
+
 Environment
-  GOLINK_CLIENT_ID   set
-  GOLINK_API_VERSION not set (default: 202604)
-  GOLINK_TRANSPORT   not set (default: official)
-  GOLINK_AUDIT       not set (default: on)
-  GOLINK_AUDIT_PATH  not set
+  GOLINK_CLIENT_ID:   set
+  GOLINK_API_VERSION: (not set; default used)
+  GOLINK_AUDIT:       (not set; default on)
+  Config file:        (none)
 
-Session
-  status     authenticated
-  profile    urn:li:member:12345678 (Ada Lovelace)
-  scopes     openid profile email w_member_social_feed
-  expires_at 2026-04-24 12:00:00 UTC
+Session (profile: default)
+  Authenticated: true
+  Access expires: 2026-05-12T09:00:00Z (168 hours)
+  Refresh token: present (expires 2026-08-03T09:00:00Z in 90 days)
+  Scopes: openid profile email w_member_social_feed
+  Auth flow: pkce
+  Connected at: 2026-05-05T09:00:00Z
 
-Probe: GET /v2/userinfo
-  status     ok (200)
-  latency    142ms
+LinkedIn probe
+  GET https://api.linkedin.com/v2/userinfo -> 200 (member urn:li:person:abc123)
+  Request ID: abc-123
 
-Features
-  auth login      supported
-  auth refresh    supported
-  profile me      supported
-  post create     supported
-  post list       supported
-  post get        supported
-  post delete     supported
-  comment add     supported
-  comment list    supported
-  react add       supported
-  react list      supported
-  search people   unsupported
+Feature support
+  profile me           supported
+  post create          supported
+  post list            unsupported (requires r_member_social which is not granted)
+  org list             unsupported (requires w_organization_social_feed or w_organization_social which is not granted)
+  auth refresh         supported
 
 Audit
-  enabled    true
-  path       /Users/ada/.local/state/golink/audit.jsonl
-  exists     true
+  Path:    /Users/ada/.local/state/golink/audit.jsonl
+  Enabled: true
+  File:    (not yet created)
+
+Health: ok
 ```
 
 Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CLIENT_ID`) as exit 2 and errors (probe failure, no active session) as exit 5. Without `--strict` the command always exits 0.
@@ -459,6 +489,20 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 - Endpoint-family specific scopes as required (`r_member_social`, organization social feed permissions, and any LinkedIn product-specific approvals)
 - Go 1.26.2+ for building from source
 
+## Technical architecture
+
+`main.go` delegates into `cmd.ExecuteContext`, where Cobra commands share a dependency container for stdout/stderr, clock, HTTP client, auth/session stores, transport factory, audit, idempotency, approval, and schedule stores. All LinkedIn network access goes through `internal/api.Transport`; production uses the official LinkedIn adapter and tests use in-memory or httptest transports.
+
+Configuration is resolved by `internal/config` with flag and environment overrides over the optional YAML config file. Sensitive values are not written to config: access and refresh tokens live in the OS keyring, and `GOLINK_CLIENT_SECRET` is only read from the environment for the standard OAuth 2.0 fallback.
+
+Machine-readable output is centralized in `internal/output` and validated against `schemas/golink-output.schema.json` for `--json`. Text, compact, table, and JSONL modes are renderings of the same command data and are intentionally easier to read or stream.
+
+Local persistence is append-only where practical. Idempotency and audit stores are JSONL files under `$XDG_STATE_HOME/golink/` by default, while approvals and scheduled posts are directory-backed state machines. Stores create `0700` directories and `0600` files.
+
+Privacy redaction is centralized in `internal/privacy` and is applied before writing audit previews or HTTP record/replay cassettes. Tokens, secrets, auth codes, email addresses, LinkedIn URNs, local file paths, profile names, locations, and post/comment text must not be persisted in logs or cassettes.
+
+The release gate is `make ci`, which runs vet, golangci-lint, unit tests, race tests, and govulncheck. Schema changes must update the JSON schema and fixtures before command code changes.
+
 ## Project layout
 
 ```
@@ -473,6 +517,7 @@ internal/httprecord/       HTTP record/replay cassette (RecordTransport, ReplayT
 internal/idempotency/      append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
 internal/output/           JSON envelope types, schema validation, enum parsers
 internal/plan/             golink.plan/v1 document type, Load, SHA256
+internal/privacy/          redaction helpers for persisted logs, cassettes, and payload previews
 internal/schedule/         client-side post queue (Store interface, FileStore, MemoryStore)
 schemas/                   golink-output.schema.json — contract for every --json response
 ```

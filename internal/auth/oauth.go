@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -25,12 +26,22 @@ const (
 	// from the confidential-client OAuth pages and requires the default
 	// system browser plus a loopback redirect listener.
 	AuthorizationURL = "https://www.linkedin.com/oauth/native-pkce/authorization"
+	// OAuth2AuthorizationURL is LinkedIn's standard confidential-client OAuth
+	// authorization endpoint.
+	OAuth2AuthorizationURL = "https://www.linkedin.com/oauth/v2/authorization"
 	// TokenURL is the LinkedIn OAuth token endpoint.
 	TokenURL = "https://www.linkedin.com/oauth/v2/accessToken"
 	// UserInfoURL is the LinkedIn OpenID Connect userinfo endpoint.
-	UserInfoURL         = "https://api.linkedin.com/v2/userinfo"
+	UserInfoURL = "https://api.linkedin.com/v2/userinfo"
+	// ProfileURL is the legacy/current-member profile endpoint used as a
+	// non-OIDC fallback when native PKCE rejects OpenID scopes.
+	ProfileURL          = "https://api.linkedin.com/v2/me?fields=id"
 	defaultCallbackHost = "127.0.0.1"
 	defaultCallbackPath = "/callback"
+	// maxOAuthBodyBytes caps the size of OAuth/userinfo response bodies. Token
+	// JSON and userinfo payloads are kilobytes; a malicious or compromised IdP
+	// streaming gigabytes would otherwise exhaust process memory.
+	maxOAuthBodyBytes = 64 << 10
 )
 
 // BrowserOpener launches the system browser for an authorization URL.
@@ -76,17 +87,40 @@ type UserInfo struct {
 
 // LoginFlowOptions controls the full login flow behavior.
 type LoginFlowOptions struct {
-	HTTPClient    *http.Client
-	BrowserOpener BrowserOpener
-	Interactive   bool
-	Now           func() time.Time
-	TokenURL      string
-	UserInfoURL   string
+	HTTPClient      *http.Client
+	BrowserOpener   BrowserOpener
+	Interactive     bool
+	Now             func() time.Time
+	TokenURL        string
+	ClientSecret    string
+	AuthFlow        string
+	UserInfoURL     string
+	ProfileURL      string
+	RequestedScopes []string
+	ManualMemberURN string
 }
 
 // BuildLoginRequest constructs the initial PKCE authorization request.
 func BuildLoginRequest(ctx context.Context, clientID string, preferredPort int, scopes []string) (*LoginRequest, error) {
-	redirectReservation, err := resolveRedirectURI(ctx, preferredPort)
+	return BuildLoginRequestWithOptions(ctx, LoginRequestOptions{
+		ClientID:      clientID,
+		PreferredPort: preferredPort,
+		Scopes:        scopes,
+		AuthFlow:      "pkce",
+	})
+}
+
+// LoginRequestOptions controls authorization URL generation.
+type LoginRequestOptions struct {
+	ClientID      string
+	PreferredPort int
+	Scopes        []string
+	AuthFlow      string
+}
+
+// BuildLoginRequestWithOptions constructs the initial OAuth authorization request.
+func BuildLoginRequestWithOptions(ctx context.Context, opts LoginRequestOptions) (*LoginRequest, error) {
+	redirectReservation, err := resolveRedirectURI(ctx, opts.PreferredPort)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +135,8 @@ func BuildLoginRequest(ctx context.Context, clientID string, preferredPort int, 
 		return nil, fmt.Errorf("generate code verifier: %w", err)
 	}
 
-	requestURL, err := buildAuthorizationURL(clientID, redirectReservation.URL.String(), scopes, state, verifier)
+	authFlow := normalizeAuthFlow(opts.AuthFlow)
+	requestURL, err := buildAuthorizationURL(opts.ClientID, redirectReservation.URL.String(), opts.Scopes, state, verifier, authFlow)
 	if err != nil {
 		_ = redirectReservation.Listener.Close()
 		return nil, err
@@ -111,7 +146,7 @@ func BuildLoginRequest(ctx context.Context, clientID string, preferredPort int, 
 		URL:              requestURL,
 		RedirectURI:      redirectReservation.URL.String(),
 		State:            state,
-		CodeVerifier:     verifier,
+		CodeVerifier:     codeVerifierForFlow(verifier, authFlow),
 		CallbackListener: redirectReservation.Listener,
 	}, nil
 }
@@ -146,10 +181,15 @@ func CompleteLogin(
 	if tokenURL == "" {
 		tokenURL = TokenURL
 	}
+	authFlow := normalizeAuthFlow(options.AuthFlow)
 
 	userInfoURL := options.UserInfoURL
 	if userInfoURL == "" {
 		userInfoURL = UserInfoURL
+	}
+	profileURL := options.ProfileURL
+	if profileURL == "" {
+		profileURL = ProfileURL
 	}
 
 	if options.Interactive && options.BrowserOpener != nil {
@@ -163,14 +203,23 @@ func CompleteLogin(
 		return nil, fmt.Errorf("complete login: wait for callback: %w", err)
 	}
 
-	token, err := ExchangeAuthorizationCode(ctx, httpClient, tokenURL, request, callback)
+	token, err := ExchangeAuthorizationCode(ctx, httpClient, tokenURL, request, callback, options.ClientSecret)
 	if err != nil {
 		return nil, fmt.Errorf("complete login: exchange authorization code: %w", err)
 	}
 
 	userInfo, err := FetchUserInfo(ctx, httpClient, userInfoURL, token.AccessToken)
 	if err != nil {
-		return nil, fmt.Errorf("complete login: fetch user info: %w", err)
+		profileID, profileErr := FetchProfileID(ctx, httpClient, profileURL, token.AccessToken)
+		if profileErr != nil {
+			manualMemberURN := strings.TrimSpace(options.ManualMemberURN)
+			if manualMemberURN == "" {
+				return nil, fmt.Errorf("complete login: fetch user info: %w; fetch profile id: %v", err, profileErr)
+			}
+			userInfo = &UserInfo{Sub: manualMemberURN}
+		} else {
+			userInfo = &UserInfo{Sub: memberURNFromProfileID(profileID)}
+		}
 	}
 
 	session := &Session{
@@ -179,7 +228,7 @@ func CompleteLogin(
 		AccessToken:    token.AccessToken,
 		Scopes:         splitScopes(token.Scope),
 		ConnectedAt:    now().UTC(),
-		AuthFlow:       "pkce",
+		AuthFlow:       authFlow,
 		MemberURN:      userInfo.Sub,
 		ProfileID:      strings.TrimPrefix(userInfo.Sub, "urn:li:person:"),
 		Name:           userInfo.Name,
@@ -198,7 +247,7 @@ func CompleteLogin(
 		}
 	}
 	if len(session.Scopes) == 0 {
-		session.Scopes = []string{"openid", "profile", "email", "w_member_social_feed"}
+		session.Scopes = cleanScopes(options.RequestedScopes)
 	}
 
 	if err := session.Validate(); err != nil {
@@ -208,8 +257,12 @@ func CompleteLogin(
 	return session, nil
 }
 
-func buildAuthorizationURL(clientID, redirectURI string, scopes []string, state, verifier string) (string, error) {
-	base, err := url.Parse(AuthorizationURL)
+func buildAuthorizationURL(clientID, redirectURI string, scopes []string, state, verifier, authFlow string) (string, error) {
+	authURL := AuthorizationURL
+	if normalizeAuthFlow(authFlow) == "oauth2" {
+		authURL = OAuth2AuthorizationURL
+	}
+	base, err := url.Parse(authURL)
 	if err != nil {
 		return "", fmt.Errorf("parse authorization url: %w", err)
 	}
@@ -221,8 +274,10 @@ func buildAuthorizationURL(clientID, redirectURI string, scopes []string, state,
 	query.Set("redirect_uri", redirectURI)
 	query.Set("scope", strings.Join(scopes, " "))
 	query.Set("state", state)
-	query.Set("code_challenge", codeChallengeS256(verifier))
-	query.Set("code_challenge_method", "S256")
+	if normalizeAuthFlow(authFlow) == "pkce" {
+		query.Set("code_challenge", codeChallengeS256(verifier))
+		query.Set("code_challenge_method", "S256")
+	}
 	base.RawQuery = query.Encode()
 
 	return base.String(), nil
@@ -237,9 +292,20 @@ func WaitForOAuthCallback(ctx context.Context, listener net.Listener, expectedSt
 	resultCh := make(chan CallbackResult, 1)
 	errorCh := make(chan error, 1)
 	serveErrCh := make(chan error, 1)
+	doneCh := make(chan struct{})
+	expectedHost := listener.Addr().String()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(defaultCallbackPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != expectedHost {
+			http.Error(w, "invalid host", http.StatusBadRequest)
+			select {
+			case errorCh <- fmt.Errorf("unexpected callback host: %s", r.Host):
+			default:
+			}
+			return
+		}
+
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			select {
@@ -258,7 +324,7 @@ func WaitForOAuthCallback(ctx context.Context, listener net.Listener, expectedSt
 		}
 
 		switch {
-		case result.State != expectedState:
+		case subtle.ConstantTimeCompare([]byte(result.State), []byte(expectedState)) != 1:
 			http.Error(w, "state mismatch", http.StatusBadRequest)
 			select {
 			case errorCh <- fmt.Errorf("state mismatch"):
@@ -285,8 +351,14 @@ func WaitForOAuthCallback(ctx context.Context, listener net.Listener, expectedSt
 		}
 	})
 
-	server := &http.Server{Handler: mux}
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      5 * time.Second,
+	}
 	go func() {
+		defer close(doneCh)
 		err := server.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErrCh <- err
@@ -296,6 +368,7 @@ func WaitForOAuthCallback(ctx context.Context, listener net.Listener, expectedSt
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
+		<-doneCh
 	}()
 
 	select {
@@ -317,13 +390,19 @@ func ExchangeAuthorizationCode(
 	tokenURL string,
 	request *LoginRequest,
 	callback *CallbackResult,
+	clientSecret string,
 ) (*TokenResponse, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", callback.Code)
 	form.Set("client_id", requestClientID(request.URL))
 	form.Set("redirect_uri", request.RedirectURI)
-	form.Set("code_verifier", request.CodeVerifier)
+	if request.CodeVerifier != "" {
+		form.Set("code_verifier", request.CodeVerifier)
+	}
+	if strings.TrimSpace(clientSecret) != "" {
+		form.Set("client_secret", clientSecret)
+	}
 
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -337,13 +416,13 @@ func ExchangeAuthorizationCode(
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	body, err := io.ReadAll(response.Body)
+	body, err := readCappedBody(response.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("token endpoint returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("token endpoint returned %d: %s", response.StatusCode, snippetForError(body))
 	}
 
 	var token TokenResponse
@@ -384,13 +463,13 @@ func RefreshAccessToken(ctx context.Context, httpClient *http.Client, tokenURL, 
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	body, err := io.ReadAll(response.Body)
+	body, err := readCappedBody(response.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("token endpoint returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("token endpoint returned %d: %s", response.StatusCode, snippetForError(body))
 	}
 
 	var token TokenResponse
@@ -418,13 +497,13 @@ func FetchUserInfo(ctx context.Context, httpClient *http.Client, userInfoURL, ac
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	body, err := io.ReadAll(response.Body)
+	body, err := readCappedBody(response.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("userinfo endpoint returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("userinfo endpoint returned %d: %s", response.StatusCode, snippetForError(body))
 	}
 
 	var userInfo UserInfo
@@ -436,6 +515,45 @@ func FetchUserInfo(ctx context.Context, httpClient *http.Client, userInfoURL, ac
 	}
 
 	return &userInfo, nil
+}
+
+// FetchProfileID fetches the current member's profile ID from LinkedIn's
+// non-OIDC profile endpoint. It is used when native PKCE scopes cannot include
+// openid/profile/email but the app has a profile-read permission.
+func FetchProfileID(ctx context.Context, httpClient *http.Client, profileURL, accessToken string) (string, error) {
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, profileURL, http.NoBody)
+	if err != nil {
+		return "", err
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+accessToken)
+	httpRequest.Header.Set("X-Restli-Protocol-Version", "2.0.0")
+
+	response, err := httpClient.Do(httpRequest)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	body, err := readCappedBody(response.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("profile endpoint returned %d: %s", response.StatusCode, snippetForError(body))
+	}
+
+	var profile struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &profile); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(profile.ID) == "" {
+		return "", fmt.Errorf("profile response missing id")
+	}
+
+	return profile.ID, nil
 }
 
 type redirectReservation struct {
@@ -485,13 +603,49 @@ func codeChallengeS256(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+func normalizeAuthFlow(raw string) string {
+	if strings.TrimSpace(raw) == "oauth2" {
+		return "oauth2"
+	}
+
+	return "pkce"
+}
+
+func codeVerifierForFlow(verifier, authFlow string) string {
+	if normalizeAuthFlow(authFlow) == "oauth2" {
+		return ""
+	}
+
+	return verifier
+}
+
 func splitScopes(raw string) []string {
-	fields := strings.Fields(raw)
+	return cleanScopes(strings.Fields(raw))
+}
+
+func cleanScopes(fields []string) []string {
 	if len(fields) == 0 {
 		return nil
 	}
 
-	return fields
+	cleaned := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if scope := strings.TrimSpace(field); scope != "" {
+			cleaned = append(cleaned, scope)
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
+}
+
+func memberURNFromProfileID(profileID string) string {
+	profileID = strings.TrimSpace(profileID)
+	if strings.HasPrefix(profileID, "urn:li:") {
+		return profileID
+	}
+	return "urn:li:person:" + profileID
 }
 
 func requestClientID(requestURL string) string {
@@ -501,4 +655,33 @@ func requestClientID(requestURL string) string {
 	}
 
 	return parsed.Query().Get("client_id")
+}
+
+// readCappedBody reads at most maxOAuthBodyBytes from r. Returns an error when
+// the cap is exceeded so a malicious upstream cannot exhaust process memory.
+func readCappedBody(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxOAuthBodyBytes+1)
+	buf, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > maxOAuthBodyBytes {
+		return nil, fmt.Errorf("oauth response body exceeds %d bytes", maxOAuthBodyBytes)
+	}
+	return buf, nil
+}
+
+// snippetForError returns a short, safe representation of body for inclusion
+// in an error message. Long bodies are truncated; whitespace is collapsed.
+func snippetForError(body []byte) string {
+	const maxLen = 256
+	s := strings.TrimSpace(string(body))
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxLen {
+		s = s[:maxLen] + "..."
+	}
+	if s == "" {
+		return "<empty body>"
+	}
+	return s
 }

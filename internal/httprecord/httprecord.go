@@ -4,9 +4,8 @@
 // GOLINK_REPLAY=<path> serves responses from a cassette without hitting the network.
 // The two modes are mutually exclusive.
 //
-// WARNING: cassettes may contain PII from response bodies (member names, etc.).
-// Authorization headers are always redacted before writing. Operators should
-// curate cassettes before sharing.
+// Authorization headers, member identifiers, emails, names, local paths, and
+// free-text payloads are redacted before writing.
 package httprecord
 
 import (
@@ -20,9 +19,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/mudrii/golink/internal/privacy"
 )
 
 const maxInlineBodyBytes = 1024
@@ -80,8 +82,9 @@ func LoadCassette(path string) (*Cassette, error) {
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			return nil, fmt.Errorf("parse cassette line: %w", err)
 		}
+		e = redactEntry(e)
 		c.entries = append(c.entries, e)
-		k := replayKey{method: e.Method, url: e.URL, bodySHA256: e.BodySHA256}
+		k := replayKey{method: e.Method, url: privacy.URL(e.URL), bodySHA256: e.BodySHA256}
 		c.index[k] = e.Response
 	}
 	if err := sc.Err(); err != nil {
@@ -109,6 +112,7 @@ func (c *Cassette) Save(path string) error {
 	defer func() { _ = f.Close() }()
 
 	for _, e := range c.entries {
+		e = redactEntry(e)
 		line, err := json.Marshal(e)
 		if err != nil {
 			return fmt.Errorf("marshal cassette entry: %w", err)
@@ -125,6 +129,7 @@ type RecordTransport struct {
 	base     http.RoundTripper
 	path     string
 	cassette *Cassette
+	writeMu  sync.Mutex
 }
 
 // RoundTrip performs the request, records the exchange, and returns the response.
@@ -162,26 +167,31 @@ func (rt *RecordTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	entry := Entry{
 		Seq:        rt.cassette.nextSeq(),
 		Method:     req.Method,
-		URL:        req.URL.String(),
+		URL:        privacy.URL(req.URL.String()),
 		BodySHA256: bodyHash,
 		Response: EntryResponse{
 			Status:  resp.StatusCode,
 			Headers: redactResponseHeaders(resp.Header),
-			Body:    base64.StdEncoding.EncodeToString(respBody),
+			Body:    base64.StdEncoding.EncodeToString(redactResponseBody(req, respBody)),
 		},
 	}
 	if len(reqBody) > 0 && len(reqBody) <= maxInlineBodyBytes {
-		entry.RequestBody = string(reqBody)
+		if shouldInlineRequestBody(req, reqBody) {
+			entry.RequestBody = string(redactRequestBody(req, reqBody))
+		}
 	}
 
 	rt.cassette.mu.Lock()
 	rt.cassette.entries = append(rt.cassette.entries, entry)
 	rt.cassette.mu.Unlock()
 
-	// Flush this entry immediately (append-only).
-	if err := appendEntry(rt.path, entry); err != nil {
-		// Log failure but don't break the response path.
-		_, _ = fmt.Fprintf(os.Stderr, "httprecord: write failed: %v\n", err)
+	// appendEntry writes to a shared file; serialise concurrent recorders to
+	// avoid interleaved or corrupted JSONL lines.
+	rt.writeMu.Lock()
+	flushErr := appendEntry(rt.path, entry)
+	rt.writeMu.Unlock()
+	if flushErr != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "httprecord: write failed: %v\n", flushErr)
 	}
 
 	return resp, nil
@@ -209,7 +219,7 @@ func (rt *ReplayTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	k := replayKey{
 		method:     req.Method,
-		url:        req.URL.String(),
+		url:        privacy.URL(req.URL.String()),
 		bodySHA256: bodySHA256(reqBody),
 	}
 
@@ -219,7 +229,7 @@ func (rt *ReplayTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	if !ok {
 		return nil, fmt.Errorf("httprecord replay: no recorded response for %s %s body=%s",
-			req.Method, req.URL.String(), k.bodySHA256)
+			req.Method, privacy.URL(req.URL.String()), k.bodySHA256)
 	}
 
 	body, err := base64.StdEncoding.DecodeString(recorded.Body)
@@ -297,6 +307,7 @@ func (c *Cassette) nextSeq() int {
 }
 
 func appendEntry(path string, e Entry) error {
+	e = redactEntry(e)
 	line, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -311,4 +322,79 @@ func appendEntry(path string, e Entry) error {
 		return writeErr
 	}
 	return closeErr
+}
+
+func redactEntry(e Entry) Entry {
+	e.URL = privacy.URL(e.URL)
+	if e.RequestBody != "" {
+		e.RequestBody = string(redactStoredBody([]byte(e.RequestBody)))
+	}
+	if e.Response.Body != "" {
+		body, err := base64.StdEncoding.DecodeString(e.Response.Body)
+		if err == nil {
+			e.Response.Body = base64.StdEncoding.EncodeToString(redactStoredBody(body))
+		}
+	}
+	e.Response.Headers = redactResponseHeaders(http.Header(e.Response.Headers))
+	return e
+}
+
+func redactStoredBody(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if json.Valid(body) {
+		return privacy.JSON(body)
+	}
+	if values, err := url.ParseQuery(string(body)); err == nil && len(values) > 0 {
+		return privacy.Form(body)
+	}
+	return []byte(`REDACTED`)
+}
+
+// redactResponseBody returns the response body with bearer tokens replaced
+// when the request URL is an OAuth token endpoint. The body is rewritten as
+// JSON when possible; otherwise an empty placeholder is returned.
+func redactResponseBody(req *http.Request, body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	if isTokenEndpoint(req.URL.Path) || json.Valid(body) {
+		return privacy.JSON(body)
+	}
+	return []byte(`REDACTED`)
+}
+
+func redactRequestBody(req *http.Request, reqBody []byte) []byte {
+	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
+	switch {
+	case strings.Contains(contentType, "json"):
+		return privacy.JSON(reqBody)
+	case strings.HasPrefix(contentType, "application/x-www-form-urlencoded"):
+		return privacy.Form(reqBody)
+	default:
+		return []byte(`{"redacted":true}`)
+	}
+}
+
+func isTokenEndpoint(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.Contains(lower, "/oauth/") || strings.Contains(lower, "accesstoken")
+}
+
+func shouldInlineRequestBody(req *http.Request, reqBody []byte) bool {
+	if len(reqBody) == 0 {
+		return false
+	}
+	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
+	if !strings.Contains(contentType, "json") && !strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
+		return false
+	}
+	if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
+		path := strings.ToLower(req.URL.Path)
+		if strings.Contains(path, "/oauth/") || strings.Contains(path, "accesstoken") {
+			return false
+		}
+	}
+	return true
 }

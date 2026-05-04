@@ -4,10 +4,10 @@ golink is a LinkedIn CLI for humans and LLM agents. Go 1.26.2 on darwin/arm64. S
 
 ## Architecture
 
-- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`; org subcommands: `list` (requires `w_organization_social`); post subcommands: `create` (with `--image`, `--as-org`), `list`, `get`, `delete`, `edit`, `reshare`, `schedule`; top-level: `profile`, `doctor` (read-only, not audited), `version`
+- **CLI**: cobra (`github.com/spf13/cobra`); auth subcommands: `login`, `status`, `logout`, `refresh`; org subcommands: `list` (requires `w_organization_social_feed` or legacy `w_organization_social`); post subcommands: `create` (with `--image`, `--as-org`), `list`, `get`, `delete`, `edit`, `reshare`, `schedule`; top-level: `profile`, `doctor` (read-only, not audited), `version`
 - **Transport seam**: `internal/api/transport.go` (interface) → `official.go` (live LinkedIn adapter) / `noop.go` (fallback). Every CLI command goes through `Transport`.
 - **HTTP**: `internal/api/client.go` — `go-retryablehttp`, 429/5xx retry, `Linkedin-Version` + `X-Restli-Protocol-Version` headers, rate-limit parsing, typed `api.Error`
-- **Auth**: native PKCE OAuth (`internal/auth/oauth.go`) + `go-keyring` session store — tokens never touch disk or logs
+- **Auth**: native PKCE OAuth by default with standard OAuth 2.0 fallback (`internal/auth/oauth.go`) + `go-keyring` session store — tokens never touch disk or logs
 - **Output contract**: `schemas/golink-output.schema.json` — every `--json` response must validate; fixtures in `internal/output/schema_test.go`
 
 ## Packages
@@ -18,12 +18,13 @@ cmd/                   cobra commands (auth, profile, org, post, comment, react,
 internal/api/          Transport interface, official adapter, retry client, typed errors
 internal/approval/     approval gate (Store interface, FileStore, MemoryStore; states: pending/approved/denied/completed)
 internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
-internal/auth/         PKCE OAuth + keyring session store
+internal/auth/         PKCE OAuth + standard OAuth 2.0 fallback + keyring session store
 internal/config/       viper settings with env/flag/file precedence
 internal/httprecord/   HTTP record/replay cassette (RecordTransport, ReplayTransport, Wrap); activated by GOLINK_RECORD / GOLINK_REPLAY
 internal/idempotency/  append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
 internal/output/       JSON envelopes, schema validator, enum parsers
 internal/plan/         golink.plan/v1 document type — Load (envelope-aware), SHA256, IsPlannableCommand
+internal/privacy/      redaction helpers for persisted audit previews and HTTP record/replay cassettes
 internal/schedule/     client-side post queue (Store interface, FileStore, MemoryStore; states: pending/running/completed/failed/cancelled)
 schemas/               golink-output.schema.json (the --json contract)
 ```
@@ -54,7 +55,11 @@ Run `go vet ./...` and `go test -race ./...` after any code change. Only run `go
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `GOLINK_CLIENT_ID` | yes, for `auth login` | LinkedIn app client ID (PKCE flow) |
+| `GOLINK_CLIENT_ID` | yes, for `auth login` | LinkedIn app client ID |
+| `GOLINK_CLIENT_SECRET` | only with `GOLINK_AUTH_FLOW=oauth2` | LinkedIn app client secret for standard OAuth 2.0 token exchange |
+| `GOLINK_AUTH_FLOW` | no | `pkce` default, or `oauth2` for standard confidential-client OAuth; oauth2 requires a fixed `GOLINK_REDIRECT_PORT` |
+| `GOLINK_AUTH_SCOPES` | no | Override auth login scopes for app-specific PKCE permission support |
+| `GOLINK_MEMBER_URN` | no | Manual member URN fallback when OIDC userinfo/profile lookup is unavailable |
 | `GOLINK_API_VERSION` | no | `Linkedin-Version` header value (`YYYYMM`) |
 | `GOLINK_REDIRECT_PORT` | no | Preferred OAuth loopback port; `0` picks any free port |
 | `GOLINK_JSON`, `GOLINK_TRANSPORT`, `GOLINK_OUTPUT` | no | Preflight overrides for `--json` / `--transport` / `--output` |
@@ -66,7 +71,9 @@ Run `go vet ./...` and `go test -race ./...` after any code change. Only run `go
 | `GOLINK_RECORD` | no | Path to a JSONL cassette file; wraps the HTTP client to record every exchange |
 | `GOLINK_REPLAY` | no | Path to a JSONL cassette file; serves responses from cassette without network access (mutually exclusive with `GOLINK_RECORD`) |
 
-No client secret. Tokens via keyring only. Config file stores non-sensitive settings.
+Client secrets are only used for `GOLINK_AUTH_FLOW=oauth2` and must stay in
+local environment variables or a secret manager. Tokens via keyring only.
+Config file stores non-sensitive settings.
 
 ## Exit codes
 
@@ -104,7 +111,7 @@ Only when it measurably helps. Every goroutine needs a shutdown path. Context ca
 
 - Table-driven with `t.Run`; helpers call `t.Helper()`
 - Fakes over mocks; test behavior not implementation
-- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Stderr`, `Now`, `HTTPClient`, `BrowserOpener`, `LoginRunner`, `SessionStore`, `IsInteractive`, `TransportFactory`, `AuditSink`, `IdempotencyStore`, `ApprovalStore`, `ScheduleStore`, `TokenURL`, `UserinfoURL`)
+- Inject seams (`cmd.Dependencies` shows the pattern: `Stdout`, `Stderr`, `Now`, `HTTPClient`, `BrowserOpener`, `LoginRunner`, `SessionStore`, `IsInteractive`, `TransportFactory`, `AuditSink`, `IdempotencyStore`, `ApprovalStore`, `ScheduleStore`, `TokenURL`, `UserinfoURL`, `ProfileURL`)
 - `t.Context()` for test-lifetime context; `t.Setenv` for env; `httptest.NewServer` for transport tests
 - `cmp.Equal` / `cmp.Diff` for nested struct comparisons
 - **Schema-first contract changes**: edit `schemas/golink-output.schema.json` + add a fixture in `internal/output/schema_test.go` FIRST, then change the Go struct and command code. The schema is the contract.
@@ -130,7 +137,7 @@ Implementation:
 - **Config**: loaded and validated at startup via `internal/config.Loader`; no hardcoded runtime values
 - **HTTP**: all LinkedIn calls go through `internal/api.Client`; always close bodies (`errcheck` is enabled)
 - **Security**: `govulncheck` on dep changes and before release; gated by `make ci`
-- **Audit**: every mutating command's `RunE` must call `a.auditMutation(cmd, cmdID, status, mode, ...)` before returning. Opt-out via `GOLINK_AUDIT=off` or `audit: false` in config. Tokens/secrets must never appear in audit entries. `doctor` is read-only and is never audited.
+- **Audit**: every mutating command's `RunE` must call `a.auditMutation(cmd, cmdID, status, mode, ...)` before returning. Opt-out via `GOLINK_AUDIT=off` or `audit: false` in config. Tokens, secrets, member URNs, email addresses, and free-text payloads must never appear in persisted audit entries. `doctor` is read-only and is never audited.
 
 ## Review rejects (blocking)
 

@@ -67,7 +67,7 @@ func newBatchCommand(a *app) *cobra.Command {
 		Long: `batch reads a JSONL file (or stdin when the path is -) where each line is:
   {"command":"post create","args":{"text":"hello","visibility":"PUBLIC"},"idempotency_key":"abc"}
 
-Supported commands: post create, post delete, comment add, react add.
+Supported commands: post create, post delete, comment add, react add, post schedule.
 Results stream to stdout as JSONL — one envelope per input line.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -165,7 +165,22 @@ type batchRunner struct {
 	continueOnError bool
 	failFast        bool
 
-	outMu sync.Mutex
+	outMu      sync.Mutex
+	progressMu sync.Mutex
+
+	// idemKeys serialises Lookup→Dispatch→Record for the same idempotency
+	// key within this process; cross-process coordination is out of scope.
+	idemKeys sync.Map
+}
+
+// lockIdemKey returns a release fn that holds an exclusive in-process lock on
+// key for the duration of the dispatch. Concurrent ops with the same key
+// serialise so the second observes the first's Record on its Lookup.
+func (r *batchRunner) lockIdemKey(key string) func() {
+	mu, _ := r.idemKeys.LoadOrStore(key, &sync.Mutex{})
+	m := mu.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
 }
 
 func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool, concurrency int) bool {
@@ -180,6 +195,7 @@ func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool,
 	aborted := false
 	var abortMu sync.Mutex
 
+loop:
 	for i, op := range ops {
 		lineNum := i + 1
 
@@ -196,8 +212,21 @@ func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool,
 			continue
 		}
 
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break loop
+		}
+
+		abortMu.Lock()
+		shouldAbort = aborted
+		abortMu.Unlock()
+		if shouldAbort {
+			<-sem
+			break
+		}
+
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(ln int, op batchOp) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -232,22 +261,34 @@ func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool,
 
 // runOp dispatches a single batch op and writes the result envelope to stdout.
 // Returns the command_id used in the emitted envelope so callers (execute) can
-// correlate their audit entries with the op output.
+// correlate their audit entries with the op output. Every dispatched op fires
+// an audit entry through r.a.auditMutation before returning.
 func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (string, error) {
 	cmdName := strings.TrimSpace(op.Command)
 
 	if _, ok := batchSupportedCommands[cmdName]; !ok {
-		return "", r.emitValidationError(lineNum, op, fmt.Sprintf("unsupported command %q; supported: post create, post delete, comment add, react add, post schedule", cmdName))
+		auditID := newCommandID(cmdName, r.a.deps.Now().UTC())
+		emitErr := r.emitValidationError(lineNum, op, fmt.Sprintf("unsupported command %q; supported: post create, post delete, comment add, react add, post schedule", cmdName))
+		r.a.auditMutation(r.cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
+		return "", emitErr
 	}
 
-	// Idempotency check.
+	// Idempotency check. Hold a per-key lock so concurrent ops with the
+	// same key serialise across Lookup→Dispatch→Record.
 	if op.IdempotencyKey != "" {
+		release := r.lockIdemKey(op.IdempotencyKey)
+		defer release()
 		cached, hit, err := r.istore.Lookup(ctx, op.IdempotencyKey, cmdName)
 		if err != nil {
-			return "", r.emitValidationError(lineNum, op, err.Error())
+			auditID := newCommandID(cmdName, r.a.deps.Now().UTC())
+			emitErr := r.emitValidationError(lineNum, op, err.Error())
+			r.a.auditMutation(r.cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
+			return "", emitErr
 		}
 		if hit {
-			return cached.CommandID, r.emitCachedResult(lineNum, op, cached)
+			emitErr := r.emitCachedResult(lineNum, op, cached)
+			r.a.auditMutation(r.cmd, cached.CommandID, "ok", "normal", cached.RequestID, cached.HTTPStatus, "", nil)
+			return cached.CommandID, emitErr
 		}
 	}
 
@@ -255,12 +296,20 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 	if op.DryRun != nil {
 		dryRun = *op.DryRun
 	}
+	auditMode := "normal"
+	if dryRun {
+		auditMode = "dry_run"
+	}
 
 	requireApproval := op.RequireApproval
 	if requireApproval {
 		if cmdName == "post schedule" {
-			return "", r.emitValidationError(lineNum, op, "--require-approval is not supported with post schedule")
+			auditID := newCommandID(cmdName, r.a.deps.Now().UTC())
+			emitErr := r.emitValidationError(lineNum, op, "--require-approval is not supported with post schedule")
+			r.a.auditMutation(r.cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
+			return "", emitErr
 		}
+		// emitPendingApproval calls auditMutation internally.
 		return "", r.emitPendingApproval(ctx, lineNum, op)
 	}
 
@@ -283,7 +332,10 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 	}
 
 	if opErr != nil {
-		return cmdID, r.emitOpError(lineNum, op, cmdID, opErr)
+		errCode := batchErrorCode(opErr)
+		emitErr := r.emitOpError(lineNum, op, cmdID, opErr)
+		r.a.auditMutation(r.cmd, cmdID, "error", auditMode, "", httpStatus, errCode, nil)
+		return cmdID, emitErr
 	}
 
 	// Record idempotency entry on success.
@@ -300,7 +352,29 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 		})
 	}
 
-	return cmdID, r.emitSuccess(lineNum, op, cmdID, httpStatus, resultData)
+	emitErr := r.emitSuccess(lineNum, op, cmdID, httpStatus, resultData)
+	r.a.auditMutation(r.cmd, cmdID, "ok", auditMode, "", httpStatus, "", nil)
+	return cmdID, emitErr
+}
+
+// batchErrorCode maps a transport error to a stable output.ErrorCode string.
+// Mirrors emitOpError's classification so audit codes match emitted envelopes.
+func batchErrorCode(err error) string {
+	if ae, ok := api.AsError(err); ok {
+		switch {
+		case ae.IsUnauthorized():
+			return string(output.ErrorCodeUnauthorized)
+		case ae.IsForbidden():
+			return string(output.ErrorCodeForbidden)
+		case ae.IsNotFound():
+			return string(output.ErrorCodeNotFound)
+		case ae.IsRateLimited():
+			return string(output.ErrorCodeRateLimited)
+		case ae.IsValidation():
+			return string(output.ErrorCodeValidation)
+		}
+	}
+	return string(output.ErrorCodeTransport)
 }
 
 func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool) (any, string, int, error) {
@@ -747,6 +821,8 @@ func (r *batchRunner) appendProgress(lineNum int, ikey, cmdID, status string) {
 		return
 	}
 	line = append(line, '\n')
+	r.progressMu.Lock()
+	defer r.progressMu.Unlock()
 	f, err := os.OpenFile(r.progressPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return

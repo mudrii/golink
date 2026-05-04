@@ -63,6 +63,7 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 				"transport": "official",
 				"generated_at": "2026-04-16T10:00:00Z",
 				"data": {
+					"type": "login_url",
 					"url": "https://www.linkedin.com/oauth/native-pkce/authorization?client_id=abc",
 					"profile": "default",
 					"transport": "official",
@@ -79,6 +80,7 @@ func TestGolinkOutputSchemaRoundTrips(t *testing.T) {
 				"transport": "official",
 				"generated_at": "2026-04-16T10:05:00Z",
 				"data": {
+					"type": "login_result",
 					"status": "success",
 					"profile": "default",
 					"transport": "official",

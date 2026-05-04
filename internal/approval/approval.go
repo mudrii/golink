@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,12 @@ var ErrNotFound = errors.New("approval entry not found")
 // ErrWrongState is returned when an operation cannot proceed because the entry
 // is in an incompatible state (e.g. Run on a pending entry).
 var ErrWrongState = errors.New("approval entry is in wrong state")
+
+// ErrAlreadyStaged is returned when Stage refuses to overwrite an existing
+// pending entry with the same command_id.
+var ErrAlreadyStaged = errors.New("approval entry already staged")
+
+var commandIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 // Entry is the on-disk representation of a staged approval request.
 type Entry struct {
@@ -109,6 +117,9 @@ func (s *FileStore) Stage(_ context.Context, entry Entry) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(entry.CommandID); err != nil {
+		return "", err
+	}
 	if err := s.ensureDir(); err != nil {
 		return "", fmt.Errorf("approval mkdir: %w", err)
 	}
@@ -119,8 +130,22 @@ func (s *FileStore) Stage(_ context.Context, entry Entry) (string, error) {
 		return "", fmt.Errorf("approval marshal: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// O_EXCL ensures a duplicate command_id never silently overwrites an
+	// existing pending entry across processes.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("approval stage: %w: %s already pending", ErrAlreadyStaged, entry.CommandID)
+		}
 		return "", fmt.Errorf("approval write: %w", err)
+	}
+	if _, writeErr := f.Write(data); writeErr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("approval write: %w", writeErr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		return "", fmt.Errorf("approval close: %w", closeErr)
 	}
 	return path, nil
 }
@@ -175,6 +200,9 @@ func (s *FileStore) Show(_ context.Context, commandID string) (Entry, State, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(commandID); err != nil {
+		return Entry{}, "", err
+	}
 	for _, state := range []State{StatePending, StateApproved, StateDenied, StateCompleted} {
 		path := s.filePath(commandID, state)
 		data, err := os.ReadFile(path)
@@ -198,6 +226,9 @@ func (s *FileStore) Grant(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	src := s.filePath(commandID, StatePending)
 	dst := s.filePath(commandID, StateApproved)
 	if err := os.Rename(src, dst); err != nil {
@@ -214,6 +245,9 @@ func (s *FileStore) Deny(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	src := s.filePath(commandID, StatePending)
 	dst := s.filePath(commandID, StateDenied)
 	if err := os.Rename(src, dst); err != nil {
@@ -230,6 +264,9 @@ func (s *FileStore) LoadApproved(_ context.Context, commandID string) (Entry, er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(commandID); err != nil {
+		return Entry{}, err
+	}
 	// Check if pending first to give a clear error message.
 	if _, err := os.Stat(s.filePath(commandID, StatePending)); err == nil {
 		return Entry{}, fmt.Errorf("%w: %s is pending, not approved", ErrWrongState, commandID)
@@ -261,6 +298,9 @@ func (s *FileStore) Complete(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	src := s.filePath(commandID, StateApproved)
 	dst := s.filePath(commandID, StateCompleted)
 	if err := os.Rename(src, dst); err != nil {
@@ -277,6 +317,9 @@ func (s *FileStore) Cancel(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	for _, state := range []State{StatePending, StateApproved} {
 		path := s.filePath(commandID, state)
 		err := os.Remove(path)
@@ -311,6 +354,12 @@ func NewMemoryStore() *MemoryStore {
 func (m *MemoryStore) Stage(_ context.Context, entry Entry) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(entry.CommandID); err != nil {
+		return "", err
+	}
+	if st, ok := m.states[entry.CommandID]; ok && st == StatePending {
+		return "", fmt.Errorf("approval stage: %w: %s already pending", ErrAlreadyStaged, entry.CommandID)
+	}
 	m.entries[entry.CommandID] = entry
 	m.states[entry.CommandID] = StatePending
 	path := "/tmp/approvals/" + entry.CommandID + ".pending.json"
@@ -339,6 +388,9 @@ func (m *MemoryStore) List(_ context.Context) ([]ListItem, error) {
 func (m *MemoryStore) Show(_ context.Context, commandID string) (Entry, State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return Entry{}, "", err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return Entry{}, "", fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -350,6 +402,9 @@ func (m *MemoryStore) Show(_ context.Context, commandID string) (Entry, State, e
 func (m *MemoryStore) Grant(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	if _, ok := m.entries[commandID]; !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
 	}
@@ -364,6 +419,9 @@ func (m *MemoryStore) Grant(_ context.Context, commandID string) error {
 func (m *MemoryStore) Deny(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	if _, ok := m.entries[commandID]; !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
 	}
@@ -378,6 +436,9 @@ func (m *MemoryStore) Deny(_ context.Context, commandID string) error {
 func (m *MemoryStore) LoadApproved(_ context.Context, commandID string) (Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return Entry{}, err
+	}
 	e, ok := m.entries[commandID]
 	if !ok {
 		return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -401,8 +462,14 @@ func (m *MemoryStore) LoadApproved(_ context.Context, commandID string) (Entry, 
 func (m *MemoryStore) Complete(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	if _, ok := m.entries[commandID]; !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
+	}
+	if m.states[commandID] != StateApproved {
+		return fmt.Errorf("%w: %s (not approved)", ErrWrongState, commandID)
 	}
 	m.states[commandID] = StateCompleted
 	return nil
@@ -412,6 +479,9 @@ func (m *MemoryStore) Complete(_ context.Context, commandID string) error {
 func (m *MemoryStore) Cancel(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := validateCommandID(commandID); err != nil {
+		return err
+	}
 	st, ok := m.states[commandID]
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrNotFound, commandID)
@@ -438,10 +508,21 @@ func parseFilename(name string) (commandID string, state State, ok bool) {
 	for _, s := range []State{StatePending, StateApproved, StateDenied, StateCompleted} {
 		suffix := "." + string(s)
 		if strings.HasSuffix(name, suffix) {
-			return strings.TrimSuffix(name, suffix), s, true
+			commandID := strings.TrimSuffix(name, suffix)
+			if err := validateCommandID(commandID); err != nil {
+				return "", "", false
+			}
+			return commandID, s, true
 		}
 	}
 	return "", "", false
+}
+
+func validateCommandID(commandID string) error {
+	if !commandIDPattern.MatchString(commandID) {
+		return fmt.Errorf("invalid command_id %q", commandID)
+	}
+	return nil
 }
 
 // ResolvePath returns the effective approvals directory.

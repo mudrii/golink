@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,22 @@ import (
 	"github.com/mudrii/golink/internal/auth"
 	outputtest "github.com/mudrii/golink/internal/output"
 )
+
+type failingSessionStore struct {
+	err error
+}
+
+func (s failingSessionStore) LoadSession(context.Context, string) (*auth.Session, error) {
+	return nil, s.err
+}
+
+func (s failingSessionStore) SaveSession(context.Context, auth.Session) error {
+	return s.err
+}
+
+func (s failingSessionStore) DeleteSession(context.Context, string) error {
+	return s.err
+}
 
 func TestVersionJSON(t *testing.T) {
 	code, stdout, stderr := executeTestCommand(t, []string{"--json", "version"}, testDepsOptions{})
@@ -78,6 +96,19 @@ func TestAuthLoginRequiresClientID(t *testing.T) {
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
+func TestAuthScopesOverride(t *testing.T) {
+	got := authScopes("w_member_social_feed,r_member_social")
+	want := []string{"w_member_social_feed", "r_member_social"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("authScopes override = %#v, want %#v", got, want)
+	}
+
+	got = authScopes("")
+	if !reflect.DeepEqual(got, defaultScopes) {
+		t.Fatalf("authScopes default = %#v, want %#v", got, defaultScopes)
+	}
+}
+
 func TestAuthLoginJSON(t *testing.T) {
 	t.Setenv("GOLINK_CLIENT_ID", "client-123")
 
@@ -109,6 +140,59 @@ func TestAuthLoginJSON(t *testing.T) {
 
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), lines[0])
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), lines[1])
+}
+
+func TestAuthLoginPassesOAuth2Options(t *testing.T) {
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+	t.Setenv("GOLINK_CLIENT_SECRET", "secret-123")
+	t.Setenv("GOLINK_AUTH_FLOW", "oauth2")
+	t.Setenv("GOLINK_AUTH_SCOPES", "w_member_social r_profile_basicinfo")
+	t.Setenv("GOLINK_REDIRECT_PORT", "8080")
+
+	code, _, stderr := executeTestCommand(t, []string{"--json", "auth", "login"}, testDepsOptions{
+		loginRunner: func(_ context.Context, request *auth.LoginRequest, profile string, transport string, options auth.LoginFlowOptions) (*auth.Session, error) {
+			if request.CodeVerifier != "" {
+				t.Fatalf("expected no code verifier for oauth2 flow")
+			}
+			if options.AuthFlow != "oauth2" {
+				t.Fatalf("AuthFlow = %q", options.AuthFlow)
+			}
+			if options.ClientSecret != "secret-123" {
+				t.Fatalf("ClientSecret = %q", options.ClientSecret)
+			}
+			if !reflect.DeepEqual(options.RequestedScopes, []string{"w_member_social", "r_profile_basicinfo"}) {
+				t.Fatalf("RequestedScopes = %#v", options.RequestedScopes)
+			}
+
+			return &auth.Session{
+				Profile:     profile,
+				Transport:   transport,
+				AccessToken: "token",
+				ConnectedAt: time.Date(2026, 4, 16, 12, 0, 1, 0, time.UTC),
+				AuthFlow:    "oauth2",
+				Scopes:      []string{"w_member_social", "r_profile_basicinfo"},
+			}, nil
+		},
+	})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d stderr=%s", code, stderr)
+	}
+}
+
+func TestAuthLoginOAuth2RequiresClientSecret(t *testing.T) {
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+	t.Setenv("GOLINK_AUTH_FLOW", "oauth2")
+	t.Setenv("GOLINK_REDIRECT_PORT", "8080")
+
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "login"}, testDepsOptions{})
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
 func TestAuthLoginHonorsSelectedOutputMode(t *testing.T) {
@@ -355,6 +439,23 @@ func TestSearchPeopleRequiresKeywords(t *testing.T) {
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
+func TestSearchPeopleSurfacesSessionStoreErrors(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "search", "people", "--keywords", "engineer"},
+		testDepsOptions{
+			store: failingSessionStore{err: errors.New("keyring offline")},
+		},
+	)
+	if code != 5 {
+		t.Fatalf("expected exit code 5, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
 func TestUnofficialTransportRequiresAcknowledgement(t *testing.T) {
 	code, stdout, stderr := executeTestCommand(
 		t,
@@ -373,7 +474,7 @@ func TestUnofficialTransportRequiresAcknowledgement(t *testing.T) {
 
 func TestProfileMeUsesStoredSession(t *testing.T) {
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:        "default",
 		Transport:      "official",
 		MemberURN:      "urn:li:person:abc123",
@@ -387,11 +488,13 @@ func TestProfileMeUsesStoredSession(t *testing.T) {
 	}
 
 	code, stdout, stderr := executeTestCommand(t, []string{"--json", "profile", "me"}, testDepsOptions{store: store})
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d stderr=%s", code, stderr)
+	if code != 4 {
+		t.Fatalf("expected exit code 4, got %d stdout=%s stderr=%s", code, stdout, stderr)
 	}
-
-	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
 func TestAuthStatusRejectsMalformedSession(t *testing.T) {

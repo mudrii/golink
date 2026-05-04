@@ -122,6 +122,7 @@ type AuthRefreshData struct {
 
 // AuthLoginData contains the login URL and flow metadata.
 type AuthLoginData struct {
+	Type      string `json:"type"`
 	URL       string `json:"url"`
 	Profile   string `json:"profile"`
 	Transport string `json:"transport"`
@@ -130,6 +131,7 @@ type AuthLoginData struct {
 
 // AuthLoginResultData contains the terminal login result.
 type AuthLoginResultData struct {
+	Type          string   `json:"type"`
 	Status        string   `json:"status"`
 	Profile       string   `json:"profile"`
 	Transport     string   `json:"transport"`
@@ -458,7 +460,7 @@ type PostEditPreview struct {
 // PostEditData contains the result of an edit (PATCH) on a post.
 type PostEditData struct {
 	PostSummary
-	UpdatedAt time.Time `json:"updated_at,omitempty,omitzero"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
 // PostEditDryRunData contains the dry-run preview for post edit.
@@ -830,7 +832,7 @@ func (d ReactionListData) Rows() [][]string {
 
 // Headers implements TabularData for SocialMetadataData.
 func (d SocialMetadataData) Headers() []string {
-	return []string{"URN", "POST", "COMMENTS", "LIKES", "REACTIONS", "STATE"}
+	return []string{"URN", "COMMENTS", "LIKES", "REACTIONS", "STATE"}
 }
 
 // Rows implements TabularData for SocialMetadataData.
@@ -843,7 +845,6 @@ func (d SocialMetadataData) Rows() [][]string {
 		}
 		rows = append(rows, []string{
 			urn,
-			item.PostURN,
 			strconv.Itoa(item.CommentCount),
 			strconv.Itoa(item.LikeCount),
 			strconv.Itoa(item.ReactionCount),

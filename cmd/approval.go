@@ -109,16 +109,24 @@ func newApprovalGrantCommand(a *app) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			commandID := trimmedText(args[0])
+			auditID := commandID
+			if auditID == "" {
+				auditID = newCommandID(commandName(cmd), a.deps.Now().UTC())
+			}
 			if commandID == "" {
+				a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 				return a.validationFailure(cmd, "missing required argument: command_id", "")
 			}
 			if err := a.deps.ApprovalStore.Grant(cmd.Context(), commandID); err != nil {
 				if errors.Is(err, approval.ErrNotFound) {
+					a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeNotFound), nil)
 					return a.validationFailure(cmd, "approval entry not found or not pending", commandID)
 				}
+				a.auditMutation(cmd, auditID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 				return a.transportFailure(cmd, "approval grant failed", err.Error())
 			}
 			data := output.ApprovalStateChangeData{CommandID: commandID, State: string(approval.StateApproved)}
+			a.auditMutation(cmd, auditID, "ok", "normal", "", 0, "", nil)
 			return a.writeSuccess(cmd, data, fmt.Sprintf("granted: %s", commandID))
 		},
 	}
@@ -131,16 +139,24 @@ func newApprovalDenyCommand(a *app) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			commandID := trimmedText(args[0])
+			auditID := commandID
+			if auditID == "" {
+				auditID = newCommandID(commandName(cmd), a.deps.Now().UTC())
+			}
 			if commandID == "" {
+				a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 				return a.validationFailure(cmd, "missing required argument: command_id", "")
 			}
 			if err := a.deps.ApprovalStore.Deny(cmd.Context(), commandID); err != nil {
 				if errors.Is(err, approval.ErrNotFound) {
+					a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeNotFound), nil)
 					return a.validationFailure(cmd, "approval entry not found or not pending", commandID)
 				}
+				a.auditMutation(cmd, auditID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 				return a.transportFailure(cmd, "approval deny failed", err.Error())
 			}
 			data := output.ApprovalStateChangeData{CommandID: commandID, State: string(approval.StateDenied)}
+			a.auditMutation(cmd, auditID, "ok", "normal", "", 0, "", nil)
 			return a.writeSuccess(cmd, data, fmt.Sprintf("denied: %s", commandID))
 		},
 	}
@@ -153,16 +169,24 @@ func newApprovalCancelCommand(a *app) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			commandID := trimmedText(args[0])
+			auditID := commandID
+			if auditID == "" {
+				auditID = newCommandID(commandName(cmd), a.deps.Now().UTC())
+			}
 			if commandID == "" {
+				a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 				return a.validationFailure(cmd, "missing required argument: command_id", "")
 			}
 			if err := a.deps.ApprovalStore.Cancel(cmd.Context(), commandID); err != nil {
 				if errors.Is(err, approval.ErrNotFound) {
+					a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeNotFound), nil)
 					return a.validationFailure(cmd, "approval entry not found or not cancellable", commandID)
 				}
+				a.auditMutation(cmd, auditID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 				return a.transportFailure(cmd, "approval cancel failed", err.Error())
 			}
 			data := output.ApprovalStateChangeData{CommandID: commandID, State: "cancelled"}
+			a.auditMutation(cmd, auditID, "ok", "normal", "", 0, "", nil)
 			return a.writeSuccess(cmd, data, fmt.Sprintf("cancelled: %s", commandID))
 		},
 	}
@@ -214,6 +238,16 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 
 			session, transport, err := a.resolveStoredSessionAndTransport(cmd.Context(), cmd, entry.Profile, entry.Transport)
 			if err != nil {
+				var failure *commandFailure
+				if errors.As(err, &failure) {
+					status := "error"
+					if failure.exitCode == 2 {
+						status = "validation_error"
+					}
+					a.auditMutation(cmd, commandID, status, "normal", "", 0, failure.errCode, nil)
+				} else {
+					a.auditMutation(cmd, commandID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
+				}
 				return err
 			}
 
@@ -315,22 +349,20 @@ func newApprovalRunCommand(a *app) *cobra.Command {
 				editReq := api.EditPostRequest{PostURN: postURN}
 				// Stored payload: {"patch": {"$set": {"commentary": "...", "visibility": "..."}}}
 				if outer, ok := payloadMap["patch"].(map[string]any); ok {
-					if inner, ok := outer["patch"].(map[string]any); ok {
-						if set, ok := inner["$set"].(map[string]any); ok {
-							if v, ok := set["commentary"].(string); ok {
-								s := v
-								editReq.Text = &s
+					if set, ok := outer["$set"].(map[string]any); ok {
+						if v, ok := set["commentary"].(string); ok {
+							s := v
+							editReq.Text = &s
+						}
+						if v, ok := set["visibility"].(string); ok {
+							vis, perr := output.ParseVisibility(v)
+							if perr == nil {
+								editReq.Visibility = &vis
+							} else {
+								return a.validationFailure(cmd, "approval run: invalid visibility in payload", perr.Error())
 							}
-							if v, ok := set["visibility"].(string); ok {
-								vis, perr := output.ParseVisibility(v)
-								if perr == nil {
-									editReq.Visibility = &vis
-								} else {
-									return a.validationFailure(cmd, "approval run: invalid visibility in payload", perr.Error())
-								}
-							} else if set["visibility"] != nil {
-								return a.validationFailure(cmd, "approval run: invalid visibility in payload", "expected string")
-							}
+						} else if set["visibility"] != nil {
+							return a.validationFailure(cmd, "approval run: invalid visibility in payload", "expected string")
 						}
 					}
 				}

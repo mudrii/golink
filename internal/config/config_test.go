@@ -81,6 +81,48 @@ func TestSettingsValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "invalid auth flow",
+			settings: Settings{
+				Profile:   "default",
+				Transport: "official",
+				Timeout:   defaultTimeout,
+				AuthFlow:  "native",
+			},
+			wantErr: true,
+		},
+		{
+			name: "oauth2 requires client secret",
+			settings: Settings{
+				Profile:   "default",
+				Transport: "official",
+				Timeout:   defaultTimeout,
+				AuthFlow:  "oauth2",
+			},
+			wantErr: true,
+		},
+		{
+			name: "oauth2 with client secret",
+			settings: Settings{
+				Profile:      "default",
+				Transport:    "official",
+				Timeout:      defaultTimeout,
+				AuthFlow:     "oauth2",
+				ClientSecret: "secret",
+				RedirectPort: 8080,
+			},
+		},
+		{
+			name: "oauth2 requires fixed redirect port",
+			settings: Settings{
+				Profile:      "default",
+				Transport:    "official",
+				Timeout:      defaultTimeout,
+				AuthFlow:     "oauth2",
+				ClientSecret: "secret",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -93,5 +135,33 @@ func TestSettingsValidate(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoaderReadsAuthOverridesFromEnv(t *testing.T) {
+	t.Setenv("GOLINK_AUTH_SCOPES", "w_member_social_feed")
+	t.Setenv("GOLINK_MEMBER_URN", "urn:li:person:abc123")
+	t.Setenv("GOLINK_AUTH_FLOW", "oauth2")
+	t.Setenv("GOLINK_CLIENT_SECRET", "secret")
+	t.Setenv("GOLINK_REDIRECT_PORT", "8080")
+
+	settings, err := NewLoader().Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if settings.AuthScopes != "w_member_social_feed" {
+		t.Fatalf("AuthScopes = %q", settings.AuthScopes)
+	}
+	if settings.MemberURN != "urn:li:person:abc123" {
+		t.Fatalf("MemberURN = %q", settings.MemberURN)
+	}
+	if settings.AuthFlow != "oauth2" {
+		t.Fatalf("AuthFlow = %q", settings.AuthFlow)
+	}
+	if settings.ClientSecret != "secret" {
+		t.Fatalf("ClientSecret = %q", settings.ClientSecret)
+	}
+	if settings.RedirectPort != 8080 {
+		t.Fatalf("RedirectPort = %d", settings.RedirectPort)
 	}
 }

@@ -19,7 +19,8 @@ func EncodeURN(urn string) (string, error) {
 		return "", fmt.Errorf("urn must start with urn")
 	}
 
-	return strings.ReplaceAll(trimmed, ":", "%3A"), nil
+	replacer := strings.NewReplacer("%", "%25", ":", "%3A")
+	return replacer.Replace(trimmed), nil
 }
 
 // ActivityURNFromPost converts a share/ugcPost URN into the corresponding

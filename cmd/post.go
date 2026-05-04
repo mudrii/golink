@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -11,6 +12,28 @@ import (
 	"github.com/mudrii/golink/internal/output"
 	"github.com/spf13/cobra"
 )
+
+// allowedImageTypes is the set of MIME types accepted for image upload.
+// LinkedIn supports JPEG/PNG/GIF/WebP for member posts.
+var allowedImageTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// detectImageType reads up to 512 bytes from path and returns the sniffed
+// MIME type. Returns an error if the file cannot be opened.
+func detectImageType(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	return http.DetectContentType(buf[:n]), nil
+}
 
 type postCreateFlags struct {
 	text       string
@@ -163,6 +186,16 @@ func newPostCreateCommand(a *app) *cobra.Command {
 				if _, statErr := os.Stat(imagePath); statErr != nil {
 					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
 					return a.validationFailure(cmd, "cannot read image file", statErr.Error())
+				}
+				mimeType, sniffErr := detectImageType(imagePath)
+				if sniffErr != nil {
+					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+					return a.validationFailure(cmd, "cannot read image file", sniffErr.Error())
+				}
+				if !allowedImageTypes[mimeType] {
+					a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, "VALIDATION_ERROR", nil)
+					return a.validationFailure(cmd, "unsupported image type",
+						fmt.Sprintf("detected %q; allowed: image/jpeg, image/png, image/gif, image/webp", mimeType))
 				}
 				uploadURL, imageURN, initErr := transport.InitializeImageUpload(cmd.Context(), session.MemberURN)
 				if initErr != nil {

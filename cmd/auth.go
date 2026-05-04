@@ -14,6 +14,26 @@ import (
 
 var defaultScopes = []string{"openid", "profile", "email", "w_member_social_feed"}
 
+func authScopes(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	if len(fields) == 0 {
+		return append([]string(nil), defaultScopes...)
+	}
+
+	scopes := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if scope := strings.TrimSpace(field); scope != "" {
+			scopes = append(scopes, scope)
+		}
+	}
+	if len(scopes) == 0 {
+		return append([]string(nil), defaultScopes...)
+	}
+	return scopes
+}
+
 func newAuthCommand(a *app) *cobra.Command {
 	authCmd := &cobra.Command{
 		Use:   "auth",
@@ -33,7 +53,7 @@ func newAuthCommand(a *app) *cobra.Command {
 func newAuthLoginCommand(a *app) *cobra.Command {
 	return &cobra.Command{
 		Use:         "login",
-		Short:       "Start the LinkedIn native PKCE login flow",
+		Short:       "Start the LinkedIn OAuth login flow",
 		Args:        cobra.NoArgs,
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -46,13 +66,20 @@ func newAuthLoginCommand(a *app) *cobra.Command {
 				return a.validationFailure(cmd, "missing required environment variable: GOLINK_CLIENT_ID", "auth login requires a LinkedIn app client ID")
 			}
 
-			request, err := auth.BuildLoginRequest(loginCtx, a.settings.ClientID, a.settings.RedirectPort, defaultScopes)
+			scopes := authScopes(a.settings.AuthScopes)
+			request, err := auth.BuildLoginRequestWithOptions(loginCtx, auth.LoginRequestOptions{
+				ClientID:      a.settings.ClientID,
+				PreferredPort: a.settings.RedirectPort,
+				Scopes:        scopes,
+				AuthFlow:      a.settings.AuthFlow,
+			})
 			if err != nil {
 				a.auditMutation(cmd, cmdID, "error", "normal", "", 0, "TRANSPORT_ERROR", nil)
 				return a.transportFailure(cmd, "failed to prepare auth login request", err.Error())
 			}
 
 			data := output.AuthLoginData{
+				Type:      "login_url",
 				URL:       request.URL,
 				Profile:   a.settings.Profile,
 				Transport: a.settings.Transport,
@@ -64,10 +91,17 @@ func newAuthLoginCommand(a *app) *cobra.Command {
 			}
 
 			session, err := a.deps.LoginRunner(loginCtx, request, a.settings.Profile, a.settings.Transport, auth.LoginFlowOptions{
-				HTTPClient:    a.deps.HTTPClient,
-				BrowserOpener: a.deps.BrowserOpener,
-				Interactive:   a.deps.IsInteractive(),
-				Now:           a.deps.Now,
+				HTTPClient:      a.deps.HTTPClient,
+				BrowserOpener:   a.deps.BrowserOpener,
+				Interactive:     a.deps.IsInteractive(),
+				Now:             a.deps.Now,
+				TokenURL:        a.deps.TokenURL,
+				ClientSecret:    a.settings.ClientSecret,
+				AuthFlow:        a.settings.AuthFlow,
+				UserInfoURL:     a.deps.UserinfoURL,
+				ProfileURL:      a.deps.ProfileURL,
+				RequestedScopes: scopes,
+				ManualMemberURN: a.settings.MemberURN,
 			})
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -84,6 +118,7 @@ func newAuthLoginCommand(a *app) *cobra.Command {
 			}
 
 			writeErr := a.writeAuthLoginResult(cmd, output.AuthLoginResultData{
+				Type:          "login_result",
 				Status:        "success",
 				Profile:       session.Profile,
 				Transport:     session.Transport,

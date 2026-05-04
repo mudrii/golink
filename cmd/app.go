@@ -67,6 +67,8 @@ type Dependencies struct {
 	// UserinfoURL overrides the LinkedIn userinfo endpoint used by doctor probe.
 	// Set in tests to point at a local httptest server.
 	UserinfoURL string
+	// ProfileURL overrides the non-OIDC current-member profile endpoint.
+	ProfileURL string
 }
 
 type app struct {
@@ -228,6 +230,12 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 	}
 	if deps.TokenURL == "" {
 		deps.TokenURL = auth.TokenURL
+	}
+	if deps.UserinfoURL == "" {
+		deps.UserinfoURL = auth.UserInfoURL
+	}
+	if deps.ProfileURL == "" {
+		deps.ProfileURL = auth.ProfileURL
 	}
 	if deps.IdempotencyStore == nil {
 		deps.IdempotencyStore = idempotency.NewFileStore("")

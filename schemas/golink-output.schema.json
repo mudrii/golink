@@ -93,7 +93,7 @@
         "status": { "$ref": "#/$defs/commandStatus" },
         "command_id": { "type": "string", "minLength": 1 },
         "command": { "type": "string", "minLength": 1 },
-        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto", "noop"] },
         "mode": { "type": "string", "enum": ["normal", "dry_run"] },
         "request_id": { "type": "string" },
         "generated_at": { "$ref": "#/$defs/dateTime" },
@@ -119,7 +119,7 @@
       "properties": {
         "is_authenticated": { "type": "boolean" },
         "profile": { "type": "string", "minLength": 1 },
-        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto", "noop"] },
         "scopes": { "type": "array", "items": { "type": "string" } },
         "expires_at": { "type": "string", "format": "date-time" },
         "refresh_expires_at": { "$ref": "#/$defs/dateTime" },
@@ -132,7 +132,7 @@
       "required": ["profile", "transport", "refreshed_at", "expires_at"],
       "properties": {
         "profile": { "type": "string", "minLength": 1 },
-        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto", "noop"] },
         "refreshed_at": { "$ref": "#/$defs/dateTime" },
         "expires_at": { "$ref": "#/$defs/dateTime" },
         "refresh_expires_at": { "$ref": "#/$defs/dateTime" },
@@ -142,22 +142,24 @@
     "authLoginData": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["url", "profile", "transport", "timeout_ms"],
+      "required": ["type", "url", "profile", "transport", "timeout_ms"],
       "properties": {
+        "type": { "const": "login_url" },
         "url": { "type": "string", "format": "uri" },
         "profile": { "type": "string" },
-        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto", "noop"] },
         "timeout_ms": { "type": "integer", "minimum": 1 }
       }
     },
     "authLoginResultData": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "profile", "transport", "connected_at"],
+      "required": ["type", "status", "profile", "transport", "connected_at"],
       "properties": {
+        "type": { "const": "login_result" },
         "status": { "type": "string", "enum": ["success", "login", "declined", "error"] },
         "profile": { "type": "string" },
-        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto", "noop"] },
         "connected_at": { "$ref": "#/$defs/dateTime" },
         "scopes_granted": { "type": "array", "items": { "type": "string" } }
       }
@@ -169,7 +171,7 @@
       "properties": {
         "status": { "type": "string", "enum": ["ok", "skipped"] },
         "profile": { "type": "string", "minLength": 1 },
-        "transport": { "type": "string", "enum": ["official", "unofficial", "auto"] },
+        "transport": { "type": "string", "enum": ["official", "unofficial", "auto", "noop"] },
         "cleared": { "type": "boolean" }
       }
     },

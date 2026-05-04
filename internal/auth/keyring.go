@@ -40,6 +40,9 @@ func (s *KeyringStore) LoadSession(_ context.Context, profile string) (*Session,
 	if err := json.Unmarshal([]byte(value), &session); err != nil {
 		return nil, fmt.Errorf("decode keyring session: %w", err)
 	}
+	if err := session.Validate(); err != nil {
+		return nil, fmt.Errorf("validate keyring session: %w", err)
+	}
 
 	return &session, nil
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/mudrii/golink/internal/api"
@@ -37,7 +38,10 @@ func newSearchPeopleCommand(a *app) *cobra.Command {
 			// search people on the official transport is entitlement-gated and
 			// returns ErrFeatureUnavailable without hitting the network, so
 			// we don't require a session up-front here. Load it best-effort.
-			session, _ := a.deps.SessionStore.LoadSession(cmd.Context(), a.settings.Profile)
+			session, err := a.deps.SessionStore.LoadSession(cmd.Context(), a.settings.Profile)
+			if err != nil && !errors.Is(err, auth.ErrSessionNotFound) {
+				return a.transportFailure(cmd, "failed to resolve search session", err.Error())
+			}
 			if session == nil {
 				session = &auth.Session{Profile: a.settings.Profile, Transport: a.settings.Transport}
 			}

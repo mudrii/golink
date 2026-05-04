@@ -16,10 +16,13 @@ func TestLoaderLoadPrecedence(t *testing.T) {
 	loader := NewLoader()
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	flags.Bool("json", false, "")
+	flags.Bool("compact", false, "")
 	flags.Bool("dry-run", false, "")
+	flags.Bool("require-approval", false, "")
 	flags.Bool("verbose", false, "")
 	flags.String("profile", "", "")
 	flags.String("transport", "", "")
+	flags.String("output", "", "")
 	flags.Bool("accept-unofficial-risk", false, "")
 	flags.Duration("timeout", 0, "")
 	flags.String("client_id", "", "")
@@ -57,6 +60,32 @@ func TestLoaderLoadPrecedence(t *testing.T) {
 	}
 	if settings.ClientID != "env-client" {
 		t.Fatalf("expected env client id, got %q", settings.ClientID)
+	}
+}
+
+func TestLoaderLoadCompactOutputConflict(t *testing.T) {
+	loader := NewLoader()
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.Bool("json", false, "")
+	flags.Bool("compact", false, "")
+	flags.String("output", "", "")
+
+	if err := flags.Set("compact", "true"); err != nil {
+		t.Fatalf("set compact flag: %v", err)
+	}
+	if err := flags.Set("output", "json"); err != nil {
+		t.Fatalf("set output flag: %v", err)
+	}
+	if err := loader.BindFlags(flags); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	_, err := loader.Load()
+	if err == nil {
+		t.Fatal("expected compact/output conflict")
+	}
+	if got := err.Error(); got != "--compact and --output=json are mutually exclusive" {
+		t.Fatalf("unexpected error: %q", got)
 	}
 }
 

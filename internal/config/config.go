@@ -48,6 +48,10 @@ type Settings struct {
 	AcceptUnofficialRisk bool
 	Timeout              time.Duration
 	ClientID             string
+	ClientSecret         string
+	AuthFlow             string
+	AuthScopes           string
+	MemberURN            string
 	APIVersion           string
 	RedirectPort         int
 	DefaultVisibility    string
@@ -140,6 +144,10 @@ func (l *Loader) Load() (Settings, error) {
 		AcceptUnofficialRisk: l.v.GetBool("accept-unofficial-risk"),
 		Timeout:              l.v.GetDuration("timeout"),
 		ClientID:             l.v.GetString("client_id"),
+		ClientSecret:         l.v.GetString("client_secret"),
+		AuthFlow:             l.v.GetString("auth_flow"),
+		AuthScopes:           l.v.GetString("auth_scopes"),
+		MemberURN:            l.v.GetString("member_urn"),
 		APIVersion:           l.v.GetString("api_version"),
 		RedirectPort:         l.v.GetInt("redirect_port"),
 		DefaultVisibility:    l.v.GetString("default_visibility"),
@@ -171,6 +179,20 @@ func (s Settings) Validate() error {
 
 	if s.Timeout > maximumTimeout {
 		return fmt.Errorf("timeout must be %s or less", maximumTimeout)
+	}
+
+	switch strings.TrimSpace(s.AuthFlow) {
+	case "", "pkce", "oauth2":
+	default:
+		return fmt.Errorf("auth_flow must be one of pkce|oauth2")
+	}
+
+	if strings.TrimSpace(s.AuthFlow) == "oauth2" && strings.TrimSpace(s.ClientSecret) == "" {
+		return fmt.Errorf("client_secret is required when auth_flow=oauth2")
+	}
+
+	if strings.TrimSpace(s.AuthFlow) == "oauth2" && s.RedirectPort == 0 {
+		return fmt.Errorf("redirect_port is required when auth_flow=oauth2; set GOLINK_REDIRECT_PORT to the port registered in LinkedIn")
 	}
 
 	if s.Output != "" {

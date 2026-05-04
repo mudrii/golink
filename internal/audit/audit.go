@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/mudrii/golink/internal/privacy"
 )
 
 // Entry is a single audit log record written for every mutating command.
@@ -34,6 +36,7 @@ type Sink interface {
 
 // FileSink writes JSONL entries to a file, creating it on first use.
 type FileSink struct {
+	mu   sync.Mutex
 	path string
 }
 
@@ -49,7 +52,14 @@ func NewFileSink(path string) *FileSink {
 // Append marshals entry as a JSON line and appends it to the file.
 // The directory is created (mode 0o700) and the file opened (mode 0o600) on
 // every call — CLI lifetime is short and this avoids fd leaks.
+//
+// In-process concurrency is serialised by mu; cross-process safety relies on
+// POSIX O_APPEND atomicity for writes ≤ PIPE_BUF (typically 4 KiB).
 func (s *FileSink) Append(_ context.Context, entry Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry = redactEntry(entry)
+
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("audit mkdir: %w", err)
@@ -93,6 +103,7 @@ func NewMemorySink() *MemorySink {
 func (m *MemorySink) Append(_ context.Context, entry Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	entry = redactEntry(entry)
 	m.entries = append(m.entries, entry)
 	return nil
 }
@@ -111,6 +122,16 @@ type NoopSink struct{}
 
 // Append does nothing.
 func (NoopSink) Append(_ context.Context, _ Entry) error { return nil }
+
+func redactEntry(entry Entry) Entry {
+	entry.Profile = privacy.String(entry.Profile)
+	entry.RequestID = privacy.String(entry.RequestID)
+	entry.AuthorURN = privacy.String(entry.AuthorURN)
+	if len(entry.DryRunPreview) > 0 {
+		entry.DryRunPreview = privacy.JSON(entry.DryRunPreview)
+	}
+	return entry
+}
 
 // ResolvePath returns the effective audit log path.
 // Precedence: GOLINK_AUDIT_PATH env > XDG_STATE_HOME/golink/audit.jsonl >

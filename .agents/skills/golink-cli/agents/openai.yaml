@@ -1,0 +1,4 @@
+interface:
+  display_name: "golink CLI"
+  short_description: "Use golink safely from agents"
+  default_prompt: "Use $golink-cli to authenticate, inspect, dry-run, plan, approve, and publish LinkedIn content through the golink command-line tool."

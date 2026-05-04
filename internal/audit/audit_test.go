@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -135,6 +136,47 @@ func TestMemorySinkConcurrent(t *testing.T) {
 
 	if len(sink.Entries()) != n {
 		t.Fatalf("expected %d entries, got %d", n, len(sink.Entries()))
+	}
+}
+
+func TestSinkRedactsPersonalData(t *testing.T) {
+	sink := NewMemorySink()
+	entry := Entry{
+		TS:        time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		Profile:   "ion@example.com",
+		Transport: "official",
+		Command:   "post create",
+		CommandID: "cmd-1",
+		Mode:      "dry_run",
+		Status:    "ok",
+		RequestID: "urn:li:person:req123",
+		AuthorURN: "urn:li:person:abc123",
+		DryRunPreview: json.RawMessage(
+			`{"data":{"author_urn":"urn:li:person:abc123","email":"ion@example.com","text":"private post"}}`,
+		),
+	}
+
+	if err := sink.Append(context.Background(), entry); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	entries := sink.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	raw, err := json.Marshal(entries[0])
+	if err != nil {
+		t.Fatalf("marshal entry: %v", err)
+	}
+	for _, leaked := range []string{
+		"ion@example.com",
+		"urn:li:person:abc123",
+		"urn:li:person:req123",
+		"private post",
+	} {
+		if strings.Contains(string(raw), leaked) {
+			t.Fatalf("audit entry leaked %q: %s", leaked, raw)
+		}
 	}
 }
 

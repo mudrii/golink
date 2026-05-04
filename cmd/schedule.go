@@ -214,14 +214,14 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 // entry to completed. On failure it marks the entry failed with last_error.
 // It returns a non-nil error only when the entry actually failed.
 func runOneEntry(
-	_ context.Context,
+	ctx context.Context,
 	a *app,
 	cmd *cobra.Command,
 	e schedule.Entry,
 ) (output.ScheduleRunResult, error) {
-	cobCtx := cmd.Context()
+	cobCtx := ctx
 
-	cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+	cmdID := e.CommandID
 
 	if err := a.deps.ScheduleStore.MarkRunning(cobCtx, e.CommandID); err != nil {
 		// Entry could not transition to running (e.g. concurrent runner already
@@ -389,7 +389,7 @@ func newScheduleCancelCommand(a *app) *cobra.Command {
 				return a.transportFailure(cmd, "failed to cancel schedule entry", err.Error())
 			}
 
-			a.auditMutation(cmd, commandID, "cancelled", "normal", "", 0, "", nil)
+			a.auditMutation(cmd, commandID, "ok", "normal", "", 0, "", nil)
 
 			// Return the entry as it was before cancellation (state field updated).
 			e.State = schedule.StateCancelled
