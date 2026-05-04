@@ -100,10 +100,16 @@ golink does NOT run a daemon. Operators invoke `schedule run` via cron, launchd,
 ## Installation
 
 ```sh
-go install github.com/mudrii/golink@latest
+go install github.com/mudrii/golink@v1.0.0
 ```
 
 Requires Go 1.26.2+.
+
+Homebrew, after the `v1.0.0` tag is published:
+
+```sh
+brew install mudrii/golink/golink
+```
 
 For full product, dependency, and LinkedIn Developer app setup instructions, see
 [`LINKEDIN_SETUP.md`](./LINKEDIN_SETUP.md).

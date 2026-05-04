@@ -11,13 +11,17 @@ import (
 const redacted = "REDACTED"
 
 var (
-	emailPattern     = regexp.MustCompile(`(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}`)
-	personURNPattern = regexp.MustCompile(`urn:li:person:[A-Za-z0-9_-]+`)
+	emailPattern       = regexp.MustCompile(`(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}`)
+	linkedinURNPattern = regexp.MustCompile(`urn:li:(person|member|organization):[A-Za-z0-9_-]+`)
+	unixUserPath       = regexp.MustCompile(`/Users/[A-Za-z0-9._-]+(?:/[^\s"'<>]*)?`)
+	homeRelativePath   = regexp.MustCompile(`~/[^\s"'<>]+`)
 )
 
 // String redacts personal identifiers inside a scalar string.
 func String(s string) string {
-	s = personURNPattern.ReplaceAllString(s, redacted)
+	s = linkedinURNPattern.ReplaceAllString(s, redacted)
+	s = unixUserPath.ReplaceAllString(s, redacted)
+	s = homeRelativePath.ReplaceAllString(s, redacted)
 	s = emailPattern.ReplaceAllString(s, redacted)
 	return s
 }

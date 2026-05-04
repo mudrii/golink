@@ -14,8 +14,10 @@ var (
 
 func hasAnyScope(granted []string, required ...string) bool {
 	scopeSet := make(map[string]struct{}, len(granted))
-	for _, scope := range granted {
-		scopeSet[strings.TrimSpace(scope)] = struct{}{}
+	for _, raw := range granted {
+		for _, scope := range scopeFields(raw) {
+			scopeSet[scope] = struct{}{}
+		}
 	}
 
 	for _, scope := range required {

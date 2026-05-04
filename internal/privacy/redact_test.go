@@ -6,10 +6,10 @@ import (
 )
 
 func TestURLRedactsPersonalQueryValues(t *testing.T) {
-	raw := "https://api.linkedin.com/v2/ugcPosts?author=urn%3Ali%3Aperson%3Aabc123&email=ion@example.com&count=10"
+	raw := "https://api.linkedin.com/v2/ugcPosts?author=urn%3Ali%3Amember%3Aabc123&email=ion@example.com&count=10"
 
 	got := URL(raw)
-	for _, leaked := range []string{"urn:li:person:abc123", "abc123", "ion@example.com"} {
+	for _, leaked := range []string{"urn:li:member:abc123", "abc123", "ion@example.com"} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("URL leaked %q: %s", leaked, got)
 		}
@@ -30,5 +30,16 @@ func TestJSONRedactsPersonalFieldsAndFreeText(t *testing.T) {
 	}
 	if !strings.Contains(got, "PUBLIC") {
 		t.Fatalf("JSON should preserve non-personal fields: %s", got)
+	}
+}
+
+func TestStringRedactsLinkedInURNsAndLocalPaths(t *testing.T) {
+	raw := `owner urn:li:organization:123 at /Users/ada/private/image.png and ~/secret.txt`
+
+	got := String(raw)
+	for _, leaked := range []string{"urn:li:organization:123", "/Users/ada", "~/secret.txt"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("String leaked %q: %s", leaked, got)
+		}
 	}
 }

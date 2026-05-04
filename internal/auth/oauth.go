@@ -620,7 +620,9 @@ func codeVerifierForFlow(verifier, authFlow string) string {
 }
 
 func splitScopes(raw string) []string {
-	return cleanScopes(strings.Fields(raw))
+	return cleanScopes(strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}))
 }
 
 func cleanScopes(fields []string) []string {

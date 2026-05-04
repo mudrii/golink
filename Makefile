@@ -31,3 +31,17 @@ lint:
 
 .PHONY: ci
 ci: vet lint test race vuln
+
+.PHONY: release-check
+release-check: ci
+	git diff --check
+	test -z "$$(git status --porcelain)"
+	$(GO) run . version
+
+.PHONY: brew-style
+brew-style:
+	brew style Formula/golink.rb
+
+.PHONY: brew-audit
+brew-audit:
+	brew audit --strict mudrii/golink/golink

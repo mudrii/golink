@@ -15,21 +15,27 @@ import (
 var defaultScopes = []string{"openid", "profile", "email", "w_member_social_feed"}
 
 func authScopes(raw string) []string {
-	fields := strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
-	})
+	fields := scopeFields(raw)
 	if len(fields) == 0 {
 		return append([]string(nil), defaultScopes...)
 	}
 
+	return fields
+}
+
+func grantedScopes(raw string) []string {
+	return scopeFields(raw)
+}
+
+func scopeFields(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
 	scopes := make([]string, 0, len(fields))
 	for _, field := range fields {
 		if scope := strings.TrimSpace(field); scope != "" {
 			scopes = append(scopes, scope)
 		}
-	}
-	if len(scopes) == 0 {
-		return append([]string(nil), defaultScopes...)
 	}
 	return scopes
 }
@@ -235,7 +241,7 @@ func newAuthRefreshCommand(a *app) *cobra.Command {
 				session.ExpiresAt = now.Add(time.Duration(token.ExpiresIn) * time.Second)
 			}
 			if token.Scope != "" {
-				session.Scopes = strings.Fields(token.Scope)
+				session.Scopes = grantedScopes(token.Scope)
 			}
 			if token.RefreshToken != "" {
 				session.RefreshToken = token.RefreshToken

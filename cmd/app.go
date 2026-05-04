@@ -475,7 +475,7 @@ func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) (au
 		session.ExpiresAt = a.deps.Now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 	if token.Scope != "" {
-		session.Scopes = strings.Fields(token.Scope)
+		session.Scopes = grantedScopes(token.Scope)
 	}
 	if token.RefreshToken != "" {
 		session.RefreshToken = token.RefreshToken

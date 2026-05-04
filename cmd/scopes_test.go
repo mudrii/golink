@@ -1,15 +1,19 @@
 package cmd
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/mudrii/golink/internal/auth"
 )
 
 func TestHasAnyScope(t *testing.T) {
-	granted := []string{" w_member_social_feed ", "", "  "}
+	granted := []string{" w_member_social_feed,openid ", "", "  "}
 	if !hasAnyScope(granted, "w_member_social", "w_member_social_feed") {
 		t.Fatal("expected to match granted scope")
+	}
+	if !hasAnyScope(granted, "openid") {
+		t.Fatal("expected to match comma-separated granted scope")
 	}
 	if hasAnyScope(granted, "profile", "r_member_social") {
 		t.Fatal("did not expect match for missing scope")
@@ -20,6 +24,14 @@ func TestSessionHasAnyScope(t *testing.T) {
 	session := auth.Session{Scopes: []string{"  profile  ", "email"}}
 	if !sessionHasAnyScope(session, "profile") {
 		t.Fatal("expected session scope match")
+	}
+}
+
+func TestGrantedScopesSplitsCommaAndWhitespace(t *testing.T) {
+	got := grantedScopes("openid,profile email\tw_member_social_feed\n")
+	want := []string{"openid", "profile", "email", "w_member_social_feed"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("grantedScopes = %#v, want %#v", got, want)
 	}
 }
 

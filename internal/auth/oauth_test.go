@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -618,5 +619,13 @@ func TestCompleteLogin_UsesProfileIDWhenUserInfoUnavailable(t *testing.T) {
 	}
 	if err := <-callbackDone; err != nil {
 		t.Fatalf("callback get: %v", err)
+	}
+}
+
+func TestSplitScopesAllowsCommaSeparatedTokens(t *testing.T) {
+	got := splitScopes("openid,profile email\tw_member_social_feed\n")
+	want := []string{"openid", "profile", "email", "w_member_social_feed"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitScopes = %#v, want %#v", got, want)
 	}
 }
