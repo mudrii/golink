@@ -1,6 +1,6 @@
 # Release Checklist
 
-This checklist prepares the first public golink release: `v1.0.0`.
+This checklist prepares date-based golink releases using `YY.MM.DD`.
 
 ## Release scope
 
@@ -9,7 +9,8 @@ This checklist prepares the first public golink release: `v1.0.0`.
 - Binary: `golink`.
 - License: MIT.
 - Supported build path: Go 1.26.2+.
-- Release tag: `v1.0.0`.
+- Release tag format: `vYY.MM.DD`, for example `v26.05.05`.
+- Displayed release version: `YY.MM.DD`, for example `26.05.05`.
 - Homebrew formula: `Formula/golink.rb`.
 
 ## Pre-release review
@@ -89,9 +90,9 @@ directly from a tap, and maintainers can validate with `brew install
 After the release commit is ready:
 
 ```sh
-git tag -a v1.0.0 -m "golink v1.0.0"
+git tag -a v26.05.05 -m "golink 26.05.05"
 git push origin main
-git push origin v1.0.0
+git push origin v26.05.05
 ```
 
 Validate the formula:
@@ -114,8 +115,8 @@ tag revision after the tag exists:
 
 ```ruby
 url "https://github.com/mudrii/golink.git",
-    tag:      "v1.0.0",
-    revision: "<git rev-parse v1.0.0>"
+    tag:      "v26.05.05",
+    revision: "<git rev-parse v26.05.05>"
 ```
 
 Users can install from this repository as a tap after the tag is pushed:
@@ -126,12 +127,12 @@ brew install mudrii/golink/golink
 
 ## GitHub release
 
-Create a GitHub release for `v1.0.0` with:
+Create a GitHub release for `v26.05.05` with:
 
 - product summary from `README.md`;
 - setup link to `LINKEDIN_SETUP.md`;
 - Homebrew install command;
-- source install command: `go install github.com/mudrii/golink@v1.0.0`;
+- source install command: `go install github.com/mudrii/golink@v26.05.05`;
 - known LinkedIn prerequisites and scope requirements;
 - note that unsupported envelopes may reflect LinkedIn entitlement or scope
   limits rather than a CLI failure.
@@ -141,7 +142,7 @@ Create a GitHub release for `v1.0.0` with:
 Run after tagging and before announcing:
 
 ```sh
-go install github.com/mudrii/golink@v1.0.0
+go install github.com/mudrii/golink@v26.05.05
 golink version
 golink doctor
 brew install mudrii/golink/golink
