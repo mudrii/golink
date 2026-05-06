@@ -199,6 +199,61 @@ func TestOfficialAddCommentUsesActivityURN(t *testing.T) {
 	}
 }
 
+func TestOfficialAddCommentFallsBackToUnversionedV2WhenRestCreateIsDenied(t *testing.T) {
+	var calls int
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			if r.URL.EscapedPath() != "/rest/socialActions/urn%3Ali%3Ashare%3A9001/comments" {
+				t.Fatalf("rest path = %q", r.URL.EscapedPath())
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":           403,
+				"serviceErrorCode": 100,
+				"code":             "ACCESS_DENIED",
+				"message":          "Not enough permissions to access: partnerApiSocialActions.CREATE.20260401",
+			})
+		case 2:
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s", r.Method)
+			}
+			if r.URL.EscapedPath() != "/v2/socialActions/urn%3Ali%3Ashare%3A9001/comments" {
+				t.Fatalf("v2 path = %q", r.URL.EscapedPath())
+			}
+			if got := r.Header.Get("Linkedin-Version"); got != "" {
+				t.Fatalf("linkedin-version = %q", got)
+			}
+			body, _ := io.ReadAll(r.Body)
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if payload["object"] != "urn:li:activity:9001" {
+				t.Fatalf("object = %v", payload["object"])
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"$URN":    "urn:li:comment:(urn:li:activity:9001,99)",
+				"created": map[string]any{"time": float64(1778075203084)},
+			})
+		default:
+			t.Fatalf("unexpected call %d to %s", calls, r.URL.String())
+		}
+	}, "urn:li:person:abc123")
+
+	comment, err := o.AddComment(context.Background(), "urn:li:share:9001", "nice")
+	if err != nil {
+		t.Fatalf("comment: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d", calls)
+	}
+	if comment.ID != "urn:li:comment:(urn:li:activity:9001,99)" {
+		t.Fatalf("id = %q", comment.ID)
+	}
+}
+
 func TestOfficialAddReactionEncodesActor(t *testing.T) {
 	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/rest/reactions" {
@@ -328,8 +383,11 @@ func TestOfficialUploadImageBinaryRejectsOversized(t *testing.T) {
 
 func TestOfficialEditPost204(t *testing.T) {
 	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPatch {
+		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s", r.Method)
+		}
+		if got := r.Header.Get("X-RestLi-Method"); got != "PARTIAL_UPDATE" {
+			t.Fatalf("x-restli-method = %q", got)
 		}
 		if r.URL.EscapedPath() != "/rest/posts/urn%3Ali%3Ashare%3A42" {
 			t.Fatalf("path = %q", r.URL.EscapedPath())

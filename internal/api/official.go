@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -325,15 +326,25 @@ func (o *Official) AddComment(ctx context.Context, postURN, text string) (*outpu
 	}
 	resp, err := o.do(ctx, "POST", "/rest/socialActions/"+encoded+"/comments", payload)
 	if err != nil {
-		return nil, err
+		if !isPartnerSocialActionsCreateDenied(err) {
+			return nil, err
+		}
+		resp, err = o.client.DoUnversioned(ctx, "POST", "/v2/socialActions/"+encoded+"/comments", payload)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var raw struct {
 		ID        string `json:"id"`
-		CreatedAt int64  `json:"created"`
+		URN       string `json:"$URN"`
+		CreatedAt any    `json:"created"`
 	}
 	_ = resp.UnmarshalJSON(&raw)
 	id := raw.ID
+	if raw.URN != "" {
+		id = raw.URN
+	}
 	if id == "" {
 		id = resp.Header.Get("x-restli-id")
 	}
@@ -342,8 +353,8 @@ func (o *Official) AddComment(ctx context.Context, postURN, text string) (*outpu
 	}
 
 	created := o.now().UTC()
-	if raw.CreatedAt > 0 {
-		created = time.UnixMilli(raw.CreatedAt).UTC()
+	if createdAt := createdMillis(raw.CreatedAt); createdAt > 0 {
+		created = time.UnixMilli(createdAt).UTC()
 	}
 
 	return &output.CommentData{
@@ -353,6 +364,29 @@ func (o *Official) AddComment(ctx context.Context, postURN, text string) (*outpu
 		Text:      text,
 		CreatedAt: created,
 	}, nil
+}
+
+func isPartnerSocialActionsCreateDenied(err error) bool {
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	details := apiErr.Message + " " + apiErr.Details
+	return apiErr.IsForbidden() &&
+		(apiErr.Code == "ACCESS_DENIED" || strings.Contains(details, "ACCESS_DENIED")) &&
+		strings.Contains(details, "partnerApiSocialActions.CREATE")
+}
+
+func createdMillis(value any) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case map[string]any:
+		if raw, ok := v["time"].(float64); ok {
+			return int64(raw)
+		}
+	}
+	return 0
 }
 
 // ListComments returns comments for the given share/ugcPost URN.
@@ -692,7 +726,7 @@ func uploadRetryWait(ctx context.Context, attempt, maxAttempts int) bool {
 	}
 }
 
-// EditPost PATCHes an existing post's commentary and/or visibility.
+// EditPost partially updates an existing post's commentary and/or visibility.
 // LinkedIn returns 204 No Content on success; in that case a minimal
 // PostEditData is constructed from the request rather than making a GET.
 func (o *Official) EditPost(ctx context.Context, req EditPostRequest) (*output.PostEditData, error) {
@@ -721,7 +755,7 @@ func (o *Official) EditPost(ctx context.Context, req EditPostRequest) (*output.P
 		"patch": map[string]any{"$set": set},
 	}
 
-	resp, err := o.do(ctx, http.MethodPatch, "/rest/posts/"+encoded, body)
+	resp, err := o.client.PartialUpdate(ctx, "/rest/posts/"+encoded, body)
 	if err != nil {
 		return nil, fmt.Errorf("edit post: %w", err)
 	}

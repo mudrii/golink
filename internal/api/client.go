@@ -174,6 +174,25 @@ type Response struct {
 // Rest.li requests require X-Restli-Protocol-Version; versioned endpoint
 // families also require Linkedin-Version when configured.
 func (c *Client) Do(ctx context.Context, method, relativePath string, body any) (*Response, error) {
+	return c.do(ctx, method, relativePath, body, nil, false)
+}
+
+// PartialUpdate performs LinkedIn's Rest.li partial-update request shape:
+// POST with X-RestLi-Method: PARTIAL_UPDATE.
+func (c *Client) PartialUpdate(ctx context.Context, relativePath string, body any) (*Response, error) {
+	return c.do(ctx, http.MethodPost, relativePath, body, map[string]string{
+		"X-RestLi-Method": "PARTIAL_UPDATE",
+	}, false)
+}
+
+// DoUnversioned performs a request without the Linkedin-Version header. Some
+// legacy v2 endpoints remain available to member-scoped apps while the newer
+// /rest equivalent is partner-gated.
+func (c *Client) DoUnversioned(ctx context.Context, method, relativePath string, body any) (*Response, error) {
+	return c.do(ctx, method, relativePath, body, nil, true)
+}
+
+func (c *Client) do(ctx context.Context, method, relativePath string, body any, headers map[string]string, omitAPIVersion bool) (*Response, error) {
 	u, err := c.resolveURL(relativePath)
 	if err != nil {
 		return nil, err
@@ -199,8 +218,11 @@ func (c *Client) Do(ctx context.Context, method, relativePath string, body any) 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.apiVers != "" {
+	if c.apiVers != "" && !omitAPIVersion {
 		req.Header.Set("Linkedin-Version", c.apiVers)
+	}
+	for name, value := range headers {
+		req.Header.Set(name, value)
 	}
 	if c.token != nil {
 		token, err := c.token(ctx)
