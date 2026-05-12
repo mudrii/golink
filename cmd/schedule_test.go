@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +44,23 @@ func (f *failingTransport) CreatePost(_ context.Context, _ api.CreatePostRequest
 	return nil, f.createErr
 }
 
+type scheduleImageTransport struct {
+	fakeTransport
+	initErr   error
+	uploadErr error
+}
+
+func (tpt *scheduleImageTransport) InitializeImageUpload(context.Context, string) (string, string, error) {
+	if tpt.initErr != nil {
+		return "", "", tpt.initErr
+	}
+	return "https://upload.example.com/image", "urn:li:image:scheduled", nil
+}
+
+func (tpt *scheduleImageTransport) UploadImageBinary(context.Context, string, string) error {
+	return tpt.uploadErr
+}
+
 // scheduleAuthStore builds an in-memory session store with a valid fake session.
 func scheduleAuthStore(t *testing.T) auth.Store {
 	t.Helper()
@@ -51,7 +71,7 @@ func scheduleAuthStore(t *testing.T) auth.Store {
 
 func saveScheduleSession(t *testing.T, store auth.Store, profile, transport, memberURN string) {
 	t.Helper()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:     profile,
 		Transport:   transport,
 		AccessToken: "token-" + profile,
@@ -124,7 +144,7 @@ func TestPostSchedule_ValidInput(t *testing.T) {
 	deps := newScheduleTestDeps(sched)
 	deps.Stdout = stdout
 
-	code := ExecuteContext(context.Background(), []string{
+	code := ExecuteContext(t.Context(), []string{
 		"--json", "post", "schedule",
 		"--at", futureAt(),
 		"--text", "hello scheduled world",
@@ -152,7 +172,7 @@ func TestPostSchedule_PastAt(t *testing.T) {
 	deps := newScheduleTestDeps(sched)
 	deps.Stderr = stderr
 
-	code := ExecuteContext(context.Background(), []string{
+	code := ExecuteContext(t.Context(), []string{
 		"--json", "post", "schedule",
 		"--at", pastAt(),
 		"--text", "too late",
@@ -172,7 +192,7 @@ func TestPostSchedule_MissingText(t *testing.T) {
 	deps := newScheduleTestDeps(sched)
 	deps.Stderr = stderr
 
-	code := ExecuteContext(context.Background(), []string{
+	code := ExecuteContext(t.Context(), []string{
 		"--json", "post", "schedule",
 		"--at", futureAt(),
 	}, deps, BuildInfo{})
@@ -188,7 +208,7 @@ func TestPostSchedule_RelativeImagePath(t *testing.T) {
 	deps := newScheduleTestDeps(sched)
 	deps.Stderr = stderr
 
-	code := ExecuteContext(context.Background(), []string{
+	code := ExecuteContext(t.Context(), []string{
 		"--json", "post", "schedule",
 		"--at", futureAt(),
 		"--text", "image post",
@@ -209,7 +229,7 @@ func TestPostSchedule_RequireApprovalRejected(t *testing.T) {
 	deps := newScheduleTestDeps(sched)
 	deps.Stderr = stderr
 
-	code := ExecuteContext(context.Background(), []string{
+	code := ExecuteContext(t.Context(), []string{
 		"--json", "--require-approval", "post", "schedule",
 		"--at", futureAt(),
 		"--text", "needs approval",
@@ -225,7 +245,7 @@ func TestPostSchedule_RequireApprovalRejected(t *testing.T) {
 
 func TestScheduleList_OrderedByScheduledAt(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Add two entries in reverse order.
 	later := fixedNow().Add(3 * time.Hour)
@@ -264,7 +284,7 @@ func TestScheduleList_OrderedByScheduledAt(t *testing.T) {
 
 func TestScheduleShow_ByCommandID(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "show-id", ScheduledAt: fixedNow().Add(time.Hour), CreatedAt: fixedNow(),
 		State: schedule.StatePending, Profile: "default", Transport: "official",
@@ -297,7 +317,7 @@ func TestScheduleShow_NotFound(t *testing.T) {
 	deps := newScheduleTestDeps(sched)
 	deps.Stderr = stderr
 
-	code := ExecuteContext(context.Background(), []string{"--json", "schedule", "show", "nonexistent"}, deps, BuildInfo{})
+	code := ExecuteContext(t.Context(), []string{"--json", "schedule", "show", "nonexistent"}, deps, BuildInfo{})
 	if code != 5 {
 		t.Errorf("want exit 5 (not found), got %d", code)
 	}
@@ -305,7 +325,7 @@ func TestScheduleShow_NotFound(t *testing.T) {
 
 func TestScheduleCancel_DeletesPending(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "cancel-id", ScheduledAt: fixedNow().Add(time.Hour), CreatedAt: fixedNow(),
 		State: schedule.StatePending, Profile: "default", Transport: "official",
@@ -332,9 +352,38 @@ func TestScheduleCancel_DeletesPending(t *testing.T) {
 	}
 }
 
+func TestScheduleCancel_CompletedEntryFailsValidation(t *testing.T) {
+	sched := schedule.NewMemoryStore()
+	ctx := t.Context()
+	if err := sched.Add(ctx, schedule.Entry{
+		CommandID: "completed-cancel", ScheduledAt: fixedNow().Add(-time.Hour), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "default", Transport: "official",
+		Request: schedule.Request{Text: "already complete", Visibility: "PUBLIC"},
+	}); err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+	if err := sched.MarkRunning(ctx, "completed-cancel"); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := sched.MarkCompleted(ctx, "completed-cancel"); err != nil {
+		t.Fatalf("mark completed: %v", err)
+	}
+
+	stderr := &bytes.Buffer{}
+	deps := newScheduleTestDeps(sched)
+	deps.Stderr = stderr
+	code := ExecuteContext(ctx, []string{"--json", "schedule", "cancel", "completed-cancel"}, deps, BuildInfo{})
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "cannot cancel entry in current state") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
 func TestScheduleNext_ReturnEarliest(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "next-later", ScheduledAt: fixedNow().Add(3 * time.Hour), CreatedAt: fixedNow(),
 		State: schedule.StatePending, Profile: "default", Transport: "official",
@@ -373,7 +422,7 @@ func TestScheduleNext_NoPending(t *testing.T) {
 	deps.Stdout = stdout
 
 	// No entries — should return unsupported envelope (exit 0).
-	code := ExecuteContext(context.Background(), []string{"--json", "schedule", "next"}, deps, BuildInfo{})
+	code := ExecuteContext(t.Context(), []string{"--json", "schedule", "next"}, deps, BuildInfo{})
 	if code != 0 {
 		t.Errorf("want exit 0 (unsupported), got %d: %s", code, stdout.String())
 	}
@@ -390,7 +439,7 @@ func TestScheduleNext_NoPending(t *testing.T) {
 
 func TestScheduleRun_NoDueEntries(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	// Add a future entry — not yet due.
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "future-run", ScheduledAt: fixedNow().Add(24 * time.Hour), CreatedAt: fixedNow(),
@@ -414,7 +463,7 @@ func TestScheduleRun_NoDueEntries(t *testing.T) {
 
 func TestScheduleRun_UsesStoredProfileAndTransportPerEntry(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "alpha-run", ScheduledAt: fixedNow().Add(-2 * time.Minute), CreatedAt: fixedNow(),
 		State: schedule.StatePending, Profile: "alpha", Transport: "official",
@@ -460,7 +509,7 @@ func TestScheduleRun_UsesStoredProfileAndTransportPerEntry(t *testing.T) {
 
 func TestScheduleRun_CachedReplayUsesStoredResultPostURN(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "cached-run", ScheduledAt: fixedNow().Add(-time.Minute), CreatedAt: fixedNow(),
 		State: schedule.StatePending, Profile: "cached-profile", Transport: "official", IdempotencyKey: "sched-key",
@@ -505,9 +554,120 @@ func TestScheduleRun_CachedReplayUsesStoredResultPostURN(t *testing.T) {
 	}
 }
 
+func TestScheduleRun_SpecificPendingEntryRunsEvenWhenFuture(t *testing.T) {
+	sched := schedule.NewMemoryStore()
+	ctx := t.Context()
+	if err := sched.Add(ctx, schedule.Entry{
+		CommandID: "specific-run", ScheduledAt: fixedNow().Add(time.Hour), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "default", Transport: "official",
+		Request: schedule.Request{Text: "specific future", Visibility: "PUBLIC"},
+	}); err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	deps := newScheduleTestDeps(sched)
+	deps.Stdout = stdout
+	deps.SessionStore = scheduleAuthStore(t)
+	deps.TransportFactory = factoryReturning(&fakeTransport{name: "official"})
+
+	code := ExecuteContext(ctx, []string{"--json", "schedule", "run", "specific-run"}, deps, BuildInfo{})
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d stdout=%s", code, stdout.String())
+	}
+	data := decodeScheduleRun(t, stdout)
+	if data.Ran != 1 || data.Succeeded != 1 {
+		t.Fatalf("unexpected run payload: %+v", data)
+	}
+	entry, err := sched.Get(ctx, "specific-run")
+	if err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	if entry.State != schedule.StateCompleted {
+		t.Fatalf("state = %s, want completed", entry.State)
+	}
+}
+
+func TestScheduleRun_SpecificFailedEntryRetries(t *testing.T) {
+	sched := schedule.NewMemoryStore()
+	ctx := t.Context()
+	if err := sched.Add(ctx, schedule.Entry{
+		CommandID: "retry-specific", ScheduledAt: fixedNow().Add(-time.Hour), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "default", Transport: "official",
+		Request: schedule.Request{Text: "retry specific", Visibility: "PUBLIC"},
+	}); err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+	if err := sched.MarkRunning(ctx, "retry-specific"); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := sched.MarkFailed(ctx, "retry-specific", "first failure", fixedNow()); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	deps := newScheduleTestDeps(sched)
+	deps.Stdout = stdout
+	deps.SessionStore = scheduleAuthStore(t)
+	deps.TransportFactory = factoryReturning(&fakeTransport{name: "official"})
+
+	code := ExecuteContext(ctx, []string{"--json", "schedule", "run", "retry-specific"}, deps, BuildInfo{})
+	if code != 0 {
+		t.Fatalf("want exit 0, got %d stdout=%s", code, stdout.String())
+	}
+	data := decodeScheduleRun(t, stdout)
+	if data.Ran != 1 || data.Succeeded != 1 {
+		t.Fatalf("unexpected run payload: %+v", data)
+	}
+	entry, err := sched.Get(ctx, "retry-specific")
+	if err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	if entry.State != schedule.StateCompleted || entry.LastError != "" {
+		t.Fatalf("entry after retry = %+v, want completed without last error", entry)
+	}
+}
+
+func TestScheduleRun_SpecificEntryValidationErrors(t *testing.T) {
+	sched := schedule.NewMemoryStore()
+	ctx := t.Context()
+	if err := sched.Add(ctx, schedule.Entry{
+		CommandID: "already-done", ScheduledAt: fixedNow().Add(-time.Hour), CreatedAt: fixedNow(),
+		State: schedule.StatePending, Profile: "default", Transport: "official",
+		Request: schedule.Request{Text: "already done", Visibility: "PUBLIC"},
+	}); err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+	if err := sched.MarkRunning(ctx, "already-done"); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := sched.MarkCompleted(ctx, "already-done"); err != nil {
+		t.Fatalf("mark completed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		id   string
+		want int
+	}{
+		{name: "missing", id: "missing-id", want: 5},
+		{name: "completed", id: "already-done", want: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr := &bytes.Buffer{}
+			deps := newScheduleTestDeps(sched)
+			deps.Stderr = stderr
+			code := ExecuteContext(ctx, []string{"--json", "schedule", "run", tc.id}, deps, BuildInfo{})
+			if code != tc.want {
+				t.Fatalf("exit = %d, want %d stderr=%s", code, tc.want, stderr.String())
+			}
+		})
+	}
+}
+
 func TestScheduleRun_FailingEntryIncrementsRetryCount(t *testing.T) {
 	sched := schedule.NewMemoryStore()
-	ctx := context.Background()
+	ctx := t.Context()
 	// Entry is in the past — past-due.
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "fail-run", ScheduledAt: fixedNow().Add(-time.Hour), CreatedAt: fixedNow(),
@@ -553,13 +713,75 @@ func TestScheduleRun_FailingEntryIncrementsRetryCount(t *testing.T) {
 	}
 }
 
+func TestScheduleRun_ImageErrorPaths(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "image.jpg")
+	if err := os.WriteFile(imagePath, []byte("image-bytes"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		imagePath string
+		transport api.Transport
+		wantError string
+	}{
+		{
+			name:      "missing image file",
+			imagePath: imagePath + ".missing",
+			transport: &scheduleImageTransport{fakeTransport: fakeTransport{name: "official"}},
+			wantError: "image not found",
+		},
+		{
+			name:      "upload init failure",
+			imagePath: imagePath,
+			transport: &scheduleImageTransport{fakeTransport: fakeTransport{name: "official"}, initErr: errors.New("init failed")},
+			wantError: "init failed",
+		},
+		{
+			name:      "upload binary failure",
+			imagePath: imagePath,
+			transport: &scheduleImageTransport{fakeTransport: fakeTransport{name: "official"}, uploadErr: errors.New("upload failed")},
+			wantError: "upload failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sched := schedule.NewMemoryStore()
+			ctx := t.Context()
+			if err := sched.Add(ctx, schedule.Entry{
+				CommandID: "image-run", ScheduledAt: fixedNow().Add(-time.Hour), CreatedAt: fixedNow(),
+				State: schedule.StatePending, Profile: "default", Transport: "official",
+				Request: schedule.Request{Text: "with image", Visibility: "PUBLIC", ImagePath: tc.imagePath},
+			}); err != nil {
+				t.Fatalf("add schedule: %v", err)
+			}
+
+			stdout := &bytes.Buffer{}
+			deps := newScheduleTestDeps(sched)
+			deps.Stdout = stdout
+			deps.SessionStore = scheduleAuthStore(t)
+			deps.TransportFactory = factoryReturning(tc.transport)
+			code := ExecuteContext(ctx, []string{"--json", "schedule", "run"}, deps, BuildInfo{})
+			if code != 0 {
+				t.Fatalf("exit = %d stdout=%s", code, stdout.String())
+			}
+			data := decodeScheduleRun(t, stdout)
+			if data.Failed != 1 || len(data.Results) != 1 {
+				t.Fatalf("run data = %+v", data)
+			}
+			if !strings.Contains(data.Results[0].Error, tc.wantError) {
+				t.Fatalf("error = %q, want %q", data.Results[0].Error, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestScheduleRun_SkippedEntryDoesNotCountAsFailureOrTriggerFailFast(t *testing.T) {
 	baseStore := schedule.NewMemoryStore()
 	sched := &markRunningOverrideStore{
 		Store:   baseStore,
 		blocked: map[string]error{"skip-run": fmt.Errorf("already claimed")},
 	}
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_ = sched.Add(ctx, schedule.Entry{
 		CommandID: "skip-run", ScheduledAt: fixedNow().Add(-2 * time.Minute), CreatedAt: fixedNow(),

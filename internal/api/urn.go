@@ -2,14 +2,12 @@ package api
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
-// EncodeURN URL-encodes a URN value so it can be embedded in a LinkedIn REST
-// path segment (e.g. urn:li:ugcPost:123 -> urn%3Ali%3AugcPost%3A123).
-// net/url.PathEscape deliberately leaves the colon unescaped because it is
-// legal in a path segment, but LinkedIn's Rest.li routes require the colon to
-// be percent-encoded, so we do it explicitly here.
+// EncodeURN URL-encodes a URN value so it can be embedded in LinkedIn REST
+// paths and manually-built Rest.li query fragments.
 func EncodeURN(urn string) (string, error) {
 	trimmed := strings.TrimSpace(urn)
 	if trimmed == "" {
@@ -19,8 +17,7 @@ func EncodeURN(urn string) (string, error) {
 		return "", fmt.Errorf("urn must start with urn")
 	}
 
-	replacer := strings.NewReplacer("%", "%25", ":", "%3A")
-	return replacer.Replace(trimmed), nil
+	return strings.ReplaceAll(url.QueryEscape(trimmed), "+", "%20"), nil
 }
 
 // ActivityURNFromPost converts a share/ugcPost URN into the corresponding

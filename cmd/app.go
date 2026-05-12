@@ -40,6 +40,7 @@ type BuildInfo struct {
 }
 
 var commandIDFallbackSeq uint64
+var commandIDRandomRead = rand.Read
 
 // TransportFactory constructs the Transport used by networked commands.
 // It receives the resolved settings and an optional session (may be empty
@@ -103,19 +104,7 @@ func Execute(ctx context.Context, buildInfo BuildInfo) int {
 // ExecuteContext runs golink with injected dependencies for tests or embedding.
 func ExecuteContext(ctx context.Context, args []string, deps Dependencies, buildInfo BuildInfo) int {
 	normalized := normalizeDependencies(deps)
-	jsonMode, transport, outputMode := preflightFlags(args)
-	preloadedSettings := config.Settings{
-		JSON:      jsonMode,
-		Transport: transport,
-		Output:    outputMode,
-	}
-	application := &app{
-		buildInfo: buildInfo,
-		deps:      normalized,
-		loader:    config.NewLoader(),
-		settings:  preloadedSettings,
-		logger:    slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})),
-	}
+	application := newApp(buildInfo, normalized, args)
 
 	rootCmd, err := newRootCommand(application)
 	if err != nil {
@@ -123,42 +112,61 @@ func ExecuteContext(ctx context.Context, args []string, deps Dependencies, build
 		return 1
 	}
 	rootCmd.SetArgs(args)
-	err = rootCmd.ExecuteContext(ctx)
-	if err == nil {
-		return 0
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		return application.handleExecutionError(rootCmd, args, normalized.Stderr, err)
 	}
+	return 0
+}
 
+func newApp(buildInfo BuildInfo, deps Dependencies, args []string) *app {
+	jsonMode, transport, outputMode := preflightFlags(args)
+	preloadedSettings := config.Settings{
+		JSON:      jsonMode,
+		Transport: transport,
+		Output:    outputMode,
+	}
+	return &app{
+		buildInfo: buildInfo,
+		deps:      deps,
+		loader:    config.NewLoader(),
+		settings:  preloadedSettings,
+		logger:    slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})),
+	}
+}
+
+func (a *app) handleExecutionError(rootCmd *cobra.Command, args []string, stderr io.Writer, err error) int {
 	var failure *commandFailure
 	_ = errors.As(err, &failure)
-
 	if failure == nil {
-		message := err.Error()
-		mode := application.settings.Output
-		switch mode {
-		case output.ModeJSON:
-			envelope := output.ValidationError(application.metadata(bestEffortCommand(rootCmd, args), output.StatusValidation), message, "")
-			if writeErr := output.WriteJSON(normalized.Stderr, envelope); writeErr != nil {
-				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
-				return 1
-			}
-			return 2
-		case output.ModeCompact, output.ModeJSONL:
-			meta := application.metadata(bestEffortCommand(rootCmd, args), output.StatusValidation)
-			base := output.BuildBase(meta)
-			if writeErr := output.RenderError(normalized.Stderr, mode, base, message, string(output.ErrorCodeValidation), message); writeErr != nil {
-				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
-				return 1
-			}
-			return 2
-		default:
-			_, _ = fmt.Fprintln(normalized.Stderr, message)
+		return a.writeGenericCommandError(rootCmd, args, stderr, err)
+	}
+	return writeCommandFailure(stderr, failure)
+}
+
+func (a *app) writeGenericCommandError(rootCmd *cobra.Command, args []string, stderr io.Writer, err error) int {
+	message := err.Error()
+	mode := a.settings.Output
+	switch mode {
+	case output.ModeJSON:
+		envelope := output.ValidationError(a.metadata(bestEffortCommand(rootCmd, args), output.StatusValidation), message, "")
+		return writeJSONError(stderr, envelope, 2)
+	case output.ModeCompact, output.ModeJSONL:
+		meta := a.metadata(bestEffortCommand(rootCmd, args), output.StatusValidation)
+		base := output.BuildBase(meta)
+		if writeErr := output.RenderError(stderr, mode, base, message, string(output.ErrorCodeValidation), message); writeErr != nil {
+			_, _ = fmt.Fprintln(stderr, writeErr.Error())
 			return 1
 		}
+		return 2
+	default:
+		_, _ = fmt.Fprintln(stderr, message)
+		return 1
 	}
+}
 
+func writeCommandFailure(stderr io.Writer, failure *commandFailure) int {
 	mode := failure.outputMode
 	if mode == "" {
-		// Fall back: use jsonMode for backward-compat with tests that set it directly.
 		if failure.jsonMode {
 			mode = output.ModeJSON
 		} else {
@@ -169,35 +177,47 @@ func ExecuteContext(ctx context.Context, args []string, deps Dependencies, build
 	switch mode {
 	case output.ModeJSON:
 		if failure.payload != nil {
-			if writeErr := output.WriteJSON(normalized.Stderr, failure.payload); writeErr != nil {
-				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
-				return 1
-			}
+			return writeJSONError(stderr, failure.payload, failure.exitCode)
 		}
 	case output.ModeCompact, output.ModeJSONL:
-		if failure.payload != nil {
-			// Extract base envelope from the typed payload for the renderer.
-			if env, msg, code, ok := output.ExtractErrorEnvelope(failure.payload); ok {
-				if writeErr := output.RenderError(normalized.Stderr, mode, env, msg, code, failure.text); writeErr != nil {
-					_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
-					return 1
-				}
-			} else {
-				_, _ = fmt.Fprintln(normalized.Stderr, failure.text)
-			}
-		} else if failure.text != "" {
-			_, _ = fmt.Fprintln(normalized.Stderr, failure.text)
+		if err := writeRenderedFailure(stderr, mode, failure); err != nil {
+			_, _ = fmt.Fprintln(stderr, err.Error())
+			return 1
 		}
 	default:
 		if failure.text != "" {
-			if _, writeErr := fmt.Fprintln(normalized.Stderr, failure.text); writeErr != nil {
-				_, _ = fmt.Fprintln(normalized.Stderr, writeErr.Error())
+			if _, writeErr := fmt.Fprintln(stderr, failure.text); writeErr != nil {
+				_, _ = fmt.Fprintln(stderr, writeErr.Error())
 				return 1
 			}
 		}
 	}
 
 	return failure.exitCode
+}
+
+func writeJSONError(stderr io.Writer, payload any, exitCode int) int {
+	if err := output.WriteJSON(stderr, payload); err != nil {
+		_, _ = fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	return exitCode
+}
+
+func writeRenderedFailure(stderr io.Writer, mode string, failure *commandFailure) error {
+	if failure.payload == nil {
+		if failure.text != "" {
+			_, err := fmt.Fprintln(stderr, failure.text)
+			return err
+		}
+		return nil
+	}
+	env, msg, code, ok := output.ExtractErrorEnvelope(failure.payload)
+	if !ok {
+		_, err := fmt.Fprintln(stderr, failure.text)
+		return err
+	}
+	return output.RenderError(stderr, mode, env, msg, code, failure.text)
 }
 
 func normalizeDependencies(deps Dependencies) Dependencies {
@@ -280,6 +300,8 @@ func defaultTransportFactory(deps Dependencies) TransportFactory {
 	}
 }
 
+// openBrowser is the real desktop launcher. Command tests inject BrowserOpener
+// because the OS-specific launchers are platform/integration behavior.
 func openBrowser(ctx context.Context, targetURL string) error {
 	var name string
 	var args []string
@@ -306,6 +328,8 @@ func openBrowser(ctx context.Context, targetURL string) error {
 }
 
 func defaultIsInteractive() bool {
+	// Command tests inject IsInteractive; this runtime probe stays deliberately
+	// thin because CI and non-interactive shells often have no TTY.
 	stdinInfo, err := os.Stdin.Stat()
 	if err != nil {
 		return false
@@ -326,7 +350,9 @@ func newCommandID(command string, now time.Time) string {
 	}
 
 	randomBytes := make([]byte, 4)
-	if _, err := rand.Read(randomBytes); err != nil {
+	if _, err := commandIDRandomRead(randomBytes); err != nil {
+		// crypto/rand should not fail on supported Go platforms, but the
+		// sequence fallback keeps command IDs deterministic under that failure.
 		seq := atomic.AddUint64(&commandIDFallbackSeq, 1)
 		return fmt.Sprintf("cmd_%s_%d_%06d", commandSlug, now.UTC().Unix(), seq)
 	}

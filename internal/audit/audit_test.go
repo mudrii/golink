@@ -2,7 +2,6 @@ package audit
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -118,6 +117,16 @@ func TestFileSinkPermissions(t *testing.T) {
 	}
 }
 
+func TestNoopSinkAppend(t *testing.T) {
+	if err := (NoopSink{}).Append(t.Context(), Entry{
+		TS:      time.Now().UTC(),
+		Command: "post create",
+		Status:  "ok",
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+}
+
 func TestMemorySinkConcurrent(t *testing.T) {
 	sink := NewMemorySink()
 	const n = 50
@@ -126,7 +135,7 @@ func TestMemorySinkConcurrent(t *testing.T) {
 	for i := range n {
 		go func(i int) {
 			defer wg.Done()
-			_ = sink.Append(context.Background(), Entry{
+			_ = sink.Append(t.Context(), Entry{
 				CommandID: string(rune('a' + i%26)),
 				Status:    "ok",
 			})
@@ -156,7 +165,7 @@ func TestSinkRedactsPersonalData(t *testing.T) {
 		),
 	}
 
-	if err := sink.Append(context.Background(), entry); err != nil {
+	if err := sink.Append(t.Context(), entry); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
@@ -213,5 +222,12 @@ func TestResolvePathFallback(t *testing.T) {
 	const suffix = ".local/state/golink/audit.jsonl"
 	if len(got) < len(suffix) || got[len(got)-len(suffix):] != suffix {
 		t.Errorf("expected path ending in %q, got %q", suffix, got)
+	}
+
+	t.Setenv("HOME", "")
+	got = ResolvePath()
+	want := filepath.Join(".local", "state", "golink", "audit.jsonl")
+	if got != want {
+		t.Errorf("expected relative fallback path %q, got %q", want, got)
 	}
 }

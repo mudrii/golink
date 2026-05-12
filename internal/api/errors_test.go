@@ -28,7 +28,23 @@ func TestErrorClassifiers(t *testing.T) {
 	}
 }
 
+func TestErrorStringBranches(t *testing.T) {
+	if got := (*Error)(nil).Error(); got != "" {
+		t.Fatalf("nil Error() = %q, want empty", got)
+	}
+	if got := (&Error{Status: 403, Code: "ACCESS_DENIED", Message: "forbidden"}).Error(); got != "linkedin 403 ACCESS_DENIED: forbidden" {
+		t.Fatalf("coded Error() = %q", got)
+	}
+	if got := (&Error{Status: 500, Message: "upstream failed"}).Error(); got != "linkedin 500: upstream failed" {
+		t.Fatalf("plain Error() = %q", got)
+	}
+}
+
 func TestFeatureUnavailableIs(t *testing.T) {
+	if got := (*ErrFeatureUnavailable)(nil).Error(); got != "" {
+		t.Fatalf("nil ErrFeatureUnavailable Error() = %q, want empty", got)
+	}
+
 	err := fmt.Errorf("wrapped: %w", &ErrFeatureUnavailable{Feature: "search people", Reason: "not entitled"})
 	if !errors.Is(err, &ErrFeatureUnavailable{}) {
 		t.Fatal("errors.Is should match unavailable sentinel")

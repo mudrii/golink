@@ -51,147 +51,156 @@ func newDoctorCommand(a *app) *cobra.Command {
 		Short: "Diagnose golink configuration, session, and feature support",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			now := a.deps.Now()
-
-			// --- Environment ---
-			env := buildDoctorEnvironment()
-
-			// --- Session ---
-			var session *auth.Session
-			sessionErr := error(nil)
-			session, sessionErr = a.deps.SessionStore.LoadSession(cmd.Context(), a.settings.Profile)
-			if sessionErr != nil && !errors.Is(sessionErr, auth.ErrSessionNotFound) {
-				sessionErr = fmt.Errorf("load session: %w", sessionErr)
-			}
-
-			docSession := buildDoctorSession(session, a.settings.Profile, now)
-
-			// --- Probe ---
-			probeTarget := a.deps.UserinfoURL
-			if probeTarget == "" {
-				probeTarget = userinfoURL
-			}
-			probe := output.DoctorProbe{URL: probeTarget, Attempted: false}
-			if session != nil && session.AccessToken != "" {
-				authenticated, _ := session.IsAuthenticated(now)
-				if authenticated {
-					probe = runUserinfoProbe(cmd.Context(), a.deps.HTTPClient, a.settings.Timeout, session.AccessToken, probeTarget)
-				}
-			}
-
-			// --- Features ---
-			var scopes []string
-			if session != nil {
-				scopes = session.Scopes
-			}
-			features := buildFeatureMap(scopes, session)
-
-			// --- Audit ---
-			auditPath := a.settings.AuditPath
-			if auditPath == "" {
-				auditPath = audit.ResolvePath()
-			}
-			docAudit := buildDoctorAudit(auditPath, a.settings.Audit)
-
-			// --- Warnings + Errors ---
-			var warnings, errs []string
-
-			// Session warnings
-			if session == nil || errors.Is(sessionErr, auth.ErrSessionNotFound) {
-				warnings = append(warnings, "no active session — run: golink auth login")
-			} else if sessionErr != nil {
-				errs = append(errs, fmt.Sprintf("session load error: %s", sessionErr))
-			} else {
-				authenticated, _ := session.IsAuthenticated(now)
-				if !authenticated {
-					errs = append(errs, "session exists but access token is expired — run: golink auth login")
-				} else if !session.ExpiresAt.IsZero() {
-					hoursLeft := session.ExpiresAt.Sub(now).Hours()
-					if hoursLeft < 168 {
-						warnings = append(warnings, fmt.Sprintf("access token expires in %.0f hours (< 7 days)", hoursLeft))
-					}
-				}
-				if session.RefreshToken != "" && !session.RefreshExpiresAt.IsZero() {
-					daysLeft := session.RefreshExpiresAt.Sub(now).Hours() / 24
-					if daysLeft < 30 {
-						warnings = append(warnings, fmt.Sprintf("refresh token expires in %.0f days (< 30 days)", daysLeft))
-					}
-				}
-			}
-
-			// Client ID warning
-			if !env.GOLINKClientID {
-				warnings = append(warnings, "GOLINK_CLIENT_ID is not set — required for auth login and auth refresh")
-			}
-
-			// Probe errors
-			if probe.Attempted && probe.Error != "" {
-				errs = append(errs, fmt.Sprintf("LinkedIn probe failed: %s", probe.Error))
-			}
-			if probe.Attempted && probe.Status == http.StatusUnauthorized {
-				errs = append(errs, "LinkedIn probe returned 401 — token may be invalid")
-			}
-
-			// Audit warning
-			if !docAudit.Enabled {
-				warnings = append(warnings, "audit log is disabled")
-			}
-
-			// Health
-			health := "ok"
-			switch {
-			case len(errs) > 0:
-				health = "error"
-			case len(warnings) > 0:
-				health = "warnings"
-			}
-
-			data := output.DoctorData{
-				APIVersion:  a.settings.APIVersion,
-				Environment: env,
-				Session:     docSession,
-				Probe:       probe,
-				Features:    features,
-				Audit:       docAudit,
-				Warnings:    warnings,
-				Errors:      errs,
-				Health:      health,
-			}
-
-			// For text mode, use our custom renderer; all other modes go through writeSuccess.
-			if a.settings.Output == output.ModeText {
-				if err := writeDoctorText(a.deps.Stdout, data); err != nil {
-					return err
-				}
-			} else {
-				if err := a.writeSuccess(cmd, data, ""); err != nil {
-					return err
-				}
-			}
-
-			// --strict exit handling (applies to all output modes)
-			if strict {
-				switch health {
-				case "error":
-					return &commandFailure{
-						outputMode: a.settings.Output,
-						exitCode:   5,
-						text:       "doctor: one or more errors detected",
-					}
-				case "warnings":
-					return &commandFailure{
-						outputMode: a.settings.Output,
-						exitCode:   2,
-						text:       "doctor: one or more warnings detected",
-					}
-				}
-			}
-			return nil
+			return a.runDoctorCommand(cmd, strict)
 		},
 	}
 
 	cmd.Flags().BoolVar(&strict, "strict", false, "exit 2 on warnings, exit 5 on errors")
 	return cmd
+}
+
+func (a *app) runDoctorCommand(cmd *cobra.Command, strict bool) error {
+	data := a.buildDoctorData(cmd.Context())
+	if err := a.writeDoctorData(cmd, data); err != nil {
+		return err
+	}
+	return doctorStrictFailure(a.settings.Output, data.Health, strict)
+}
+
+func (a *app) buildDoctorData(ctx context.Context) output.DoctorData {
+	now := a.deps.Now()
+	env := buildDoctorEnvironment()
+	session, sessionErr := a.loadDoctorSession(ctx)
+	docSession := buildDoctorSession(session, a.settings.Profile, now)
+	probe := a.buildDoctorProbe(ctx, session, now)
+	features := buildFeatureMap(doctorScopes(session), session)
+	docAudit := buildDoctorAudit(a.doctorAuditPath(), a.settings.Audit)
+	warnings, errs := doctorWarningsAndErrors(env, session, sessionErr, probe, docAudit, now)
+
+	return output.DoctorData{
+		APIVersion:  a.settings.APIVersion,
+		Environment: env,
+		Session:     docSession,
+		Probe:       probe,
+		Features:    features,
+		Audit:       docAudit,
+		Warnings:    warnings,
+		Errors:      errs,
+		Health:      doctorHealth(warnings, errs),
+	}
+}
+
+func (a *app) loadDoctorSession(ctx context.Context) (*auth.Session, error) {
+	session, err := a.deps.SessionStore.LoadSession(ctx, a.settings.Profile)
+	if err != nil && !errors.Is(err, auth.ErrSessionNotFound) {
+		return session, fmt.Errorf("load session: %w", err)
+	}
+	return session, err
+}
+
+func (a *app) buildDoctorProbe(ctx context.Context, session *auth.Session, now time.Time) output.DoctorProbe {
+	probeTarget := a.deps.UserinfoURL
+	if probeTarget == "" {
+		probeTarget = userinfoURL
+	}
+	probe := output.DoctorProbe{URL: probeTarget, Attempted: false}
+	if session == nil || session.AccessToken == "" {
+		return probe
+	}
+	authenticated, _ := session.IsAuthenticated(now)
+	if !authenticated {
+		return probe
+	}
+	return runUserinfoProbe(ctx, a.deps.HTTPClient, a.settings.Timeout, session.AccessToken, probeTarget)
+}
+
+func doctorScopes(session *auth.Session) []string {
+	if session == nil {
+		return nil
+	}
+	return session.Scopes
+}
+
+func (a *app) doctorAuditPath() string {
+	if a.settings.AuditPath != "" {
+		return a.settings.AuditPath
+	}
+	return audit.ResolvePath()
+}
+
+func doctorWarningsAndErrors(env output.DoctorEnvironment, session *auth.Session, sessionErr error, probe output.DoctorProbe, docAudit output.DoctorAudit, now time.Time) ([]string, []string) {
+	var warnings, errs []string
+	warnings, errs = appendDoctorSessionFindings(warnings, errs, session, sessionErr, now)
+	if !env.GOLINKClientID {
+		warnings = append(warnings, "GOLINK_CLIENT_ID is not set — required for auth login and auth refresh")
+	}
+	if probe.Attempted && probe.Error != "" {
+		errs = append(errs, fmt.Sprintf("LinkedIn probe failed: %s", probe.Error))
+	}
+	if probe.Attempted && probe.Status == http.StatusUnauthorized {
+		errs = append(errs, "LinkedIn probe returned 401 — token may be invalid")
+	}
+	if !docAudit.Enabled {
+		warnings = append(warnings, "audit log is disabled")
+	}
+	return warnings, errs
+}
+
+func appendDoctorSessionFindings(warnings, errs []string, session *auth.Session, sessionErr error, now time.Time) ([]string, []string) {
+	if session == nil || errors.Is(sessionErr, auth.ErrSessionNotFound) {
+		return append(warnings, "no active session — run: golink auth login"), errs
+	}
+	if sessionErr != nil {
+		return warnings, append(errs, fmt.Sprintf("session load error: %s", sessionErr))
+	}
+	authenticated, _ := session.IsAuthenticated(now)
+	if !authenticated {
+		errs = append(errs, "session exists but access token is expired — run: golink auth login")
+	} else if !session.ExpiresAt.IsZero() {
+		hoursLeft := session.ExpiresAt.Sub(now).Hours()
+		if hoursLeft < 168 {
+			warnings = append(warnings, fmt.Sprintf("access token expires in %.0f hours (< 7 days)", hoursLeft))
+		}
+	}
+	if session.RefreshToken != "" && !session.RefreshExpiresAt.IsZero() {
+		daysLeft := session.RefreshExpiresAt.Sub(now).Hours() / 24
+		if daysLeft < 30 {
+			warnings = append(warnings, fmt.Sprintf("refresh token expires in %.0f days (< 30 days)", daysLeft))
+		}
+	}
+	return warnings, errs
+}
+
+func doctorHealth(warnings, errs []string) string {
+	switch {
+	case len(errs) > 0:
+		return "error"
+	case len(warnings) > 0:
+		return "warnings"
+	default:
+		return "ok"
+	}
+}
+
+func (a *app) writeDoctorData(cmd *cobra.Command, data output.DoctorData) error {
+	if a.settings.Output == output.ModeText {
+		return writeDoctorText(a.deps.Stdout, data)
+	}
+	return a.writeSuccess(cmd, data, "")
+}
+
+func doctorStrictFailure(mode, health string, strict bool) error {
+	if !strict {
+		return nil
+	}
+	switch health {
+	case "error":
+		return &commandFailure{outputMode: mode, exitCode: 5, text: "doctor: one or more errors detected"}
+	case "warnings":
+		return &commandFailure{outputMode: mode, exitCode: 2, text: "doctor: one or more warnings detected"}
+	default:
+		return nil
+	}
 }
 
 // buildDoctorEnvironment reads the relevant environment variables.
@@ -364,127 +373,131 @@ func writeDoctorText(w io.Writer, d output.DoctorData) error {
 	var b strings.Builder
 
 	b.WriteString("golink doctor — diagnostics\n\n")
-
-	// Environment
-	b.WriteString("Environment\n")
-	clientIDVal := "NOT SET"
-	if d.Environment.GOLINKClientID {
-		clientIDVal = "set"
-	}
-	fmt.Fprintf(&b, "  GOLINK_CLIENT_ID:   %s\n", clientIDVal)
-	apiVer := d.Environment.GOLINKAPIVersion
-	if apiVer == "" {
-		apiVer = "(not set; default used)"
-	}
-	fmt.Fprintf(&b, "  GOLINK_API_VERSION: %s\n", apiVer)
-	if d.Environment.GOLINKRedirect != "" {
-		fmt.Fprintf(&b, "  GOLINK_REDIRECT_PORT: %s\n", d.Environment.GOLINKRedirect)
-	}
-	if d.Environment.GOLINKJSON != "" {
-		fmt.Fprintf(&b, "  GOLINK_JSON:        %s\n", d.Environment.GOLINKJSON)
-	}
-	if d.Environment.GOLINKTransport != "" {
-		fmt.Fprintf(&b, "  GOLINK_TRANSPORT:   %s\n", d.Environment.GOLINKTransport)
-	}
-	if d.Environment.GOLINKOutput != "" {
-		fmt.Fprintf(&b, "  GOLINK_OUTPUT:      %s\n", d.Environment.GOLINKOutput)
-	}
-	auditVal := d.Environment.GOLINKAudit
-	if auditVal == "" {
-		auditVal = "(not set; default on)"
-	}
-	fmt.Fprintf(&b, "  GOLINK_AUDIT:       %s\n", auditVal)
-	if d.Environment.GOLINKAuditPath != "" {
-		fmt.Fprintf(&b, "  GOLINK_AUDIT_PATH:  %s\n", d.Environment.GOLINKAuditPath)
-	}
-	configPath := d.Environment.ConfigPath
-	if configPath == "" {
-		configPath = "(none)"
-	}
-	fmt.Fprintf(&b, "  Config file:        %s\n\n", configPath)
-
-	// Session
-	fmt.Fprintf(&b, "Session (profile: %s)\n", d.Session.Profile)
-	fmt.Fprintf(&b, "  Authenticated: %v\n", d.Session.Authenticated)
-	if d.Session.ExpiresAt != "" {
-		fmt.Fprintf(&b, "  Access expires: %s (%d hours)\n", d.Session.ExpiresAt, d.Session.ExpiresInHours)
-	}
-	if d.Session.RefreshAvailable {
-		refreshExp := "(no expiry stored)"
-		if d.Session.RefreshExpiresAt != "" {
-			refreshExp = fmt.Sprintf("expires %s in %d days", d.Session.RefreshExpiresAt, d.Session.RefreshInDays)
-		}
-		fmt.Fprintf(&b, "  Refresh token: present (%s)\n", refreshExp)
-	} else {
-		b.WriteString("  Refresh token: not present\n")
-	}
-	if len(d.Session.Scopes) > 0 {
-		fmt.Fprintf(&b, "  Scopes: %s\n", strings.Join(d.Session.Scopes, " "))
-	}
-	if d.Session.AuthFlow != "" {
-		fmt.Fprintf(&b, "  Auth flow: %s\n", d.Session.AuthFlow)
-	}
-	if d.Session.ConnectedAt != "" {
-		fmt.Fprintf(&b, "  Connected at: %s\n", d.Session.ConnectedAt)
-	}
-	b.WriteString("\n")
-
-	// LinkedIn probe
-	b.WriteString("LinkedIn probe\n")
-	if !d.Probe.Attempted {
-		b.WriteString("  (skipped — not authenticated)\n")
-	} else if d.Probe.Error != "" {
-		fmt.Fprintf(&b, "  GET %s -> ERROR: %s\n", d.Probe.URL, d.Probe.Error)
-	} else {
-		fmt.Fprintf(&b, "  GET %s -> %d (member %s)\n", d.Probe.URL, d.Probe.Status, d.Probe.Member)
-		if d.Probe.RequestID != "" {
-			fmt.Fprintf(&b, "  Request ID: %s\n", d.Probe.RequestID)
-		}
-	}
-	b.WriteString("\n")
-
-	// Feature support
-	b.WriteString("Feature support\n")
-	for _, f := range d.Features {
-		if f.Reason != "" {
-			fmt.Fprintf(&b, "  %-20s %s (%s)\n", f.Command, f.Status, f.Reason)
-		} else {
-			fmt.Fprintf(&b, "  %-20s %s\n", f.Command, f.Status)
-		}
-	}
-	b.WriteString("\n")
-
-	// Audit
-	b.WriteString("Audit\n")
-	fmt.Fprintf(&b, "  Path:    %s\n", d.Audit.Path)
-	fmt.Fprintf(&b, "  Enabled: %v\n", d.Audit.Enabled)
-	if d.Audit.Exists {
-		fmt.Fprintf(&b, "  File:    %d bytes, modified %s\n", d.Audit.Size, d.Audit.ModifiedAt)
-	} else {
-		b.WriteString("  File:    (not yet created)\n")
-	}
-	b.WriteString("\n")
-
-	// Warnings
-	if len(d.Warnings) > 0 {
-		b.WriteString("Warnings\n")
-		for _, msg := range d.Warnings {
-			fmt.Fprintf(&b, "  ! %s\n", msg)
-		}
-		b.WriteString("\n")
-	}
-
-	// Errors
-	if len(d.Errors) > 0 {
-		b.WriteString("Errors\n")
-		for _, msg := range d.Errors {
-			fmt.Fprintf(&b, "  x %s\n", msg)
-		}
-		b.WriteString("\n")
-	}
-
+	writeDoctorEnvironmentText(&b, d.Environment)
+	writeDoctorSessionText(&b, d.Session)
+	writeDoctorProbeText(&b, d.Probe)
+	writeDoctorFeatureText(&b, d.Features)
+	writeDoctorAuditText(&b, d.Audit)
+	writeDoctorMessagesText(&b, "Warnings", "!", d.Warnings)
+	writeDoctorMessagesText(&b, "Errors", "x", d.Errors)
 	fmt.Fprintf(&b, "Health: %s\n", d.Health)
 
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+func writeDoctorEnvironmentText(b *strings.Builder, env output.DoctorEnvironment) {
+	b.WriteString("Environment\n")
+	clientIDVal := "NOT SET"
+	if env.GOLINKClientID {
+		clientIDVal = "set"
+	}
+	fmt.Fprintf(b, "  GOLINK_CLIENT_ID:   %s\n", clientIDVal)
+	apiVer := env.GOLINKAPIVersion
+	if apiVer == "" {
+		apiVer = "(not set; default used)"
+	}
+	fmt.Fprintf(b, "  GOLINK_API_VERSION: %s\n", apiVer)
+	if env.GOLINKRedirect != "" {
+		fmt.Fprintf(b, "  GOLINK_REDIRECT_PORT: %s\n", env.GOLINKRedirect)
+	}
+	if env.GOLINKJSON != "" {
+		fmt.Fprintf(b, "  GOLINK_JSON:        %s\n", env.GOLINKJSON)
+	}
+	if env.GOLINKTransport != "" {
+		fmt.Fprintf(b, "  GOLINK_TRANSPORT:   %s\n", env.GOLINKTransport)
+	}
+	if env.GOLINKOutput != "" {
+		fmt.Fprintf(b, "  GOLINK_OUTPUT:      %s\n", env.GOLINKOutput)
+	}
+	auditVal := env.GOLINKAudit
+	if auditVal == "" {
+		auditVal = "(not set; default on)"
+	}
+	fmt.Fprintf(b, "  GOLINK_AUDIT:       %s\n", auditVal)
+	if env.GOLINKAuditPath != "" {
+		fmt.Fprintf(b, "  GOLINK_AUDIT_PATH:  %s\n", env.GOLINKAuditPath)
+	}
+	configPath := env.ConfigPath
+	if configPath == "" {
+		configPath = "(none)"
+	}
+	fmt.Fprintf(b, "  Config file:        %s\n\n", configPath)
+}
+
+func writeDoctorSessionText(b *strings.Builder, session output.DoctorSession) {
+	fmt.Fprintf(b, "Session (profile: %s)\n", session.Profile)
+	fmt.Fprintf(b, "  Authenticated: %v\n", session.Authenticated)
+	if session.ExpiresAt != "" {
+		fmt.Fprintf(b, "  Access expires: %s (%d hours)\n", session.ExpiresAt, session.ExpiresInHours)
+	}
+	if session.RefreshAvailable {
+		refreshExp := "(no expiry stored)"
+		if session.RefreshExpiresAt != "" {
+			refreshExp = fmt.Sprintf("expires %s in %d days", session.RefreshExpiresAt, session.RefreshInDays)
+		}
+		fmt.Fprintf(b, "  Refresh token: present (%s)\n", refreshExp)
+	} else {
+		b.WriteString("  Refresh token: not present\n")
+	}
+	if len(session.Scopes) > 0 {
+		fmt.Fprintf(b, "  Scopes: %s\n", strings.Join(session.Scopes, " "))
+	}
+	if session.AuthFlow != "" {
+		fmt.Fprintf(b, "  Auth flow: %s\n", session.AuthFlow)
+	}
+	if session.ConnectedAt != "" {
+		fmt.Fprintf(b, "  Connected at: %s\n", session.ConnectedAt)
+	}
+	b.WriteString("\n")
+}
+
+func writeDoctorProbeText(b *strings.Builder, probe output.DoctorProbe) {
+	b.WriteString("LinkedIn probe\n")
+	if !probe.Attempted {
+		b.WriteString("  (skipped — not authenticated)\n")
+	} else if probe.Error != "" {
+		fmt.Fprintf(b, "  GET %s -> ERROR: %s\n", probe.URL, probe.Error)
+	} else {
+		fmt.Fprintf(b, "  GET %s -> %d (member %s)\n", probe.URL, probe.Status, probe.Member)
+		if probe.RequestID != "" {
+			fmt.Fprintf(b, "  Request ID: %s\n", probe.RequestID)
+		}
+	}
+	b.WriteString("\n")
+}
+
+func writeDoctorFeatureText(b *strings.Builder, features []output.DoctorFeature) {
+	b.WriteString("Feature support\n")
+	for _, f := range features {
+		if f.Reason != "" {
+			fmt.Fprintf(b, "  %-20s %s (%s)\n", f.Command, f.Status, f.Reason)
+		} else {
+			fmt.Fprintf(b, "  %-20s %s\n", f.Command, f.Status)
+		}
+	}
+	b.WriteString("\n")
+}
+
+func writeDoctorAuditText(b *strings.Builder, docAudit output.DoctorAudit) {
+	b.WriteString("Audit\n")
+	fmt.Fprintf(b, "  Path:    %s\n", docAudit.Path)
+	fmt.Fprintf(b, "  Enabled: %v\n", docAudit.Enabled)
+	if docAudit.Exists {
+		fmt.Fprintf(b, "  File:    %d bytes, modified %s\n", docAudit.Size, docAudit.ModifiedAt)
+	} else {
+		b.WriteString("  File:    (not yet created)\n")
+	}
+	b.WriteString("\n")
+}
+
+func writeDoctorMessagesText(b *strings.Builder, title, marker string, messages []string) {
+	if len(messages) == 0 {
+		return
+	}
+	b.WriteString(title + "\n")
+	for _, msg := range messages {
+		fmt.Fprintf(b, "  %s %s\n", marker, msg)
+	}
+	b.WriteString("\n")
 }

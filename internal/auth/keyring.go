@@ -14,20 +14,48 @@ const defaultServiceName = "github.com.mudrii.golink"
 // KeyringStore stores sessions in the OS keyring.
 type KeyringStore struct {
 	service string
+	backend keyringBackend
 }
 
 // NewKeyringStore constructs a keyring-backed session store.
 func NewKeyringStore(service string) *KeyringStore {
+	return newKeyringStore(service, systemKeyring{})
+}
+
+type keyringBackend interface {
+	Get(service, user string) (string, error)
+	Set(service, user, password string) error
+	Delete(service, user string) error
+}
+
+type systemKeyring struct{}
+
+func (systemKeyring) Get(service, user string) (string, error) {
+	return keyring.Get(service, user)
+}
+
+func (systemKeyring) Set(service, user, password string) error {
+	return keyring.Set(service, user, password)
+}
+
+func (systemKeyring) Delete(service, user string) error {
+	return keyring.Delete(service, user)
+}
+
+func newKeyringStore(service string, backend keyringBackend) *KeyringStore {
 	if service == "" {
 		service = defaultServiceName
 	}
+	if backend == nil {
+		backend = systemKeyring{}
+	}
 
-	return &KeyringStore{service: service}
+	return &KeyringStore{service: service, backend: backend}
 }
 
 // LoadSession loads a session from the system keyring.
 func (s *KeyringStore) LoadSession(_ context.Context, profile string) (*Session, error) {
-	value, err := keyring.Get(s.service, sessionKey(profile))
+	value, err := s.backend.Get(s.service, sessionKey(profile))
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return nil, ErrSessionNotFound
@@ -54,7 +82,7 @@ func (s *KeyringStore) SaveSession(_ context.Context, session Session) error {
 		return fmt.Errorf("encode keyring session: %w", err)
 	}
 
-	if err := keyring.Set(s.service, sessionKey(session.Profile), string(payload)); err != nil {
+	if err := s.backend.Set(s.service, sessionKey(session.Profile), string(payload)); err != nil {
 		return fmt.Errorf("save keyring session: %w", err)
 	}
 
@@ -63,7 +91,7 @@ func (s *KeyringStore) SaveSession(_ context.Context, session Session) error {
 
 // DeleteSession removes a session from the system keyring.
 func (s *KeyringStore) DeleteSession(_ context.Context, profile string) error {
-	if err := keyring.Delete(s.service, sessionKey(profile)); err != nil {
+	if err := s.backend.Delete(s.service, sessionKey(profile)); err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return ErrSessionNotFound
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
+	"github.com/mudrii/golink/internal/idempotency"
 	outputtest "github.com/mudrii/golink/internal/output"
 )
 
@@ -34,6 +35,24 @@ func (s failingSessionStore) SaveSession(context.Context, auth.Session) error {
 
 func (s failingSessionStore) DeleteSession(context.Context, string) error {
 	return s.err
+}
+
+type saveFailSessionStore struct {
+	session auth.Session
+	err     error
+}
+
+func (s saveFailSessionStore) LoadSession(context.Context, string) (*auth.Session, error) {
+	session := s.session
+	return &session, nil
+}
+
+func (s saveFailSessionStore) SaveSession(context.Context, auth.Session) error {
+	return s.err
+}
+
+func (s saveFailSessionStore) DeleteSession(context.Context, string) error {
+	return nil
 }
 
 func TestVersionJSON(t *testing.T) {
@@ -349,7 +368,7 @@ func TestProfileMeReturnsAuthErrorWithoutSession(t *testing.T) {
 
 func TestProfileMeRejectsMalformedSession(t *testing.T) {
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:   "default",
 		Transport: "official",
 	}); err != nil {
@@ -472,7 +491,7 @@ func TestUnofficialTransportRequiresAcknowledgement(t *testing.T) {
 	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
-func TestProfileMeUsesStoredSession(t *testing.T) {
+func TestProfileMeRejectsUnauthenticatedStoredSession(t *testing.T) {
 	store := auth.NewMemoryStore()
 	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:        "default",
@@ -499,7 +518,7 @@ func TestProfileMeUsesStoredSession(t *testing.T) {
 
 func TestAuthStatusRejectsMalformedSession(t *testing.T) {
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:   "default",
 		Transport: "",
 	}); err != nil {
@@ -530,7 +549,7 @@ func TestAuthRefreshNoSession(t *testing.T) {
 
 func TestAuthRefreshNoRefreshToken(t *testing.T) {
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:     "default",
 		Transport:   "official",
 		AccessToken: "token",
@@ -542,6 +561,28 @@ func TestAuthRefreshNoRefreshToken(t *testing.T) {
 	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "refresh"}, testDepsOptions{store: store})
 	if code != 4 {
 		t.Fatalf("expected exit code 4, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
+}
+
+func TestAuthRefreshMissingClientID(t *testing.T) {
+	store := auth.NewMemoryStore()
+	if err := store.SaveSession(t.Context(), auth.Session{
+		Profile:      "default",
+		Transport:    "official",
+		AccessToken:  "token",
+		ExpiresAt:    time.Date(2026, 4, 16, 13, 0, 0, 0, time.UTC),
+		RefreshToken: "refresh-token",
+	}); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	code, stdout, stderr := executeTestCommand(t, []string{"--json", "auth", "refresh"}, testDepsOptions{store: store})
+	if code != 2 {
+		t.Fatalf("expected exit code 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("expected empty stdout, got %s", stdout.String())
@@ -561,7 +602,7 @@ func TestAuthRefreshSuccess(t *testing.T) {
 	defer tokenServer.Close()
 
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:      "default",
 		Transport:    "official",
 		AccessToken:  "old-token",
@@ -600,6 +641,45 @@ func TestAuthRefreshSuccess(t *testing.T) {
 	if payload.Data.Profile != "default" {
 		t.Errorf("expected default profile, got %q", payload.Data.Profile)
 	}
+	refreshed, err := store.LoadSession(t.Context(), "default")
+	if err != nil {
+		t.Fatalf("load refreshed session: %v", err)
+	}
+	if refreshed.AccessToken != "new-token" {
+		t.Fatalf("persisted access token = %q, want new-token", refreshed.AccessToken)
+	}
+	if !refreshed.ExpiresAt.After(time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("persisted expires_at = %s, want future value", refreshed.ExpiresAt)
+	}
+}
+
+func TestAuthRefreshPersistFailure(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":5184000,"scope":"openid profile email"}`)
+	}))
+	defer tokenServer.Close()
+
+	t.Setenv("GOLINK_CLIENT_ID", "client-123")
+	code, stdout, stderr := executeTestCommandWithHTTP(t, []string{"--json", "auth", "refresh"}, testDepsOptions{
+		store: saveFailSessionStore{
+			session: auth.Session{
+				Profile:      "default",
+				Transport:    "official",
+				AccessToken:  "old-token",
+				ExpiresAt:    time.Date(2026, 4, 16, 12, 4, 0, 0, time.UTC),
+				RefreshToken: "refresh-token",
+			},
+			err: errors.New("disk full"),
+		},
+	}, tokenServer)
+	if code != 5 {
+		t.Fatalf("expected exit code 5, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout.String())
+	}
+	outputtest.ValidateEnvelopeRoundTrip(t, schemaPath(t), stderr.Bytes())
 }
 
 func TestAuthRefreshCompactOutput(t *testing.T) {
@@ -610,7 +690,7 @@ func TestAuthRefreshCompactOutput(t *testing.T) {
 	defer tokenServer.Close()
 
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:      "default",
 		Transport:    "official",
 		AccessToken:  "old-token",
@@ -659,7 +739,7 @@ func TestResolveTransportAutoRefreshNearExpiry(t *testing.T) {
 	store := auth.NewMemoryStore()
 	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
 	// Session expires in 2 minutes (< 5 min threshold) — auto-refresh should fire.
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:      "default",
 		Transport:    "official",
 		AccessToken:  "old-token",
@@ -695,7 +775,7 @@ func TestResolveTransportNoRefreshWhenTokenFresh(t *testing.T) {
 	store := auth.NewMemoryStore()
 	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
 	// Session expires in 60 minutes (> 5 min threshold) — no refresh expected.
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:      "default",
 		Transport:    "official",
 		AccessToken:  "valid-token",
@@ -725,6 +805,7 @@ type testDepsOptions struct {
 	transportFactory TransportFactory
 	auditSink        audit.Sink
 	approvalStore    approval.Store
+	idempotencyStore idempotency.Store
 }
 
 func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int, *bytes.Buffer, *bytes.Buffer) {
@@ -741,7 +822,7 @@ func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int,
 		astore = approval.NewMemoryStore()
 	}
 
-	code := ExecuteContext(context.Background(), args, Dependencies{
+	code := ExecuteContext(t.Context(), args, Dependencies{
 		Stdout:           stdout,
 		Stderr:           stderr,
 		LoginRunner:      opts.loginRunner,
@@ -751,6 +832,7 @@ func executeTestCommand(t *testing.T, args []string, opts testDepsOptions) (int,
 		TransportFactory: opts.transportFactory,
 		AuditSink:        opts.auditSink,
 		ApprovalStore:    astore,
+		IdempotencyStore: opts.idempotencyStore,
 	}, BuildInfo{
 		Version:   "test",
 		Commit:    "abc123",
@@ -776,7 +858,7 @@ func executeTestCommandWithHTTP(t *testing.T, args []string, opts testDepsOption
 		astore = approval.NewMemoryStore()
 	}
 
-	code := ExecuteContext(context.Background(), args, Dependencies{
+	code := ExecuteContext(t.Context(), args, Dependencies{
 		Stdout:           stdout,
 		Stderr:           stderr,
 		LoginRunner:      opts.loginRunner,

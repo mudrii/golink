@@ -3,11 +3,13 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/mudrii/golink/internal/api"
+	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/config"
 	"github.com/mudrii/golink/internal/output"
@@ -84,7 +86,7 @@ func (f *fakeTransport) AddComment(_ context.Context, postURN, text string) (*ou
 }
 
 func (f *fakeTransport) ListComments(_ context.Context, postURN string, count, start int) (*output.CommentListData, error) {
-	return &output.CommentListData{PostURN: postURN, Count: count, Start: start}, nil
+	return &output.CommentListData{PostURN: postURN, Items: []output.CommentData{}, Count: count, Start: start}, nil
 }
 
 func (f *fakeTransport) AddReaction(_ context.Context, postURN string, rtype output.ReactionType) (*output.ReactionData, error) {
@@ -97,7 +99,7 @@ func (f *fakeTransport) AddReaction(_ context.Context, postURN string, rtype out
 }
 
 func (f *fakeTransport) ListReactions(_ context.Context, postURN string) (*output.ReactionListData, error) {
-	return &output.ReactionListData{PostURN: postURN}, nil
+	return &output.ReactionListData{PostURN: postURN, Items: []output.ReactionData{}}, nil
 }
 
 func (f *fakeTransport) SearchPeople(_ context.Context, req api.SearchPeopleRequest) (*output.SearchPeopleData, error) {
@@ -176,7 +178,7 @@ func (f *fakeTransport) ListOrganizations(_ context.Context) (*output.OrgListDat
 func authenticatedStore(t *testing.T) auth.Store {
 	t.Helper()
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:     "default",
 		Transport:   "official",
 		AccessToken: "token-xyz",
@@ -235,6 +237,57 @@ func TestPostListLive(t *testing.T) {
 	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
 }
 
+func TestPostGetLive(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "post", "get", "urn:li:share:42"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.ID != "urn:li:share:42" {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
+func TestPostDeleteLive(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "post", "delete", "urn:li:share:42"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			ID      string `json:"id"`
+			Deleted bool   `json:"deleted"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.ID != "urn:li:share:42" || !payload.Data.Deleted {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
 func TestCommentAddLive(t *testing.T) {
 	code, stdout, stderr := executeTestCommand(t,
 		[]string{"--json", "comment", "add", "urn:li:share:42", "--text", "nice"},
@@ -246,6 +299,33 @@ func TestCommentAddLive(t *testing.T) {
 		t.Fatalf("exit %d stderr=%s", code, stderr)
 	}
 	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+}
+
+func TestCommentListLive(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "comment", "list", "urn:li:share:42", "--count", "5", "--start", "1"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			PostURN string `json:"post_urn"`
+			Count   int    `json:"count"`
+			Start   int    `json:"start"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.PostURN != "urn:li:share:42" || payload.Data.Count != 5 || payload.Data.Start != 1 {
+		t.Fatalf("envelope = %+v", payload)
+	}
 }
 
 func TestCommentAddDryRun(t *testing.T) {
@@ -280,6 +360,31 @@ func TestReactAddLive(t *testing.T) {
 	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
 }
 
+func TestReactListLive(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "react", "list", "urn:li:share:42"},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			PostURN string `json:"post_urn"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.PostURN != "urn:li:share:42" {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
 func TestReactAddDryRun(t *testing.T) {
 	code, stdout, stderr := executeTestCommand(t,
 		[]string{"--json", "--dry-run", "react", "add", "urn:li:share:42", "--type", "LIKE"},
@@ -298,6 +403,119 @@ func TestPostDeleteDryRun(t *testing.T) {
 		t.Fatalf("exit %d stderr=%s", code, stderr)
 	}
 	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+}
+
+func TestApprovalShowLive(t *testing.T) {
+	astore := approval.NewMemoryStore()
+	entry := approval.Entry{
+		CommandID: "cmd_show_123",
+		Command:   "post delete",
+		CreatedAt: time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		Profile:   "default",
+		Transport: "official",
+		Payload: output.PostDeletePreview{
+			Endpoint: "DELETE /rest/posts/urn:li:share:42",
+			PostURN:  "urn:li:share:42",
+		},
+	}
+	if _, err := astore.Stage(t.Context(), entry); err != nil {
+		t.Fatalf("stage approval: %v", err)
+	}
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "show", entry.CommandID},
+		testDepsOptions{approvalStore: astore})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			State string `json:"state"`
+			Entry struct {
+				CommandID string `json:"command_id"`
+			} `json:"entry"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.State != string(approval.StatePending) || payload.Data.Entry.CommandID != entry.CommandID {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
+func TestProfileMeFromStoredSession(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "profile", "me"},
+		testDepsOptions{store: authenticatedStore(t)})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			Sub string `json:"sub"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || payload.Data.Sub != "urn:li:person:abc123" {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
+func TestAuthStatusAuthenticated(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "auth", "status"},
+		testDepsOptions{store: authenticatedStore(t)})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			IsAuthenticated bool `json:"is_authenticated"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || !payload.Data.IsAuthenticated {
+		t.Fatalf("envelope = %+v", payload)
+	}
+}
+
+func TestAuthLogoutClearsSession(t *testing.T) {
+	store := authenticatedStore(t)
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "auth", "logout"},
+		testDepsOptions{store: store})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+
+	var payload struct {
+		Status string `json:"status"`
+		Data   struct {
+			Cleared bool `json:"cleared"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Status != "ok" || !payload.Data.Cleared {
+		t.Fatalf("envelope = %+v", payload)
+	}
+	if _, err := store.LoadSession(t.Context(), "default"); !errors.Is(err, auth.ErrSessionNotFound) {
+		t.Fatalf("session after logout err = %v", err)
+	}
 }
 
 func TestSearchPeopleOfficialReturnsUnsupported(t *testing.T) {
@@ -491,7 +709,7 @@ func TestPostCreateImageMissingFileFails(t *testing.T) {
 
 func TestPostCreateWithExpiredSessionFailsAuth(t *testing.T) {
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:     "default",
 		Transport:   "official",
 		AccessToken: "stale",

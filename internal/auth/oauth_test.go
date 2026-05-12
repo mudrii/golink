@@ -91,7 +91,7 @@ func TestWaitForOAuthCallback(t *testing.T) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	resultCh := make(chan *CallbackResult, 1)
@@ -119,8 +119,8 @@ func TestWaitForOAuthCallback(t *testing.T) {
 		if result.Code != "abc" {
 			t.Fatalf("unexpected code: %q", result.Code)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for callback result")
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for callback result: %v", ctx.Err())
 	}
 }
 
@@ -368,21 +368,10 @@ func TestCompleteLogin(t *testing.T) {
 	}
 
 	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	callbackDone := make(chan error, 1)
-	go func() {
-		time.Sleep(25 * time.Millisecond)
-		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
-		response, callbackErr := http.Get(callbackURL)
-		if callbackErr != nil {
-			callbackDone <- callbackErr
-			return
-		}
-		_ = response.Body.Close()
-		callbackDone <- nil
-	}()
+	callbackDone := fireOAuthCallbackWhenReady(t, ctx, request)
 
 	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
 		HTTPClient:  server.Client(),
@@ -451,21 +440,10 @@ func TestCompleteLoginOAuth2UsesClientSecret(t *testing.T) {
 		t.Fatalf("build login request: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	callbackDone := make(chan error, 1)
-	go func() {
-		time.Sleep(25 * time.Millisecond)
-		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
-		response, callbackErr := http.Get(callbackURL)
-		if callbackErr != nil {
-			callbackDone <- callbackErr
-			return
-		}
-		_ = response.Body.Close()
-		callbackDone <- nil
-	}()
+	callbackDone := fireOAuthCallbackWhenReady(t, ctx, request)
 
 	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
 		HTTPClient:      server.Client(),
@@ -515,21 +493,10 @@ func TestCompleteLogin_UsesManualMemberURNWhenUserInfoUnavailable(t *testing.T) 
 		t.Fatalf("build login request: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	callbackDone := make(chan error, 1)
-	go func() {
-		time.Sleep(25 * time.Millisecond)
-		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
-		response, callbackErr := http.Get(callbackURL)
-		if callbackErr != nil {
-			callbackDone <- callbackErr
-			return
-		}
-		_ = response.Body.Close()
-		callbackDone <- nil
-	}()
+	callbackDone := fireOAuthCallbackWhenReady(t, ctx, request)
 
 	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
 		HTTPClient:      server.Client(),
@@ -584,21 +551,10 @@ func TestCompleteLogin_UsesProfileIDWhenUserInfoUnavailable(t *testing.T) {
 		t.Fatalf("build login request: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
-	callbackDone := make(chan error, 1)
-	go func() {
-		time.Sleep(25 * time.Millisecond)
-		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
-		response, callbackErr := http.Get(callbackURL)
-		if callbackErr != nil {
-			callbackDone <- callbackErr
-			return
-		}
-		_ = response.Body.Close()
-		callbackDone <- nil
-	}()
+	callbackDone := fireOAuthCallbackWhenReady(t, ctx, request)
 
 	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
 		HTTPClient:      server.Client(),
@@ -620,6 +576,38 @@ func TestCompleteLogin_UsesProfileIDWhenUserInfoUnavailable(t *testing.T) {
 	if err := <-callbackDone; err != nil {
 		t.Fatalf("callback get: %v", err)
 	}
+}
+
+func fireOAuthCallbackWhenReady(t *testing.T, ctx context.Context, request *LoginRequest) <-chan error {
+	t.Helper()
+
+	done := make(chan error, 1)
+	go func() {
+		callbackURL := fmt.Sprintf("%s?code=callback-code&state=%s", request.RedirectURI, request.State)
+		for {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, callbackURL, http.NoBody)
+			if err != nil {
+				done <- err
+				return
+			}
+			response, err := http.DefaultClient.Do(req)
+			if err == nil {
+				_ = response.Body.Close()
+				done <- nil
+				return
+			}
+
+			timer := time.NewTimer(10 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				done <- ctx.Err()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+	return done
 }
 
 func TestSplitScopesAllowsCommaSeparatedTokens(t *testing.T) {

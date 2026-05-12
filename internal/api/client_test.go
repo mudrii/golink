@@ -42,7 +42,7 @@ func TestClientAddsHeadersAndAuth(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 
-	resp, err := client.Do(context.Background(), http.MethodGet, "/rest/ping", nil)
+	resp, err := client.Do(t.Context(), http.MethodGet, "/rest/ping", nil)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestClientRetriesOn429And5xx(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 
-	resp, err := client.Do(context.Background(), http.MethodGet, "/rest/x", nil)
+	resp, err := client.Do(t.Context(), http.MethodGet, "/rest/x", nil)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestClientDecodesError(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 
-	_, err = client.Do(context.Background(), http.MethodGet, "/rest/x", nil)
+	_, err = client.Do(t.Context(), http.MethodGet, "/rest/x", nil)
 	apiErr, ok := AsError(err)
 	if !ok {
 		t.Fatalf("expected *Error, got %T: %v", err, err)
@@ -154,6 +154,44 @@ func TestParseRateLimitUnixSeconds(t *testing.T) {
 	}
 }
 
+func TestNormalizeRateResetVariants(t *testing.T) {
+	if got := normalizeRateReset(" 2026-04-16T12:00:00Z "); got != "2026-04-16T12:00:00Z" {
+		t.Fatalf("RFC3339 reset = %q", got)
+	}
+	if got := normalizeRateReset("not-a-time"); got != "not-a-time" {
+		t.Fatalf("opaque reset = %q", got)
+	}
+	if got := normalizeRateReset("  "); got != "" {
+		t.Fatalf("blank reset = %q", got)
+	}
+}
+
+func TestResolveURLEdgeCases(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		BaseURL: "https://api.linkedin.test/base/",
+		Token: func(_ context.Context) (string, error) {
+			return "token", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	if _, err := client.resolveURL(""); err == nil {
+		t.Fatal("expected empty relative path error")
+	}
+	if _, err := client.resolveURL("http://[::1"); err == nil {
+		t.Fatal("expected invalid URL error")
+	}
+	resolved, err := client.resolveURL("../rest/posts?q=hello%20world#frag")
+	if err != nil {
+		t.Fatalf("resolve URL: %v", err)
+	}
+	if got, want := resolved.String(), "https://api.linkedin.test/rest/posts?q=hello%20world#frag"; got != want {
+		t.Fatalf("resolved URL = %q, want %q", got, want)
+	}
+}
+
 func TestClientNoTokenRejects(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -170,7 +208,7 @@ func TestClientNoTokenRejects(t *testing.T) {
 		t.Fatalf("new client: %v", err)
 	}
 
-	_, err = client.Do(context.Background(), http.MethodGet, "/rest/x", nil)
+	_, err = client.Do(t.Context(), http.MethodGet, "/rest/x", nil)
 	apiErr, ok := AsError(err)
 	if !ok {
 		t.Fatalf("expected *Error, got %T: %v", err, err)

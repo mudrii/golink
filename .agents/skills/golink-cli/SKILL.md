@@ -1,6 +1,13 @@
 ---
 name: golink-cli
-description: Use this skill when an agent needs to operate the golink LinkedIn CLI: setup verification, auth login/status/refresh/logout, dry-runs, JSON/JSONL output, creating/editing/deleting/resharing posts, comments, reactions, organization posting, scheduled posts, approval gates, plan/execute workflows, record/replay, privacy-safe automation, or troubleshooting LinkedIn app scopes and redirect configuration. Applies to Codex, OpenClaw, Hermes, and other CLI-capable agents.
+description: |
+  Use this skill when an agent needs to operate the golink LinkedIn CLI: setup
+  verification, auth login/status/refresh/logout, dry-runs, JSON/JSONL output,
+  creating/editing/deleting/resharing posts, comments, reactions, organization
+  posting, scheduled posts, approval gates, plan/execute workflows, record/
+  replay, privacy-safe automation, or troubleshooting LinkedIn app scopes and
+  redirect configuration. Applies to Codex, OpenClaw, Hermes, and other CLI-
+  capable agents.
 ---
 
 # golink CLI

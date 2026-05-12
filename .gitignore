@@ -28,3 +28,11 @@ AGENTS.md
 .claude/
 docs/
 CLAUDE.md
+
+# Other agent runtimes
+.gemini/
+.opencode/
+GEMINI.md
+
+# graphify knowledge graph (regenerate locally with `graphify update .`)
+graphify-out/

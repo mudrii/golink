@@ -44,6 +44,8 @@ func TestOfficialProfileMe(t *testing.T) {
 		if r.URL.Path != "/v2/userinfo" {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
+		w.Header().Set("X-RateLimit-Remaining", "42")
+		w.Header().Set("X-RateLimit-Reset", "1770000000")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"sub":     "urn:li:person:abc123",
 			"name":    "Ion Mudreac",
@@ -56,7 +58,7 @@ func TestOfficialProfileMe(t *testing.T) {
 		})
 	}, "urn:li:person:abc123")
 
-	profile, err := o.ProfileMe(context.Background())
+	profile, err := o.ProfileMe(t.Context())
 	if err != nil {
 		t.Fatalf("profile me: %v", err)
 	}
@@ -65,6 +67,13 @@ func TestOfficialProfileMe(t *testing.T) {
 	}
 	if profile.Locale.Country != "MY" || profile.Locale.Language != "en" {
 		t.Fatalf("locale = %+v", profile.Locale)
+	}
+	if o.Name() != "official" {
+		t.Fatalf("name = %q", o.Name())
+	}
+	rate := o.LastRateLimit()
+	if rate == nil || rate.Remaining == nil || *rate.Remaining != 42 {
+		t.Fatalf("rate limit = %+v", rate)
 	}
 }
 
@@ -94,7 +103,7 @@ func TestOfficialCreatePost(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	}, "urn:li:person:abc123")
 
-	post, err := o.CreatePost(context.Background(), CreatePostRequest{
+	post, err := o.CreatePost(t.Context(), CreatePostRequest{
 		Text:       "Hello world",
 		Visibility: output.VisibilityPublic,
 	})
@@ -137,7 +146,7 @@ func TestOfficialListPostsDefaultsToSessionAuthor(t *testing.T) {
 		})
 	}, "urn:li:person:abc123")
 
-	list, err := o.ListPosts(context.Background(), "", 5, 0)
+	list, err := o.ListPosts(t.Context(), "", 5, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -160,12 +169,41 @@ func TestOfficialDeletePostEncodesPathURN(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}, "urn:li:person:abc123")
 
-	data, err := o.DeletePost(context.Background(), "urn:li:share:9001")
+	data, err := o.DeletePost(t.Context(), "urn:li:share:9001")
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if !data.Deleted || data.ID != "urn:li:share:9001" {
 		t.Fatalf("data = %+v", data)
+	}
+}
+
+func TestOfficialGetPost(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if r.URL.EscapedPath() != "/rest/posts/urn%3Ali%3Ashare%3A9001" {
+			t.Fatalf("path = %q", r.URL.EscapedPath())
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":         "urn:li:share:9001",
+			"commentary": "retrieved post",
+			"author":     "urn:li:person:abc123",
+			"visibility": "PUBLIC",
+			"createdAt":  int64(1770000000123),
+		})
+	}, "urn:li:person:abc123")
+
+	post, err := o.GetPost(t.Context(), "urn:li:share:9001")
+	if err != nil {
+		t.Fatalf("get post: %v", err)
+	}
+	if post.ID != "urn:li:share:9001" || post.Text != "retrieved post" {
+		t.Fatalf("post = %+v", post)
+	}
+	if post.PublishTime != 1770000000 {
+		t.Fatalf("publish_time = %d", post.PublishTime)
 	}
 }
 
@@ -190,12 +228,47 @@ func TestOfficialAddCommentUsesActivityURN(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	}, "urn:li:person:abc123")
 
-	comment, err := o.AddComment(context.Background(), "urn:li:share:9001", "nice")
+	comment, err := o.AddComment(t.Context(), "urn:li:share:9001", "nice")
 	if err != nil {
 		t.Fatalf("comment: %v", err)
 	}
 	if comment.ID != "urn:li:comment:99" {
 		t.Fatalf("id = %q", comment.ID)
+	}
+}
+
+func TestOfficialListComments(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if r.URL.EscapedPath() != "/rest/socialActions/urn%3Ali%3Ashare%3A9001/comments" {
+			t.Fatalf("path = %q", r.URL.EscapedPath())
+		}
+		if r.URL.Query().Get("count") != "2" || r.URL.Query().Get("start") != "3" {
+			t.Fatalf("query = %q", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"elements": []map[string]any{
+				{
+					"id":      "urn:li:comment:1",
+					"actor":   "urn:li:person:abc123",
+					"message": map[string]string{"text": "first"},
+					"created": int64(1770000000000),
+				},
+			},
+		})
+	}, "urn:li:person:abc123")
+
+	comments, err := o.ListComments(t.Context(), "urn:li:share:9001", 2, 3)
+	if err != nil {
+		t.Fatalf("list comments: %v", err)
+	}
+	if comments.PostURN != "urn:li:share:9001" || comments.Count != 2 || comments.Start != 3 {
+		t.Fatalf("comments metadata = %+v", comments)
+	}
+	if len(comments.Items) != 1 || comments.Items[0].Text != "first" {
+		t.Fatalf("comments = %+v", comments.Items)
 	}
 }
 
@@ -218,7 +291,7 @@ func TestOfficialAddReactionEncodesActor(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	}, "urn:li:person:abc123")
 
-	data, err := o.AddReaction(context.Background(), "urn:li:share:9001", output.ReactionPraise)
+	data, err := o.AddReaction(t.Context(), "urn:li:share:9001", output.ReactionPraise)
 	if err != nil {
 		t.Fatalf("reaction: %v", err)
 	}
@@ -227,12 +300,46 @@ func TestOfficialAddReactionEncodesActor(t *testing.T) {
 	}
 }
 
+func TestOfficialListReactions(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if !strings.Contains(r.URL.RequestURI(), "/rest/reactions/(entity:urn%3Ali%3Ashare%3A9001)") {
+			t.Fatalf("request URI = %q", r.URL.RequestURI())
+		}
+		if r.URL.Query().Get("q") != "entity" {
+			t.Fatalf("query = %q", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"elements": []map[string]any{
+				{
+					"actor":        "urn:li:person:abc123",
+					"reactionType": "LIKE",
+					"created":      int64(1770000000000),
+				},
+			},
+		})
+	}, "urn:li:person:abc123")
+
+	reactions, err := o.ListReactions(t.Context(), "urn:li:share:9001")
+	if err != nil {
+		t.Fatalf("list reactions: %v", err)
+	}
+	if reactions.Count != 1 || len(reactions.Items) != 1 {
+		t.Fatalf("reactions = %+v", reactions)
+	}
+	if reactions.Items[0].Type != output.ReactionLike {
+		t.Fatalf("reaction type = %q", reactions.Items[0].Type)
+	}
+}
+
 func TestOfficialSearchPeopleReturnsUnavailable(t *testing.T) {
 	o, _ := newTestOfficial(t, func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("search people must not hit the network on official transport")
 	}, "urn:li:person:abc123")
 
-	_, err := o.SearchPeople(context.Background(), SearchPeopleRequest{Keywords: "engineer"})
+	_, err := o.SearchPeople(t.Context(), SearchPeopleRequest{Keywords: "engineer"})
 	if !errors.Is(err, &ErrFeatureUnavailable{}) {
 		t.Fatalf("expected feature unavailable, got %v", err)
 	}
@@ -257,7 +364,7 @@ func TestOfficialInitializeImageUpload(t *testing.T) {
 		})
 	}, "urn:li:person:abc123")
 
-	uploadURL, imageURN, err := o.InitializeImageUpload(context.Background(), "urn:li:person:abc123")
+	uploadURL, imageURN, err := o.InitializeImageUpload(t.Context(), "urn:li:person:abc123")
 	if err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
@@ -266,6 +373,28 @@ func TestOfficialInitializeImageUpload(t *testing.T) {
 	}
 	if imageURN != "urn:li:image:99999" {
 		t.Fatalf("imageURN = %q", imageURN)
+	}
+}
+
+func TestOfficialInitializeImageUploadRejectsMissingFields(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing upload URL", body: `{"value":{"image":"urn:li:image:99999"}}`, want: "missing uploadUrl"},
+		{name: "missing image URN", body: `{"value":{"uploadUrl":"https://upload.example.com/signed/abc"}}`, want: "missing image urn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}, "urn:li:person:abc123")
+
+			_, _, err := o.InitializeImageUpload(t.Context(), "urn:li:person:abc123")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -293,7 +422,7 @@ func TestOfficialUploadImageBinary(t *testing.T) {
 		t.Fatalf("write temp file: %v", err)
 	}
 
-	if err := o.UploadImageBinary(context.Background(), uploadServer.URL+"/upload", tmpFile); err != nil {
+	if err := o.UploadImageBinary(t.Context(), uploadServer.URL+"/upload", tmpFile); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 	if gotMethod != http.MethodPut {
@@ -307,6 +436,66 @@ func TestOfficialUploadImageBinary(t *testing.T) {
 	}
 }
 
+func TestOfficialUploadImageBinaryRejectsClientError(t *testing.T) {
+	uploadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer uploadServer.Close()
+
+	o, _ := newTestOfficial(t, func(_ http.ResponseWriter, _ *http.Request) {}, "urn:li:person:abc123")
+	tmpFile := t.TempDir() + "/test.jpg"
+	if err := os.WriteFile(tmpFile, []byte("fake-image-bytes"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	err := o.UploadImageBinary(t.Context(), uploadServer.URL+"/upload", tmpFile)
+	if err == nil || !strings.Contains(err.Error(), "unexpected status 400") {
+		t.Fatalf("upload error = %v, want 400", err)
+	}
+}
+
+func TestOfficialUploadImageBinaryRejectsEmptyFileAndBadURL(t *testing.T) {
+	o, _ := newTestOfficial(t, func(_ http.ResponseWriter, _ *http.Request) {}, "urn:li:person:abc123")
+	emptyFile := t.TempDir() + "/empty.jpg"
+	if err := os.WriteFile(emptyFile, nil, 0o600); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
+	if err := o.UploadImageBinary(t.Context(), "https://upload.example.com/signed", emptyFile); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty upload error = %v", err)
+	}
+
+	tmpFile := t.TempDir() + "/test.jpg"
+	if err := os.WriteFile(tmpFile, []byte("fake-image-bytes"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+	if err := o.UploadImageBinary(t.Context(), "http://[::1", tmpFile); err == nil || !strings.Contains(err.Error(), "build upload request") {
+		t.Fatalf("bad URL error = %v", err)
+	}
+}
+
+func TestOfficialUploadImageBinaryExhaustsRetries(t *testing.T) {
+	var attempts int
+	uploadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer uploadServer.Close()
+
+	o, _ := newTestOfficial(t, func(_ http.ResponseWriter, _ *http.Request) {}, "urn:li:person:abc123")
+	tmpFile := t.TempDir() + "/test.jpg"
+	if err := os.WriteFile(tmpFile, []byte("fake-image-bytes"), 0o600); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	err := o.UploadImageBinary(t.Context(), uploadServer.URL+"/upload", tmpFile)
+	if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
+		t.Fatalf("upload error = %v, want retry exhaustion 500", err)
+	}
+	if attempts != 4 {
+		t.Fatalf("attempts = %d, want 4", attempts)
+	}
+}
+
 func TestOfficialUploadImageBinaryRejectsOversized(t *testing.T) {
 	o, _ := newTestOfficial(t, func(_ http.ResponseWriter, _ *http.Request) {}, "urn:li:person:abc123")
 
@@ -317,12 +506,23 @@ func TestOfficialUploadImageBinaryRejectsOversized(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	err := o.UploadImageBinary(context.Background(), "https://upload.example.com/signed", tmpFile)
+	err := o.UploadImageBinary(t.Context(), "https://upload.example.com/signed", tmpFile)
 	if err == nil {
 		t.Fatal("expected error for oversized file")
 	}
 	if !strings.Contains(err.Error(), "10MB") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestUploadRetryWaitStopsOnCancellationAndExhaustion(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if uploadRetryWait(ctx, 1, 4) {
+		t.Fatal("retry wait should stop when context is cancelled")
+	}
+	if uploadRetryWait(t.Context(), 4, 4) {
+		t.Fatal("retry wait should stop after max attempts")
 	}
 }
 
@@ -348,7 +548,7 @@ func TestOfficialEditPost204(t *testing.T) {
 	}, "urn:li:person:abc123")
 
 	text := "updated text"
-	data, err := o.EditPost(context.Background(), EditPostRequest{
+	data, err := o.EditPost(t.Context(), EditPostRequest{
 		PostURN: "urn:li:share:42",
 		Text:    &text,
 	})
@@ -363,6 +563,78 @@ func TestOfficialEditPost204(t *testing.T) {
 	}
 	if data.UpdatedAt.IsZero() {
 		t.Fatal("expected non-zero updated_at")
+	}
+}
+
+func TestOfficialEditPostJSONResponse(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":         "urn:li:share:42",
+			"commentary": "updated from body",
+			"author":     "urn:li:person:abc123",
+			"visibility": "PUBLIC",
+			"createdAt":  time.Date(2026, 4, 16, 10, 0, 0, 0, time.UTC).UnixMilli(),
+			"updatedAt":  time.Date(2026, 4, 16, 12, 30, 0, 0, time.UTC).UnixMilli(),
+		})
+	}, "urn:li:person:abc123")
+
+	text := "updated text"
+	data, err := o.EditPost(t.Context(), EditPostRequest{
+		PostURN: "urn:li:share:42",
+		Text:    &text,
+	})
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if data.Text != "updated from body" || data.AuthorURN != "urn:li:person:abc123" {
+		t.Fatalf("edit data = %+v", data)
+	}
+	if data.UpdatedAt.Format(time.RFC3339) != "2026-04-16T12:30:00Z" {
+		t.Fatalf("updated_at = %s", data.UpdatedAt)
+	}
+}
+
+func TestOfficialEditPostRetriesRateLimit(t *testing.T) {
+	attempts := 0
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"status":429,"code":"TOO_MANY_REQUESTS","message":"slow down"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}, "urn:li:person:abc123")
+
+	text := "updated text"
+	if _, err := o.EditPost(t.Context(), EditPostRequest{
+		PostURN: "urn:li:share:42",
+		Text:    &text,
+	}); err != nil {
+		t.Fatalf("edit after retry: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestOfficialEditPostBubblesDecodedError(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"status":422,"code":"VALIDATION_ERROR","message":"bad edit"}`)
+	}, "urn:li:person:abc123")
+
+	text := "updated text"
+	_, err := o.EditPost(t.Context(), EditPostRequest{
+		PostURN: "urn:li:share:42",
+		Text:    &text,
+	})
+	apiErr, ok := AsError(err)
+	if !ok {
+		t.Fatalf("expected api error, got %T: %v", err, err)
+	}
+	if !apiErr.IsValidation() || apiErr.Code != "VALIDATION_ERROR" {
+		t.Fatalf("api error = %+v, want validation", apiErr)
 	}
 }
 
@@ -387,7 +659,7 @@ func TestOfficialResharePost(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	}, "urn:li:person:abc123")
 
-	summary, err := o.ResharePost(context.Background(), ResharePostRequest{
+	summary, err := o.ResharePost(t.Context(), ResharePostRequest{
 		ParentURN:  "urn:li:share:1",
 		Commentary: "worth sharing",
 		Visibility: output.VisibilityPublic,
@@ -400,6 +672,50 @@ func TestOfficialResharePost(t *testing.T) {
 	}
 	if summary.Text != "worth sharing" {
 		t.Fatalf("text = %q", summary.Text)
+	}
+}
+
+func TestOfficialResharePostUsesBodyIDAndRejectsMissingID(t *testing.T) {
+	t.Run("body id", func(t *testing.T) {
+		o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "urn:li:share:body"})
+		}, "urn:li:person:abc123")
+
+		summary, err := o.ResharePost(t.Context(), ResharePostRequest{ParentURN: "urn:li:share:1"})
+		if err != nil {
+			t.Fatalf("reshare: %v", err)
+		}
+		if summary.ID != "urn:li:share:body" {
+			t.Fatalf("id = %q, want body id", summary.ID)
+		}
+	})
+	t.Run("missing id", func(t *testing.T) {
+		o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{}`)
+		}, "urn:li:person:abc123")
+
+		_, err := o.ResharePost(t.Context(), ResharePostRequest{ParentURN: "urn:li:share:1"})
+		if err == nil || !strings.Contains(err.Error(), "missing post urn") {
+			t.Fatalf("error = %v, want missing post urn", err)
+		}
+	})
+}
+
+func TestOfficialResharePostBubblesError(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"status":422,"code":"VALIDATION_ERROR","message":"bad reshare"}`)
+	}, "urn:li:person:abc123")
+
+	_, err := o.ResharePost(t.Context(), ResharePostRequest{ParentURN: "urn:li:share:1"})
+	apiErr, ok := AsError(err)
+	if !ok {
+		t.Fatalf("expected api error, got %T: %v", err, err)
+	}
+	if !apiErr.IsValidation() || apiErr.Code != "VALIDATION_ERROR" {
+		t.Fatalf("api error = %+v, want validation", apiErr)
 	}
 }
 
@@ -429,7 +745,7 @@ func TestOfficialResharePostVersionGate(t *testing.T) {
 		Now:       func() time.Time { return time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC) },
 	})
 
-	_, reshareErr := o.ResharePost(context.Background(), ResharePostRequest{
+	_, reshareErr := o.ResharePost(t.Context(), ResharePostRequest{
 		ParentURN:  "urn:li:share:1",
 		Commentary: "test",
 		Visibility: output.VisibilityPublic,
@@ -443,6 +759,70 @@ func TestOfficialResharePostVersionGate(t *testing.T) {
 	}
 	if !strings.Contains(fe.Reason, "202209") {
 		t.Fatalf("reason = %q", fe.Reason)
+	}
+}
+
+func TestOfficialListOrganizationsHydratesNames(t *testing.T) {
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/organizationAcls":
+			if r.URL.RawQuery != "q=roleAssignee&role=ADMINISTRATOR&state=APPROVED" {
+				t.Fatalf("query = %q", r.URL.RawQuery)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"elements": []map[string]any{
+					{
+						"organization": "urn:li:organization:111",
+						"role":         "ADMINISTRATOR",
+						"state":        "APPROVED",
+					},
+					{
+						"organization": "urn:li:organization:not-a-number",
+						"role":         "ADMINISTRATOR",
+						"state":        "APPROVED",
+					},
+					{
+						"organization": "urn:li:organization:222",
+						"role":         "ADMINISTRATOR",
+						"state":        "APPROVED",
+					},
+				},
+			})
+		case "/rest/organizations/111":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"localizedName": "Acme Corp",
+				"vanityName":    "acme",
+				"logoV2":        map[string]string{"original": "https://example.com/acme.png"},
+			})
+		case "/rest/organizations/222":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"localizedName": "Beta Ltd",
+				"vanityName":    "beta",
+			})
+		default:
+			t.Fatalf("unexpected path = %q", r.URL.Path)
+		}
+	}, "urn:li:person:abc123")
+
+	orgs, err := o.ListOrganizations(t.Context())
+	if err != nil {
+		t.Fatalf("list organizations: %v", err)
+	}
+	if orgs.Count != 3 || len(orgs.Items) != 3 {
+		t.Fatalf("orgs = %+v", orgs)
+	}
+	byURN := make(map[string]output.OrgListItem, len(orgs.Items))
+	for _, item := range orgs.Items {
+		byURN[item.URN] = item
+	}
+	if byURN["urn:li:organization:111"].Name != "Acme Corp" {
+		t.Fatalf("org 111 = %+v", byURN["urn:li:organization:111"])
+	}
+	if byURN["urn:li:organization:111"].LogoURL != "https://example.com/acme.png" {
+		t.Fatalf("org 111 logo = %q", byURN["urn:li:organization:111"].LogoURL)
+	}
+	if byURN["urn:li:organization:not-a-number"].Name != "" {
+		t.Fatalf("invalid org should not hydrate: %+v", byURN["urn:li:organization:not-a-number"])
 	}
 }
 
@@ -465,7 +845,7 @@ func TestOfficialCreatePostWithMedia(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	}, "urn:li:person:abc123")
 
-	post, err := o.CreatePost(context.Background(), CreatePostRequest{
+	post, err := o.CreatePost(t.Context(), CreatePostRequest{
 		Text:       "image post",
 		Visibility: output.VisibilityPublic,
 		MediaPayload: &MediaPayload{
@@ -487,7 +867,7 @@ func TestOfficialBubbles401(t *testing.T) {
 		_, _ = io.WriteString(w, `{"status":401,"code":"UNAUTHORIZED","message":"token expired"}`)
 	}, "urn:li:person:abc123")
 
-	_, err := o.ProfileMe(context.Background())
+	_, err := o.ProfileMe(t.Context())
 	apiErr, ok := AsError(err)
 	if !ok {
 		t.Fatalf("expected api error, got %T", err)
