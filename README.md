@@ -100,14 +100,15 @@ golink does NOT run a daemon. Operators invoke `schedule run` via cron, launchd,
 ## Installation
 
 ```sh
-go install github.com/mudrii/golink@v26.05.05
+go install github.com/mudrii/golink@v26.05.12
 ```
 
 Requires Go 1.26.3+.
 
-Homebrew, after the `v26.05.05` tag is published:
+Homebrew (tap lives in this repo's `Formula/` directory):
 
 ```sh
+brew tap mudrii/golink https://github.com/mudrii/golink
 brew install mudrii/golink/golink
 ```
 
