@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -14,7 +13,7 @@ import (
 func authenticatedStoreWithScopes(t *testing.T, scopes []string) auth.Store {
 	t.Helper()
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:     "default",
 		Transport:   "official",
 		AccessToken: "token-xyz",

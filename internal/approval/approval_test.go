@@ -1,8 +1,10 @@
 package approval_test
 
 import (
-	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +23,7 @@ func testEntry(id, cmd string) approval.Entry {
 }
 
 func TestMemoryStore_StageAndList(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	store := approval.NewMemoryStore()
 
 	e := testEntry("cmd_post_create_001", "post create")
@@ -49,7 +51,7 @@ func TestMemoryStore_StageAndList(t *testing.T) {
 }
 
 func TestMemoryStore_GrantAndRun(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	store := approval.NewMemoryStore()
 
 	e := testEntry("cmd_post_create_002", "post create")
@@ -80,7 +82,7 @@ func TestMemoryStore_GrantAndRun(t *testing.T) {
 }
 
 func TestMemoryStore_Deny(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	store := approval.NewMemoryStore()
 
 	e := testEntry("cmd_post_create_003", "post create")
@@ -99,7 +101,7 @@ func TestMemoryStore_Deny(t *testing.T) {
 }
 
 func TestMemoryStore_RunWithoutGrant(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	store := approval.NewMemoryStore()
 
 	e := testEntry("cmd_post_create_004", "post create")
@@ -114,7 +116,7 @@ func TestMemoryStore_RunWithoutGrant(t *testing.T) {
 }
 
 func TestMemoryStore_Cancel(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	store := approval.NewMemoryStore()
 
 	e := testEntry("cmd_post_create_005", "post create")
@@ -132,8 +134,34 @@ func TestMemoryStore_Cancel(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_StagedPathAndWrongStateTransitions(t *testing.T) {
+	ctx := t.Context()
+	store := approval.NewMemoryStore()
+
+	e := testEntry("cmd_post_create_006", "post create")
+	path, err := store.Stage(ctx, e)
+	if err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if got := store.StagedPath(e.CommandID); got != path {
+		t.Fatalf("staged path = %q, want %q", got, path)
+	}
+	if _, err := store.Stage(ctx, e); !errors.Is(err, approval.ErrAlreadyStaged) {
+		t.Fatalf("duplicate stage error = %v, want ErrAlreadyStaged", err)
+	}
+	if err := store.Complete(ctx, e.CommandID); !errors.Is(err, approval.ErrWrongState) {
+		t.Fatalf("complete pending error = %v, want ErrWrongState", err)
+	}
+	if err := store.Deny(ctx, e.CommandID); err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	if err := store.Cancel(ctx, e.CommandID); !errors.Is(err, approval.ErrWrongState) {
+		t.Fatalf("cancel denied error = %v, want ErrWrongState", err)
+	}
+}
+
 func TestMemoryStore_NotFound(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	store := approval.NewMemoryStore()
 
 	_, _, err := store.Show(ctx, "nonexistent")
@@ -183,6 +211,101 @@ func TestFileStore_StageListGrantRun(t *testing.T) {
 	items2, _ := store.List(ctx)
 	if items2[0].State != approval.StateCompleted {
 		t.Errorf("expected completed, got %s", items2[0].State)
+	}
+}
+
+func TestFileStore_DuplicateStageAndCorruptFiles(t *testing.T) {
+	dir := t.TempDir()
+	store := approval.NewFileStore(dir)
+	ctx := t.Context()
+
+	e := testEntry("cmd_file_duplicate_001", "post create")
+	if _, err := store.Stage(ctx, e); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if _, err := store.Stage(ctx, e); !errors.Is(err, approval.ErrAlreadyStaged) {
+		t.Fatalf("duplicate stage error = %v, want ErrAlreadyStaged", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "cmd_bad.pending.json"), []byte(`{`), 0o600); err != nil {
+		t.Fatalf("write corrupt approval: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmd_ignored.unknown.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write ignored approval: %v", err)
+	}
+
+	items, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("list should skip corrupt and unknown files; got %+v", items)
+	}
+
+	_, _, err = store.Show(ctx, "cmd_bad")
+	if err == nil || !strings.Contains(err.Error(), "unmarshal") {
+		t.Fatalf("show corrupt error = %v, want unmarshal error", err)
+	}
+}
+
+func TestFileStore_StageReturnsDirectoryCreationError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "approvals")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	store := approval.NewFileStore(filepath.Join(path, "nested"))
+
+	if _, err := store.Stage(t.Context(), testEntry("cmd_mkdir_fails", "post create")); err == nil || !strings.Contains(err.Error(), "approval mkdir") {
+		t.Fatalf("stage error = %v, want approval mkdir", err)
+	}
+}
+
+func TestFileStore_WrongStateAndInvalidCommandID(t *testing.T) {
+	dir := t.TempDir()
+	store := approval.NewFileStore(dir)
+	ctx := t.Context()
+
+	if _, err := store.Stage(ctx, testEntry("bad id with spaces", "post create")); err == nil {
+		t.Fatal("expected invalid command id error")
+	}
+
+	e := testEntry("cmd_wrong_state_001", "post create")
+	if _, err := store.Stage(ctx, e); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if err := store.Complete(ctx, e.CommandID); !errors.Is(err, approval.ErrNotFound) {
+		t.Fatalf("complete pending error = %v, want ErrNotFound", err)
+	}
+	if err := store.Deny(ctx, e.CommandID); err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	if err := store.Cancel(ctx, e.CommandID); !errors.Is(err, approval.ErrNotFound) {
+		t.Fatalf("cancel denied error = %v, want ErrNotFound", err)
+	}
+	if _, err := store.LoadApproved(ctx, e.CommandID); !errors.Is(err, approval.ErrWrongState) {
+		t.Fatalf("load denied error = %v, want ErrWrongState", err)
+	}
+}
+
+func TestResolvePath(t *testing.T) {
+	t.Setenv("GOLINK_APPROVAL_DIR", "/tmp/test-approvals")
+	if got := approval.ResolvePath(); got != "/tmp/test-approvals" {
+		t.Fatalf("env override path = %q", got)
+	}
+
+	t.Setenv("GOLINK_APPROVAL_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "/tmp/test-state")
+	want := "/tmp/test-state/golink/approvals"
+	if got := approval.ResolvePath(); got != want {
+		t.Fatalf("xdg path = %q, want %q", got, want)
+	}
+
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+	want = filepath.Join(".local", "state", "golink", "approvals")
+	if got := approval.ResolvePath(); got != want {
+		t.Fatalf("fallback path = %q, want %q", got, want)
 	}
 }
 

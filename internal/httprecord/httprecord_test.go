@@ -228,6 +228,110 @@ func TestCassetteRedactsPersonalData(t *testing.T) {
 	}
 }
 
+func TestCassetteRedactsOpaqueRequestBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`OK`))
+	}))
+	defer srv.Close()
+
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+	recorder, err := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
+	if err != nil {
+		t.Fatalf("Wrap record: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/upload", strings.NewReader("raw-private-bytes"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := (&http.Client{Transport: recorder}).Do(req)
+	if err != nil {
+		t.Fatalf("record request: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	raw, err := os.ReadFile(cassettePath)
+	if err != nil {
+		t.Fatalf("read cassette: %v", err)
+	}
+	if strings.Contains(string(raw), "raw-private-bytes") {
+		t.Fatalf("opaque request body leaked: %s", raw)
+	}
+	if !strings.Contains(string(raw), `{\"redacted\":true}`) {
+		t.Fatalf("cassette missing redacted placeholder: %s", raw)
+	}
+}
+
+func TestCassetteRedactsFormRequestBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`OK`))
+	}))
+	defer srv.Close()
+
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+	recorder, err := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
+	if err != nil {
+		t.Fatalf("Wrap record: %v", err)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/rest/forms", strings.NewReader("client_secret=secret&visibility=PUBLIC"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := (&http.Client{Transport: recorder}).Do(req)
+	if err != nil {
+		t.Fatalf("record request: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	raw, err := os.ReadFile(cassettePath)
+	if err != nil {
+		t.Fatalf("read cassette: %v", err)
+	}
+	cassette := string(raw)
+	if strings.Contains(cassette, "client_secret=secret") {
+		t.Fatalf("form request body leaked: %s", cassette)
+	}
+	if !strings.Contains(cassette, "visibility=PUBLIC") {
+		t.Fatalf("cassette missing safe form value: %s", cassette)
+	}
+}
+
+func TestRecordRejectsOversizedResponse(t *testing.T) {
+	oversized := strings.Repeat("x", 8<<20+1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(oversized))
+	}))
+	defer srv.Close()
+
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+	recorder, err := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
+	if err != nil {
+		t.Fatalf("Wrap record: %v", err)
+	}
+
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/oversized", http.NoBody)
+	resp, err := recorder.RoundTrip(req)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected oversized response error")
+	}
+	if !strings.Contains(err.Error(), "response body exceeds") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(cassettePath); !os.IsNotExist(statErr) {
+		t.Fatalf("oversized response should not be recorded, statErr=%v", statErr)
+	}
+}
+
 func TestLoadedCassetteSaveRedactsPersonalData(t *testing.T) {
 	dir := t.TempDir()
 	inPath := filepath.Join(dir, "in.jsonl")

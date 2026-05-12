@@ -12,6 +12,9 @@ func TestEncodeURN(t *testing.T) {
 		{"ugcPost", "urn:li:ugcPost:7123", "urn%3Ali%3AugcPost%3A7123", false},
 		{"share", "urn:li:share:45", "urn%3Ali%3Ashare%3A45", false},
 		{"percent encoded input", "urn:li:share:%3A45", "urn%3Ali%3Ashare%3A%253A45", false},
+		{"path delimiter", "urn:li:share:45/extra", "urn%3Ali%3Ashare%3A45%2Fextra", false},
+		{"query delimiter", "urn:li:share:45?foo=bar&baz=1", "urn%3Ali%3Ashare%3A45%3Ffoo%3Dbar%26baz%3D1", false},
+		{"fragment delimiter", "urn:li:share:45#frag", "urn%3Ali%3Ashare%3A45%23frag", false},
 		{"empty", "", "", true},
 		{"no prefix", "7123", "", true},
 	} {

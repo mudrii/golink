@@ -2,9 +2,10 @@ package cmd
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,6 +16,24 @@ import (
 	"github.com/mudrii/golink/internal/auth"
 	outputtest "github.com/mudrii/golink/internal/output"
 )
+
+type staticRoundTripper struct {
+	resp *http.Response
+	err  error
+}
+
+func (rt staticRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return rt.resp, rt.err
+}
+
+type closeErrorBody struct {
+	*strings.Reader
+	err error
+}
+
+func (b closeErrorBody) Close() error {
+	return b.err
+}
 
 // validDoctorSession returns a well-formed authenticated session for use in doctor tests.
 func validDoctorSession(now time.Time) auth.Session {
@@ -50,7 +69,7 @@ func executeDoctorCommand(t *testing.T, args []string, opts testDepsOptions, use
 		userinfoURL = userinfoSrv.URL
 	}
 
-	code := ExecuteContext(context.Background(), args, Dependencies{
+	code := ExecuteContext(t.Context(), args, Dependencies{
 		Stdout:           stdout,
 		Stderr:           stderr,
 		LoginRunner:      opts.loginRunner,
@@ -76,7 +95,7 @@ func TestDoctorHealthOK(t *testing.T) {
 	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
 	store := auth.NewMemoryStore()
 	sess := validDoctorSession(now)
-	if err := store.SaveSession(context.Background(), sess); err != nil {
+	if err := store.SaveSession(t.Context(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
 
@@ -121,7 +140,7 @@ func TestDoctorExpiredTokenWarning(t *testing.T) {
 	sess := validDoctorSession(now)
 	// Token expires in 48 hours — less than 168h threshold
 	sess.ExpiresAt = now.Add(48 * time.Hour)
-	if err := store.SaveSession(context.Background(), sess); err != nil {
+	if err := store.SaveSession(t.Context(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
 
@@ -198,7 +217,7 @@ func TestDoctorProbe401Error(t *testing.T) {
 	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
 	store := auth.NewMemoryStore()
 	sess := validDoctorSession(now)
-	if err := store.SaveSession(context.Background(), sess); err != nil {
+	if err := store.SaveSession(t.Context(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
 
@@ -244,6 +263,58 @@ func TestDoctorProbe401Error(t *testing.T) {
 	}
 }
 
+func TestRunUserinfoProbeBodyErrorBranches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		resp *http.Response
+		want string
+	}{
+		{
+			name: "non-200 close error",
+			resp: &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     make(http.Header),
+				Body:       closeErrorBody{Reader: strings.NewReader("server failed"), err: errors.New("close failed")},
+			},
+			want: "body close: close failed",
+		},
+		{
+			name: "decode error",
+			resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("{")),
+			},
+			want: "decode response",
+		},
+		{
+			name: "close error after decode",
+			resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       closeErrorBody{Reader: strings.NewReader(`{"sub":"urn:li:person:abc"}`), err: errors.New("close failed")},
+			},
+			want: "body close: close failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: staticRoundTripper{resp: tc.resp}}
+			probe := runUserinfoProbe(t.Context(), client, time.Second, "token", "https://example.com/userinfo")
+			if !strings.Contains(probe.Error, tc.want) {
+				t.Fatalf("probe error = %q, want %q", probe.Error, tc.want)
+			}
+		})
+	}
+}
+
+func TestDoctorAuditPathUsesCustomSetting(t *testing.T) {
+	a := newCoverageApp(t)
+	a.settings.AuditPath = "/tmp/custom-audit.jsonl"
+	if got := a.doctorAuditPath(); got != "/tmp/custom-audit.jsonl" {
+		t.Fatalf("doctorAuditPath = %q", got)
+	}
+}
+
 func TestDoctorStrictWarningsExit2(t *testing.T) {
 	// No session → warnings → --strict should exit 2.
 	code, _, _ := executeTestCommand(t, []string{"--json", "doctor", "--strict"}, testDepsOptions{})
@@ -258,7 +329,7 @@ func TestDoctorStrictOKExit0(t *testing.T) {
 	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
 	store := auth.NewMemoryStore()
 	sess := validDoctorSession(now)
-	if err := store.SaveSession(context.Background(), sess); err != nil {
+	if err := store.SaveSession(t.Context(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
 
@@ -282,7 +353,7 @@ func TestDoctorFeatureMapScopes(t *testing.T) {
 	store := auth.NewMemoryStore()
 	sess := validDoctorSession(now)
 	sess.Scopes = []string{"openid", "w_member_social_feed"}
-	if err := store.SaveSession(context.Background(), sess); err != nil {
+	if err := store.SaveSession(t.Context(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
 
@@ -334,7 +405,7 @@ func TestDoctorSchemaValidation(t *testing.T) {
 	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
 	store := auth.NewMemoryStore()
 	sess := validDoctorSession(now)
-	if err := store.SaveSession(context.Background(), sess); err != nil {
+	if err := store.SaveSession(t.Context(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
 
@@ -369,6 +440,12 @@ func TestWriteDoctorText(t *testing.T) {
 		Environment: outputtest.DoctorEnvironment{
 			GOLINKClientID:   true,
 			GOLINKAPIVersion: "2026-04-17",
+			GOLINKRedirect:   "8080",
+			GOLINKJSON:       "1",
+			GOLINKTransport:  "unofficial",
+			GOLINKOutput:     "compact",
+			GOLINKAudit:      "off",
+			GOLINKAuditPath:  "/tmp/env-audit.jsonl",
 			ConfigPath:       "/tmp/config.yaml",
 		},
 		Session: outputtest.DoctorSession{
@@ -413,6 +490,12 @@ func TestWriteDoctorText(t *testing.T) {
 		"Session (profile: default)",
 		"LinkedIn probe",
 		"Feature support",
+		"GOLINK_REDIRECT_PORT: 8080",
+		"GOLINK_JSON:        1",
+		"GOLINK_TRANSPORT:   unofficial",
+		"GOLINK_OUTPUT:      compact",
+		"GOLINK_AUDIT:       off",
+		"GOLINK_AUDIT_PATH:  /tmp/env-audit.jsonl",
 		"Warnings",
 		"Errors",
 		"Health: error",

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/mudrii/golink/internal/api"
 	"github.com/mudrii/golink/internal/approval"
 	"github.com/mudrii/golink/internal/audit"
+	"github.com/mudrii/golink/internal/config"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/mudrii/golink/internal/schedule"
@@ -122,7 +124,7 @@ func runBatch(t *testing.T, args []string, transport api.Transport, istore idemp
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
 	store := authenticatedStore(t)
-	code := ExecuteContext(context.Background(), args, Dependencies{
+	code := ExecuteContext(t.Context(), args, Dependencies{
 		Stdout:           stdout,
 		Stderr:           stderr,
 		Now:              func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
@@ -261,9 +263,9 @@ func TestBatchResume(t *testing.T) {
 	istore := idempotency.NewMemoryStore()
 
 	ops := []string{
-		`{"command":"post create","args":{"text":"op1","visibility":"PUBLIC"}}`,
-		`{"command":"post create","args":{"text":"op2","visibility":"PUBLIC"}}`,
-		`{"command":"post create","args":{"text":"op3","visibility":"PUBLIC"}}`,
+		`{"command":"post create","args":{"text":"operation one","visibility":"PUBLIC"}}`,
+		`{"command":"post create","args":{"text":"operation two","visibility":"PUBLIC"}}`,
+		`{"command":"post create","args":{"text":"operation three","visibility":"PUBLIC"}}`,
 	}
 	opsPath := writeOpsFile(t, ops)
 
@@ -294,6 +296,63 @@ func TestBatchResume(t *testing.T) {
 	}
 }
 
+func TestBatchRequireApprovalRejectsInvalidPreviewValues(t *testing.T) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	astore := approval.NewMemoryStore()
+	sink := audit.NewMemorySink()
+	opsPath := writeOpsFile(t, []string{
+		`{"command":"post create","args":{"text":"valid approval text","visibility":"NOT_A_VISIBILITY"},"require_approval":true}`,
+		`{"command":"react add","args":{"post_urn":"urn:li:share:1","type":"NOT_A_REACTION"},"require_approval":true}`,
+		`{"command":"post delete","args":{},"require_approval":true}`,
+		`{"command":"comment add","args":{"text":"valid comment"},"require_approval":true}`,
+		`{"command":"react add","args":{},"require_approval":true}`,
+	})
+
+	code := ExecuteContext(t.Context(), []string{"--json", "batch", opsPath}, Dependencies{
+		Stdout:           stdout,
+		Stderr:           stderr,
+		Now:              func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
+		SessionStore:     authenticatedStore(t),
+		IsInteractive:    func() bool { return false },
+		TransportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		AuditSink:        sink,
+		IdempotencyStore: idempotency.NewMemoryStore(),
+		ApprovalStore:    astore,
+	}, BuildInfo{Version: "test"})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d stderr=%s", code, stderr)
+	}
+
+	lines := parseBatchLines(t, stdout)
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 output lines, got %d: %s", len(lines), stdout.String())
+	}
+	for i, line := range lines {
+		data := line["data"].(map[string]any)
+		if data["status"] != "validation_error" {
+			t.Fatalf("line %d: expected validation_error, got %v", i+1, data["status"])
+		}
+	}
+
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no staged approvals, got %d", len(items))
+	}
+	entries := sink.Entries()
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 validation audit entries, got %+v", entries)
+	}
+	for i, entry := range entries {
+		if entry.Status != "validation_error" || entry.ErrorCode != string(output.ErrorCodeValidation) {
+			t.Fatalf("audit entry %d = %+v, want validation_error", i+1, entry)
+		}
+	}
+}
+
 func TestBatchStrictExitCode(t *testing.T) {
 	ct := &countingTransport{inner: &fakeTransport{name: "official"}}
 	istore := idempotency.NewMemoryStore()
@@ -304,9 +363,17 @@ func TestBatchStrictExitCode(t *testing.T) {
 	}
 	opsPath := writeOpsFile(t, ops)
 
-	code, _, _ := runBatch(t, []string{"--json", "batch", "--strict", opsPath}, ct, istore)
+	code, stdout, _ := runBatch(t, []string{"--json", "batch", "--strict", opsPath}, ct, istore)
 	if code != 2 {
 		t.Errorf("expected exit code 2 with --strict and op error, got %d", code)
+	}
+	lines := parseBatchLines(t, stdout)
+	if len(lines) != 1 {
+		t.Fatalf("lines = %d, want 1", len(lines))
+	}
+	data := lines[0]["data"].(map[string]any)
+	if data["status"] != "error" || data["code"] != string(output.ErrorCodeValidation) {
+		t.Fatalf("structured error data = %+v", data)
 	}
 }
 
@@ -318,7 +385,7 @@ func TestBatchPostScheduleRequireApprovalRejected(t *testing.T) {
 		`{"command":"post schedule","args":{"at":"2026-04-17T14:00:00Z","text":"scheduled"},"require_approval":true}`,
 	})
 
-	code := ExecuteContext(context.Background(), []string{"--json", "batch", opsPath}, Dependencies{
+	code := ExecuteContext(t.Context(), []string{"--json", "batch", opsPath}, Dependencies{
 		Stdout:           stdout,
 		Stderr:           stderr,
 		Now:              func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
@@ -345,7 +412,7 @@ func TestBatchPostScheduleRequireApprovalRejected(t *testing.T) {
 		t.Fatalf("unexpected error: %v", data["error"])
 	}
 
-	items, err := astore.List(context.Background())
+	items, err := astore.List(t.Context())
 	if err != nil {
 		t.Fatalf("list approvals: %v", err)
 	}
@@ -364,7 +431,7 @@ func TestBatchStdinInput(t *testing.T) {
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
 	store := authenticatedStore(t)
-	code := ExecuteContext(context.Background(), []string{"batch", "--help"}, Dependencies{
+	code := ExecuteContext(t.Context(), []string{"batch", "--help"}, Dependencies{
 		Stdout:           stdout,
 		Stderr:           stderr,
 		Now:              func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
@@ -393,7 +460,7 @@ func TestBatchRunOpDeleteDryRunAndValidation(t *testing.T) {
 		transport: &fakeTransport{name: "official"},
 	}
 
-	data, cmdID, status, err := runner.runPostDelete(context.Background(), batchOp{
+	data, cmdID, status, err := runner.runPostDelete(t.Context(), batchOp{
 		Args: map[string]any{"post_urn": "urn:li:post:123"},
 	}, true)
 	if err != nil {
@@ -409,7 +476,7 @@ func TestBatchRunOpDeleteDryRunAndValidation(t *testing.T) {
 		t.Fatalf("dry-run type = %T", data)
 	}
 
-	if _, _, _, err := runner.runPostDelete(context.Background(), batchOp{
+	if _, _, _, err := runner.runPostDelete(t.Context(), batchOp{
 		Args: map[string]any{},
 	}, false); err == nil {
 		t.Fatal("expected missing post_urn error")
@@ -425,7 +492,7 @@ func TestBatchRunOpCommentAndReactionDryRun(t *testing.T) {
 		transport: &fakeTransport{name: "official"},
 	}
 
-	commentData, _, _, err := runner.runCommentAdd(context.Background(), batchOp{
+	commentData, _, _, err := runner.runCommentAdd(t.Context(), batchOp{
 		Args: map[string]any{
 			"post_urn": "urn:li:post:456",
 			"text":     "hello comment",
@@ -438,7 +505,7 @@ func TestBatchRunOpCommentAndReactionDryRun(t *testing.T) {
 		t.Fatalf("comment type = %T", commentData)
 	}
 
-	reactionData, _, _, err := runner.runReactAdd(context.Background(), batchOp{
+	reactionData, _, _, err := runner.runReactAdd(t.Context(), batchOp{
 		Args: map[string]any{"post_urn": "urn:li:post:789"},
 	}, true)
 	if err != nil {
@@ -459,17 +526,17 @@ func TestBatchRunPostScheduleValidation(t *testing.T) {
 		transport: &fakeTransport{name: "official"},
 	}
 
-	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+	if _, _, _, err := runner.runPostSchedule(t.Context(), batchOp{
 		Args: map[string]any{"text": "missing time"},
 	}); err == nil {
 		t.Fatal("expected missing time validation error")
 	}
-	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+	if _, _, _, err := runner.runPostSchedule(t.Context(), batchOp{
 		Args: map[string]any{"at": fixedNow().Add(-time.Minute).Format(time.RFC3339), "text": "late"},
 	}); err == nil {
 		t.Fatal("expected past at validation error")
 	}
-	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+	if _, _, _, err := runner.runPostSchedule(t.Context(), batchOp{
 		Args: map[string]any{
 			"text":       "relative path",
 			"image_path": "/tmp/example.jpg",
@@ -478,7 +545,7 @@ func TestBatchRunPostScheduleValidation(t *testing.T) {
 	}); err != nil {
 		t.Fatal("unexpected error for absolute path schedule")
 	}
-	if _, _, _, err := runner.runPostSchedule(context.Background(), batchOp{
+	if _, _, _, err := runner.runPostSchedule(t.Context(), batchOp{
 		Args: map[string]any{
 			"text":       "relative path",
 			"image_path": "relative/path.jpg",
@@ -487,4 +554,196 @@ func TestBatchRunPostScheduleValidation(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected relative image path validation error")
 	}
+}
+
+func TestBatchErrorCodeMappings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "unauthorized", err: &api.Error{Status: 401}, want: string(output.ErrorCodeUnauthorized)},
+		{name: "forbidden", err: &api.Error{Status: 403}, want: string(output.ErrorCodeForbidden)},
+		{name: "not found", err: &api.Error{Status: 404}, want: string(output.ErrorCodeNotFound)},
+		{name: "rate limited", err: &api.Error{Status: 429}, want: string(output.ErrorCodeRateLimited)},
+		{name: "validation", err: &api.Error{Status: 422}, want: string(output.ErrorCodeValidation)},
+		{name: "server", err: &api.Error{Status: 503}, want: string(output.ErrorCodeTransport)},
+		{name: "generic", err: fmt.Errorf("network failed"), want: string(output.ErrorCodeTransport)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := batchErrorCode(tc.err); got != tc.want {
+				t.Fatalf("batchErrorCode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBatchEmitOpErrorWritesStructuredCode(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "unauthorized", err: &api.Error{Status: 401, Message: "bad token"}, want: string(output.ErrorCodeUnauthorized)},
+		{name: "forbidden", err: &api.Error{Status: 403, Message: "forbidden"}, want: string(output.ErrorCodeForbidden)},
+		{name: "not found", err: &api.Error{Status: 404, Message: "missing"}, want: string(output.ErrorCodeNotFound)},
+		{name: "rate limited", err: &api.Error{Status: 429, Message: "slow down"}, want: string(output.ErrorCodeRateLimited)},
+		{name: "validation", err: &api.Error{Status: 422, Message: "bad input"}, want: string(output.ErrorCodeValidation)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			runner := &batchRunner{
+				a:   &app{deps: normalizeDependencies(Dependencies{Now: fixedNow})},
+				cmd: &cobra.Command{Use: "batch"},
+				out: &out,
+			}
+			if err := runner.emitOpError(7, batchOp{Command: "post create", IdempotencyKey: "key-1"}, "cmd_error", tc.err); !errors.Is(err, tc.err) {
+				t.Fatalf("emitOpError returned %v, want %v", err, tc.err)
+			}
+			lines := parseBatchLines(t, &out)
+			if len(lines) != 1 {
+				t.Fatalf("lines = %d, want 1", len(lines))
+			}
+			data := lines[0]["data"].(map[string]any)
+			if data["code"] != tc.want {
+				t.Fatalf("code = %v, want %s in %+v", data["code"], tc.want, data)
+			}
+		})
+	}
+}
+
+func TestStringArgNumericAndDefaultBranches(t *testing.T) {
+	args := map[string]any{
+		"number":  float64(123),
+		"boolean": true,
+	}
+	if got := stringArg(args, "number"); got != "123" {
+		t.Fatalf("number = %q, want 123", got)
+	}
+	if got := stringArg(args, "boolean"); got != "true" {
+		t.Fatalf("boolean = %q, want true", got)
+	}
+}
+
+func TestBatchEmitPendingApprovalDeleteAndComment(t *testing.T) {
+	a := &app{
+		deps: normalizeDependencies(Dependencies{
+			Now:           fixedNow,
+			ApprovalStore: approval.NewMemoryStore(),
+		}),
+		settings: config.Settings{Output: output.ModeJSON, JSON: true, Transport: "official"},
+	}
+	var out bytes.Buffer
+	runner := &batchRunner{
+		a:   a,
+		cmd: &cobra.Command{Use: "batch"},
+		out: &out,
+	}
+	for lineNum, op := range []batchOp{
+		{Command: "post delete", RequireApproval: true, Args: map[string]any{"post_urn": "urn:li:share:123"}},
+		{Command: "comment add", RequireApproval: true, Args: map[string]any{"post_urn": "urn:li:share:123", "text": "valid comment"}},
+	} {
+		if err := runner.emitPendingApproval(t.Context(), lineNum+1, op); err != nil {
+			t.Fatalf("emitPendingApproval %s: %v", op.Command, err)
+		}
+	}
+	items, err := a.deps.ApprovalStore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("approval items = %d, want 2", len(items))
+	}
+	gotCommands := map[string]bool{}
+	for _, item := range items {
+		gotCommands[item.Command] = true
+	}
+	if !gotCommands["post delete"] || !gotCommands["comment add"] {
+		t.Fatalf("approval commands = %+v", items)
+	}
+	lines := parseBatchLines(t, &out)
+	if len(lines) != 2 {
+		t.Fatalf("output lines = %d, want 2", len(lines))
+	}
+}
+
+func TestBatchRunnerPaceRateLimit(t *testing.T) {
+	remaining := 2
+	resetAt := time.Date(2026, 4, 17, 12, 0, 5, 0, time.UTC)
+	var slept time.Duration
+	runner := &batchRunner{
+		a: newCoverageApp(t),
+		transport: &rateLimitTransport{
+			fakeTransport: fakeTransport{name: "official"},
+			rate: &output.RateLimitInfo{
+				Remaining: &remaining,
+				ResetAt:   resetAt.Format(time.RFC3339),
+			},
+		},
+		now: func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
+		sleep: func(_ context.Context, wait time.Duration) {
+			slept = wait
+		},
+	}
+
+	runner.paceRateLimit(t.Context())
+	if slept != 6*time.Second {
+		t.Fatalf("slept = %s, want 6s", slept)
+	}
+}
+
+func TestBatchRunnerPaceRateLimitNoops(t *testing.T) {
+	cases := []struct {
+		name      string
+		transport api.Transport
+	}{
+		{name: "not aware", transport: &fakeTransport{name: "official"}},
+		{name: "nil rate", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}}},
+		{name: "nil remaining", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{ResetAt: "2026-04-17T12:00:05Z"}}},
+		{name: "remaining above threshold", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(11), ResetAt: "2026-04-17T12:00:05Z"}}},
+		{name: "missing reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(2)}}},
+		{name: "bad reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(2), ResetAt: "not-time"}}},
+		{name: "past reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(2), ResetAt: "2026-04-17T11:59:00Z"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			runner := &batchRunner{
+				a:         newCoverageApp(t),
+				transport: tc.transport,
+				now:       func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
+				sleep: func(context.Context, time.Duration) {
+					called = true
+				},
+			}
+			runner.paceRateLimit(t.Context())
+			if called {
+				t.Fatal("sleep should not be called")
+			}
+		})
+	}
+}
+
+func TestSleepContextReturnsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	start := time.Now()
+	sleepContext(ctx, time.Hour)
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("sleepContext ignored cancellation; elapsed %s", elapsed)
+	}
+}
+
+type rateLimitTransport struct {
+	fakeTransport
+	rate *output.RateLimitInfo
+}
+
+func (t *rateLimitTransport) LastRateLimit() *output.RateLimitInfo {
+	return t.rate
+}
+
+func intPtr(v int) *int {
+	return &v
 }

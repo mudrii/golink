@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +16,9 @@ import (
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/config"
+	"github.com/mudrii/golink/internal/idempotency"
 	outputtest "github.com/mudrii/golink/internal/output"
+	"github.com/spf13/cobra"
 )
 
 // schemaPath is defined in batch_test.go; reused here.
@@ -22,7 +27,7 @@ func authenticatedStoreForProfile(t *testing.T, profile, transport, memberURN st
 	t.Helper()
 
 	store := auth.NewMemoryStore()
-	if err := store.SaveSession(context.Background(), auth.Session{
+	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:     profile,
 		Transport:   transport,
 		AccessToken: "token-" + profile,
@@ -48,6 +53,23 @@ type approvalRecordingTransport struct {
 	sawUpload      bool
 }
 
+type approvalImageErrorTransport struct {
+	fakeTransport
+	initErr   error
+	uploadErr error
+}
+
+func (tpt *approvalImageErrorTransport) InitializeImageUpload(context.Context, string) (string, string, error) {
+	if tpt.initErr != nil {
+		return "", "", tpt.initErr
+	}
+	return "https://upload.example.com/image", "urn:li:image:123", nil
+}
+
+func (tpt *approvalImageErrorTransport) UploadImageBinary(context.Context, string, string) error {
+	return tpt.uploadErr
+}
+
 func (tpt *approvalRecordingTransport) CreatePost(_ context.Context, req api.CreatePostRequest) (*outputtest.PostSummary, error) {
 	tpt.sawCreate = true
 	if req.AuthorURN != tpt.wantAuthorURN {
@@ -64,7 +86,7 @@ func (tpt *approvalRecordingTransport) CreatePost(_ context.Context, req api.Cre
 		tpt.t.Fatalf("unexpected media payload: %+v", req.MediaPayload)
 	}
 
-	return tpt.fakeTransport.CreatePost(context.Background(), req)
+	return tpt.fakeTransport.CreatePost(tpt.t.Context(), req)
 }
 
 func (tpt *approvalRecordingTransport) InitializeImageUpload(_ context.Context, ownerURN string) (string, string, error) {
@@ -72,7 +94,7 @@ func (tpt *approvalRecordingTransport) InitializeImageUpload(_ context.Context, 
 	if ownerURN != tpt.wantOwnerURN {
 		tpt.t.Fatalf("image upload owner = %q, want %q", ownerURN, tpt.wantOwnerURN)
 	}
-	return tpt.fakeTransport.InitializeImageUpload(context.Background(), ownerURN)
+	return tpt.fakeTransport.InitializeImageUpload(tpt.t.Context(), ownerURN)
 }
 
 func (tpt *approvalRecordingTransport) UploadImageBinary(_ context.Context, _, filePath string) error {
@@ -213,6 +235,16 @@ func TestApprovalGrant(t *testing.T) {
 	if items2[0].State != approval.StateApproved {
 		t.Errorf("expected approved, got %s", items2[0].State)
 	}
+
+	code, _, stderr = executeTestCommand(t,
+		[]string{"--json", "approval", "grant", cmdID},
+		testDepsOptions{approvalStore: astore})
+	if code != 2 {
+		t.Fatalf("expected second grant exit 2, got %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr.String(), "wrong state") {
+		t.Fatalf("stderr = %s, want wrong state", stderr)
+	}
 }
 
 func TestApprovalRun_ExecutesViaTransport(t *testing.T) {
@@ -255,6 +287,209 @@ func TestApprovalRun_ExecutesViaTransport(t *testing.T) {
 	items2, _ := astore.List(t.Context())
 	if items2[0].State != approval.StateCompleted {
 		t.Errorf("expected completed, got %s", items2[0].State)
+	}
+}
+
+func TestApprovalRun_ReplaysCachedIdempotencyResult(t *testing.T) {
+	astore := approval.NewMemoryStore()
+	istore := idempotency.NewMemoryStore()
+	entry := approval.Entry{
+		CommandID:      "approval-cached",
+		Command:        "post create",
+		CreatedAt:      time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		Profile:        "default",
+		Transport:      "official",
+		IdempotencyKey: "approval-key",
+		Payload: map[string]any{
+			"text":       "Cached approval payload",
+			"visibility": "PUBLIC",
+		},
+	}
+	if _, err := astore.Stage(t.Context(), entry); err != nil {
+		t.Fatalf("stage approval: %v", err)
+	}
+	if err := astore.Grant(t.Context(), entry.CommandID); err != nil {
+		t.Fatalf("grant approval: %v", err)
+	}
+	resultBytes, err := json.Marshal(outputtest.PostCreateData{
+		PostSummary: outputtest.PostSummary{
+			ID:  "urn:li:share:cached-approval",
+			URL: "https://www.linkedin.com/feed/update/urn:li:share:cached-approval",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal cached result: %v", err)
+	}
+	if err := istore.Record(t.Context(), idempotency.Entry{
+		TS:         time.Now().UTC(),
+		Key:        "approval-key",
+		Command:    "post create",
+		CommandID:  "cached-command",
+		HTTPStatus: 201,
+		RequestID:  "req-cached",
+		Result:     resultBytes,
+	}); err != nil {
+		t.Fatalf("record idempotency: %v", err)
+	}
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", entry.CommandID},
+		testDepsOptions{
+			approvalStore:    astore,
+			idempotencyStore: istore,
+			transportFactory: factoryReturning(&failingTransport{createErr: fmt.Errorf("transport must not be called")}),
+		})
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+
+	var payload struct {
+		FromCache bool `json:"from_cache"`
+		Data      struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !payload.FromCache {
+		t.Fatal("expected from_cache=true")
+	}
+	if payload.Data.ID != "urn:li:share:cached-approval" {
+		t.Fatalf("cached id = %q", payload.Data.ID)
+	}
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approval: %v", err)
+	}
+	if len(items) != 1 || items[0].State != approval.StateCompleted {
+		t.Fatalf("approval state = %+v, want completed", items)
+	}
+}
+
+func TestApprovalRun_CachedReplayFailsWhenCompleteFails(t *testing.T) {
+	astore := approval.NewMemoryStore()
+	istore := idempotency.NewMemoryStore()
+	entry := approval.Entry{
+		CommandID:      "approval-cached-complete-fails",
+		Command:        "post create",
+		CreatedAt:      time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		Profile:        "default",
+		Transport:      "official",
+		IdempotencyKey: "approval-key",
+		Payload: map[string]any{
+			"text":       "Cached approval payload",
+			"visibility": "PUBLIC",
+		},
+	}
+	if _, err := astore.Stage(t.Context(), entry); err != nil {
+		t.Fatalf("stage approval: %v", err)
+	}
+	if err := astore.Grant(t.Context(), entry.CommandID); err != nil {
+		t.Fatalf("grant approval: %v", err)
+	}
+	resultBytes, err := json.Marshal(outputtest.PostCreateData{
+		PostSummary: outputtest.PostSummary{ID: "urn:li:share:cached-approval"},
+	})
+	if err != nil {
+		t.Fatalf("marshal cached result: %v", err)
+	}
+	if err := istore.Record(t.Context(), idempotency.Entry{
+		TS:         time.Now().UTC(),
+		Key:        "approval-key",
+		Command:    "post create",
+		CommandID:  "cached-command",
+		HTTPStatus: 201,
+		Result:     resultBytes,
+	}); err != nil {
+		t.Fatalf("record idempotency: %v", err)
+	}
+	sink := audit.NewMemorySink()
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", entry.CommandID},
+		testDepsOptions{
+			approvalStore:    completeFailApprovalStore{Store: astore, err: errors.New("rename failed")},
+			idempotencyStore: istore,
+			auditSink:        sink,
+			transportFactory: factoryReturning(&failingTransport{createErr: fmt.Errorf("transport must not be called")}),
+		})
+	if code != 5 {
+		t.Fatalf("expected exit 5, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout)
+	}
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approval: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("approval state = %+v, want removed after failed complete", items)
+	}
+	entries := sink.Entries()
+	if len(entries) != 1 || entries[0].Status != "error" || entries[0].ErrorCode != string(outputtest.ErrorCodeTransport) {
+		t.Fatalf("audit entries = %+v, want one transport error", entries)
+	}
+}
+
+func TestApprovalRun_FreshExecutionFailsWhenCompleteFails(t *testing.T) {
+	astore := approval.NewMemoryStore()
+	entry := approval.Entry{
+		CommandID: "approval-complete-fails",
+		Command:   "post create",
+		CreatedAt: time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		Profile:   "default",
+		Transport: "official",
+		Payload: map[string]any{
+			"text":       "Approval payload",
+			"visibility": "PUBLIC",
+		},
+	}
+	if _, err := astore.Stage(t.Context(), entry); err != nil {
+		t.Fatalf("stage approval: %v", err)
+	}
+	if err := astore.Grant(t.Context(), entry.CommandID); err != nil {
+		t.Fatalf("grant approval: %v", err)
+	}
+	sink := audit.NewMemorySink()
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", entry.CommandID},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			approvalStore:    completeFailApprovalStore{Store: astore, err: errors.New("rename failed")},
+			auditSink:        sink,
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 5 {
+		t.Fatalf("expected exit 5, got %d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("expected empty stdout, got %s", stdout)
+	}
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approval: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("approval state = %+v, want removed after failed complete", items)
+	}
+	entries := sink.Entries()
+	if len(entries) != 1 || entries[0].Status != "error" || entries[0].ErrorCode != string(outputtest.ErrorCodeTransport) {
+		t.Fatalf("audit entries = %+v, want one transport error", entries)
+	}
+
+	code, stdout, stderr = executeTestCommand(t,
+		[]string{"--json", "approval", "run", entry.CommandID},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			approvalStore:    astore,
+			auditSink:        sink,
+			transportFactory: factoryReturning(&failingTransport{createErr: fmt.Errorf("transport must not be called")}),
+		})
+	if code != 2 {
+		t.Fatalf("expected retry exit 2, got %d stdout=%s stderr=%s", code, stdout, stderr)
 	}
 }
 
@@ -375,7 +610,7 @@ func TestApprovalRun_ReplaysStoredImageUploadPayload(t *testing.T) {
 		fakeTransport:  fakeTransport{name: "official"},
 		t:              t,
 		wantAuthorURN:  "urn:li:organization:222",
-		wantOwnerURN:   "urn:li:person:image123",
+		wantOwnerURN:   "urn:li:organization:222",
 		wantUploadPath: imagePath,
 		wantUploadAlt:  "poster alt",
 	}
@@ -425,6 +660,219 @@ func TestApprovalRun_ReplaysStoredImageUploadPayload(t *testing.T) {
 	}
 }
 
+func TestRunApprovedCommandSupportedCommandPayloads(t *testing.T) {
+	a := newCoverageApp(t)
+	cmd := &cobra.Command{Use: "approval run"}
+	cmd.SetContext(t.Context())
+	base := approvedRunInput{
+		commandID: "cmd_approved_direct",
+		session: auth.Session{
+			Profile:   "default",
+			MemberURN: "urn:li:person:abc123",
+			Scopes:    []string{"w_member_social"},
+		},
+		transport: &fakeTransport{name: "official"},
+		validate: func(message, details string) error {
+			return errors.New(message + ": " + details)
+		},
+	}
+
+	cases := []struct {
+		name     string
+		command  string
+		payload  map[string]any
+		wantHTTP int
+		assert   func(t *testing.T, data any)
+	}{
+		{
+			name:     "post delete",
+			command:  "post delete",
+			payload:  map[string]any{"post_urn": "urn:li:share:1"},
+			wantHTTP: 204,
+			assert: func(t *testing.T, data any) {
+				t.Helper()
+				if got := data.(*outputtest.PostDeleteData).ID; got != "urn:li:share:1" {
+					t.Fatalf("delete id = %q", got)
+				}
+			},
+		},
+		{
+			name:    "post edit",
+			command: "post edit",
+			payload: map[string]any{
+				"post_urn": "urn:li:share:2",
+				"patch": map[string]any{
+					"$set": map[string]any{
+						"commentary": "updated text",
+						"visibility": "CONNECTIONS",
+					},
+				},
+			},
+			wantHTTP: 204,
+			assert: func(t *testing.T, data any) {
+				t.Helper()
+				got := data.(*outputtest.PostEditData)
+				if got.Text != "updated text" || got.Visibility != outputtest.VisibilityConnections {
+					t.Fatalf("edit data = %+v", got)
+				}
+			},
+		},
+		{
+			name:     "post reshare",
+			command:  "post reshare",
+			payload:  map[string]any{"parent_urn": "urn:li:share:3", "commentary": "shared", "visibility": "CONNECTIONS"},
+			wantHTTP: 201,
+			assert: func(t *testing.T, data any) {
+				t.Helper()
+				got := data.(outputtest.PostCreateData)
+				if got.Text != "shared" || got.Visibility != outputtest.VisibilityConnections {
+					t.Fatalf("reshare data = %+v", got)
+				}
+			},
+		},
+		{
+			name:     "comment add",
+			command:  "comment add",
+			payload:  map[string]any{"post_urn": "urn:li:share:4", "text": "good point"},
+			wantHTTP: 201,
+			assert: func(t *testing.T, data any) {
+				t.Helper()
+				got := data.(outputtest.CommentAddData)
+				if got.Text != "good point" || got.PostURN != "urn:li:share:4" {
+					t.Fatalf("comment data = %+v", got)
+				}
+			},
+		},
+		{
+			name:     "react add",
+			command:  "react add",
+			payload:  map[string]any{"post_urn": "urn:li:share:5", "type": "PRAISE"},
+			wantHTTP: 201,
+			assert: func(t *testing.T, data any) {
+				t.Helper()
+				got := data.(outputtest.ReactionAddData)
+				if got.Type != outputtest.ReactionPraise || got.TargetURN != "urn:li:share:5" {
+					t.Fatalf("reaction data = %+v", got)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := base
+			input.command = tc.command
+			input.payload = tc.payload
+			got, err := a.runApprovedCommand(cmd, input)
+			if err != nil {
+				t.Fatalf("runApprovedCommand: %v", err)
+			}
+			if got.httpStatus != tc.wantHTTP {
+				t.Fatalf("http status = %d, want %d", got.httpStatus, tc.wantHTTP)
+			}
+			tc.assert(t, got.data)
+		})
+	}
+}
+
+func TestRunApprovedCommandValidationFailures(t *testing.T) {
+	a := newCoverageApp(t)
+	cmd := &cobra.Command{Use: "approval run"}
+	cmd.SetContext(t.Context())
+	base := approvedRunInput{
+		commandID: "cmd_approved_invalid",
+		session:   auth.Session{MemberURN: "urn:li:person:abc123", Scopes: []string{"w_member_social"}},
+		transport: &fakeTransport{name: "official"},
+		validate: func(message, details string) error {
+			return errors.New(message + ": " + details)
+		},
+	}
+
+	for _, tc := range []struct {
+		name    string
+		command string
+		payload map[string]any
+	}{
+		{name: "unsupported", command: "post pin", payload: map[string]any{}},
+		{name: "bad create visibility type", command: "post create", payload: map[string]any{
+			"text":       "hello from approval",
+			"visibility": 42,
+		}},
+		{name: "bad edit visibility type", command: "post edit", payload: map[string]any{
+			"post_urn": "urn:li:share:1",
+			"patch":    map[string]any{"$set": map[string]any{"visibility": 42}},
+		}},
+		{name: "bad reaction type", command: "react add", payload: map[string]any{"post_urn": "urn:li:share:1", "type": 42}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := base
+			input.command = tc.command
+			input.payload = tc.payload
+			if _, err := a.runApprovedCommand(cmd, input); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestAttachApprovedImageErrorBranches(t *testing.T) {
+	a := newCoverageApp(t)
+	cmd := &cobra.Command{Use: "approval run"}
+	cmd.SetContext(t.Context())
+	imagePath := t.TempDir() + "/image.jpg"
+	if err := os.WriteFile(imagePath, []byte("image-bytes"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	validate := func(message, details string) error {
+		return errors.New(strings.TrimSpace(message + " " + details))
+	}
+
+	for _, tc := range []struct {
+		name      string
+		path      string
+		transport api.Transport
+		want      string
+	}{
+		{
+			name:      "stat failure",
+			path:      imagePath + ".missing",
+			transport: &approvalImageErrorTransport{fakeTransport: fakeTransport{name: "official"}},
+			want:      "cannot read image file",
+		},
+		{
+			name:      "upload init failure",
+			path:      imagePath,
+			transport: &approvalImageErrorTransport{fakeTransport: fakeTransport{name: "official"}, initErr: errors.New("init failed")},
+			want:      "init failed",
+		},
+		{
+			name:      "upload binary failure",
+			path:      imagePath,
+			transport: &approvalImageErrorTransport{fakeTransport: fakeTransport{name: "official"}, uploadErr: errors.New("upload failed")},
+			want:      "upload failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &api.CreatePostRequest{}
+			err := a.attachApprovedImage(cmd, approvedRunInput{
+				commandID: "cmd_image_error",
+				session:   auth.Session{MemberURN: "urn:li:person:abc123"},
+				transport: tc.transport,
+				validate:  validate,
+				payload: map[string]any{
+					"would_upload": map[string]any{"path": tc.path, "alt": "alt text"},
+				},
+			}, "", req)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
 func TestPostCreateRequireApproval_PreservesImagePayload(t *testing.T) {
 	astore := approval.NewMemoryStore()
 	imagePath := t.TempDir() + "/photo.jpg"
@@ -468,7 +916,7 @@ func TestPostCreateRequireApproval_PreservesImagePayload(t *testing.T) {
 		fakeTransport:  fakeTransport{name: "official"},
 		t:              t,
 		wantAuthorURN:  "urn:li:organization:222",
-		wantOwnerURN:   "urn:li:person:image123",
+		wantOwnerURN:   "urn:li:organization:222",
 		wantUploadPath: imagePath,
 		wantUploadAlt:  "poster alt",
 	}
@@ -510,6 +958,54 @@ func TestPostCreateRequireApproval_PreservesImagePayload(t *testing.T) {
 	}
 }
 
+func TestPostCreateImageAsOrgUsesOrgUploadOwner(t *testing.T) {
+	imagePath := t.TempDir() + "/photo.png"
+	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	if err := os.WriteFile(imagePath, pngHeader, 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	transport := &approvalRecordingTransport{
+		fakeTransport:  fakeTransport{name: "official"},
+		t:              t,
+		wantAuthorURN:  "urn:li:organization:222",
+		wantOwnerURN:   "urn:li:organization:222",
+		wantUploadPath: imagePath,
+		wantUploadAlt:  "poster alt",
+	}
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{
+			"--json",
+			"post", "create",
+			"--text", "Direct org image payload",
+			"--image", imagePath,
+			"--image-alt", "poster alt",
+			"--as-org", "urn:li:organization:222",
+		},
+		testDepsOptions{
+			store: authenticatedStoreForProfile(t,
+				"default",
+				"official",
+				"urn:li:person:image123",
+				"openid", "profile", "email", "w_member_social", "w_organization_social",
+			),
+			transportFactory: factoryReturning(transport),
+		})
+	if code != 0 {
+		t.Fatalf("run exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if !transport.sawInit {
+		t.Fatal("expected InitializeImageUpload to be called")
+	}
+	if !transport.sawUpload {
+		t.Fatal("expected UploadImageBinary to be called")
+	}
+	if !transport.sawCreate {
+		t.Fatal("expected CreatePost to be called")
+	}
+}
+
 func TestApprovalRun_WithoutGrant_Fails(t *testing.T) {
 	astore := approval.NewMemoryStore()
 
@@ -533,6 +1029,74 @@ func TestApprovalRun_WithoutGrant_Fails(t *testing.T) {
 	}
 }
 
+func TestApprovalRun_ValidationFailureIsAudited(t *testing.T) {
+	astore := approval.NewMemoryStore()
+	sink := audit.NewMemorySink()
+	// The stored approval intentionally asks to post as an organization while the
+	// session only has member-write scope; approval run must audit that validation
+	// failure before returning it.
+	entry := approval.Entry{
+		CommandID: "approval-validation",
+		Command:   "post create",
+		CreatedAt: time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC),
+		Profile:   "validation-profile",
+		Transport: "official",
+		Payload: outputtest.PostPayloadPreview{
+			Endpoint:   "POST /rest/posts",
+			Text:       "Validation payload",
+			Visibility: outputtest.VisibilityPublic,
+			AuthorURN:  "urn:li:organization:222",
+		},
+	}
+	if _, err := astore.Stage(t.Context(), entry); err != nil {
+		t.Fatalf("stage approval: %v", err)
+	}
+	if err := astore.Grant(t.Context(), entry.CommandID); err != nil {
+		t.Fatalf("grant approval: %v", err)
+	}
+
+	code, _, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", entry.CommandID},
+		testDepsOptions{
+			store: authenticatedStoreForProfile(t,
+				"validation-profile",
+				"official",
+				"urn:li:person:validation123",
+				"openid", "profile", "email", "w_member_social",
+			),
+			approvalStore:    astore,
+			auditSink:        sink,
+			transportFactory: factoryReturning(&fakeTransport{name: "official"}),
+		})
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d stderr=%s", code, stderr)
+	}
+
+	entries := sink.Entries()
+	if len(entries) == 0 {
+		t.Fatal("expected validation audit entry")
+	}
+	got := entries[len(entries)-1]
+	if got.CommandID != entry.CommandID {
+		t.Fatalf("audit command_id = %q, want %q", got.CommandID, entry.CommandID)
+	}
+	if got.Status != "validation_error" {
+		t.Fatalf("audit status = %q, want validation_error", got.Status)
+	}
+	if got.ErrorCode != string(outputtest.ErrorCodeValidation) {
+		t.Fatalf("audit error_code = %q, want %q", got.ErrorCode, outputtest.ErrorCodeValidation)
+	}
+}
+
+type completeFailApprovalStore struct {
+	approval.Store
+	err error
+}
+
+func (s completeFailApprovalStore) Complete(context.Context, string) error {
+	return s.err
+}
+
 func TestApprovalDeny(t *testing.T) {
 	astore := approval.NewMemoryStore()
 
@@ -553,6 +1117,16 @@ func TestApprovalDeny(t *testing.T) {
 	items2, _ := astore.List(t.Context())
 	if items2[0].State != approval.StateDenied {
 		t.Errorf("expected denied, got %s", items2[0].State)
+	}
+
+	code, _, stderr = executeTestCommand(t,
+		[]string{"--json", "approval", "deny", cmdID},
+		testDepsOptions{approvalStore: astore})
+	if code != 2 {
+		t.Fatalf("expected second deny exit 2, got %d stderr=%s", code, stderr)
+	}
+	if !strings.Contains(stderr.String(), "wrong state") {
+		t.Fatalf("stderr = %s, want wrong state", stderr)
 	}
 }
 

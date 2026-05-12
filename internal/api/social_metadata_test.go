@@ -45,7 +45,7 @@ func TestOfficialSocialMetadata_BatchSuccess(t *testing.T) {
 		})
 	}, "urn:li:person:abc123")
 
-	data, err := o.SocialMetadata(context.Background(), []string{"urn:li:share:1", "urn:li:share:2"})
+	data, err := o.SocialMetadata(t.Context(), []string{"urn:li:share:1", "urn:li:share:2"})
 	if err != nil {
 		t.Fatalf("SocialMetadata: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestOfficialSocialMetadata_URNEncoding(t *testing.T) {
 		})
 	}, "")
 
-	_, _ = o.SocialMetadata(context.Background(), []string{"urn:li:share:123"})
+	_, _ = o.SocialMetadata(t.Context(), []string{"urn:li:share:123"})
 	// colons must be percent-encoded inside the List() wrapper
 	if !strings.Contains(capturedQuery, "urn%3Ali%3Ashare%3A123") {
 		t.Errorf("URN not percent-encoded in query: %q", capturedQuery)
@@ -132,7 +132,7 @@ func TestOfficialSocialMetadata_4xxError(t *testing.T) {
 	}
 	o := NewOfficial(OfficialConfig{Client: client})
 
-	_, err = o.SocialMetadata(context.Background(), []string{"urn:li:share:1"})
+	_, err = o.SocialMetadata(t.Context(), []string{"urn:li:share:1"})
 	if err == nil {
 		t.Fatal("expected error on 401, got nil")
 	}
@@ -150,7 +150,7 @@ func TestOfficialSocialMetadata_EmptyURNs(t *testing.T) {
 		t.Error("handler should not be called for empty URN list")
 	}, "")
 
-	_, err := o.SocialMetadata(context.Background(), nil)
+	_, err := o.SocialMetadata(t.Context(), nil)
 	if err == nil {
 		t.Fatal("expected error for empty urns")
 	}

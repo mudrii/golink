@@ -98,6 +98,7 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 				a:         a,
 				cmd:       cmd,
 				transport: transport,
+				session:   session,
 				istore:    a.deps.IdempotencyStore,
 				out:       a.deps.Stdout,
 			}

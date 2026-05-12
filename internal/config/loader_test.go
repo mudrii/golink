@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +126,22 @@ func TestLoaderAuditPathEnv(t *testing.T) {
 	}
 	if settings.AuditPath != "/tmp/test-audit.jsonl" {
 		t.Errorf("expected AuditPath /tmp/test-audit.jsonl, got %q", settings.AuditPath)
+	}
+}
+
+func TestLoaderMalformedConfigReturnsError(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("profile: [broken\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	loader := NewLoader()
+	loader.v.SetConfigFile(configPath)
+	_, err := loader.Load()
+	if err == nil {
+		t.Fatal("expected malformed config error")
+	}
+	if got := err.Error(); !strings.Contains(got, "read config") {
+		t.Fatalf("error = %q, want read config", got)
 	}
 }

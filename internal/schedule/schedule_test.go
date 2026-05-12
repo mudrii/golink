@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -136,6 +137,38 @@ func TestMemoryStore_MarkFailed(t *testing.T) {
 	}
 	if e.LastError != "api error" {
 		t.Errorf("want last_error=api error, got %s", e.LastError)
+	}
+}
+
+func TestMemoryStore_MarkRetrying(t *testing.T) {
+	ctx := t.Context()
+	m := NewMemoryStore()
+	_ = m.Add(ctx, sampleEntry("retry", t0))
+	_ = m.MarkRunning(ctx, "retry")
+	_ = m.MarkFailed(ctx, "retry", "api error", t1)
+
+	if err := m.MarkRetrying(ctx, "retry"); err != nil {
+		t.Fatalf("MarkRetrying: %v", err)
+	}
+	got, err := m.Get(ctx, "retry")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("state = %s, want pending", got.State)
+	}
+	if got.LastError != "" {
+		t.Fatalf("last_error = %q, want empty", got.LastError)
+	}
+	if got.RetryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", got.RetryCount)
+	}
+
+	if err := m.MarkRetrying(ctx, "retry"); err == nil {
+		t.Fatal("expected retrying pending entry to fail")
+	}
+	if err := m.MarkRetrying(ctx, "missing"); err == nil {
+		t.Fatal("expected retrying missing entry to fail")
 	}
 }
 
@@ -284,6 +317,123 @@ func TestFileStore_MarkFailed(t *testing.T) {
 	}
 }
 
+func TestFileStore_DueSkipsMalformedAndNonPendingEntries(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+	s := NewFileStore(dir)
+
+	if err := s.Add(ctx, sampleEntry("due1", t0)); err != nil {
+		t.Fatalf("Add due1: %v", err)
+	}
+	if err := s.Add(ctx, sampleEntry("future1", t2)); err != nil {
+		t.Fatalf("Add future1: %v", err)
+	}
+	if err := s.Add(ctx, sampleEntry("running1", t0)); err != nil {
+		t.Fatalf("Add running1: %v", err)
+	}
+	if err := s.MarkRunning(ctx, "running1"); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "malformed.json"), []byte("{"), 0o600); err != nil {
+		t.Fatalf("write malformed: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "nested"), 0o700); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+
+	due, err := s.Due(ctx, t1, 10)
+	if err != nil {
+		t.Fatalf("Due: %v", err)
+	}
+	if len(due) != 1 {
+		t.Fatalf("due len = %d, want 1: %+v", len(due), due)
+	}
+	if due[0].CommandID != "due1" {
+		t.Fatalf("due[0] = %s, want due1", due[0].CommandID)
+	}
+}
+
+func TestFileStore_DueLimitAndMissingDirectory(t *testing.T) {
+	ctx := t.Context()
+
+	missing := NewFileStore(filepath.Join(t.TempDir(), "missing"))
+	due, err := missing.Due(ctx, t1, 10)
+	if err != nil {
+		t.Fatalf("Due missing dir: %v", err)
+	}
+	if due != nil {
+		t.Fatalf("due missing dir = %#v, want nil", due)
+	}
+
+	s := NewFileStore(t.TempDir())
+	if err := s.Add(ctx, sampleEntry("duea", t0)); err != nil {
+		t.Fatalf("Add duea: %v", err)
+	}
+	if err := s.Add(ctx, sampleEntry("dueb", t0.Add(time.Minute))); err != nil {
+		t.Fatalf("Add dueb: %v", err)
+	}
+	limited, err := s.Due(ctx, t1, 1)
+	if err != nil {
+		t.Fatalf("Due limited: %v", err)
+	}
+	if len(limited) != 1 || limited[0].CommandID != "duea" {
+		t.Fatalf("limited due = %+v", limited)
+	}
+}
+
+func TestFileStore_MarkRetryingAndCancel(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+	s := NewFileStore(dir)
+
+	if err := s.Add(ctx, sampleEntry("retryf", t0)); err != nil {
+		t.Fatalf("Add retryf: %v", err)
+	}
+	if err := s.MarkRunning(ctx, "retryf"); err != nil {
+		t.Fatalf("MarkRunning retryf: %v", err)
+	}
+	if err := s.MarkFailed(ctx, "retryf", "transport error", t1); err != nil {
+		t.Fatalf("MarkFailed retryf: %v", err)
+	}
+	if err := s.MarkRetrying(ctx, "retryf"); err != nil {
+		t.Fatalf("MarkRetrying retryf: %v", err)
+	}
+	got, err := s.Get(ctx, "retryf")
+	if err != nil {
+		t.Fatalf("Get retryf: %v", err)
+	}
+	if got.State != StatePending || got.LastError != "" || got.RetryCount != 1 {
+		t.Fatalf("retryf after retrying = %+v", got)
+	}
+	if err := s.MarkRetrying(ctx, "retryf"); err == nil {
+		t.Fatal("expected retrying pending file entry to fail")
+	}
+
+	if err := s.Add(ctx, sampleEntry("cancelf", t0)); err != nil {
+		t.Fatalf("Add cancelf: %v", err)
+	}
+	if err := s.MarkCancelled(ctx, "cancelf"); err != nil {
+		t.Fatalf("MarkCancelled cancelf: %v", err)
+	}
+	cancelled, err := s.Get(ctx, "cancelf")
+	if err != nil {
+		t.Fatalf("Get cancelf: %v", err)
+	}
+	if cancelled.State != StateCancelled {
+		t.Fatalf("cancelled state = %s, want cancelled", cancelled.State)
+	}
+
+	if err := s.Add(ctx, sampleEntry("runningcancel", t0)); err != nil {
+		t.Fatalf("Add runningcancel: %v", err)
+	}
+	if err := s.MarkRunning(ctx, "runningcancel"); err != nil {
+		t.Fatalf("MarkRunning runningcancel: %v", err)
+	}
+	if err := s.MarkCancelled(ctx, "runningcancel"); err == nil {
+		t.Fatal("expected cancelling running file entry to fail")
+	}
+}
+
 func TestFileStore_Next(t *testing.T) {
 	dir := t.TempDir()
 	ctx := t.Context()
@@ -306,5 +456,26 @@ func TestResolvePath(t *testing.T) {
 	p := ResolvePath()
 	if p != "/tmp/sched-test" {
 		t.Errorf("want /tmp/sched-test, got %s", p)
+	}
+
+	t.Setenv("GOLINK_SCHEDULE_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "/tmp/test-state")
+	p = ResolvePath()
+	if p != "/tmp/test-state/golink/schedule" {
+		t.Errorf("want xdg schedule path, got %s", p)
+	}
+
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "/tmp/home")
+	p = ResolvePath()
+	if p != "/tmp/home/.local/state/golink/schedule" {
+		t.Errorf("want home schedule path, got %s", p)
+	}
+
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("HOME", "")
+	p = ResolvePath()
+	if p != filepath.Join(".local", "state", "golink", "schedule") {
+		t.Errorf("want relative fallback path, got %s", p)
 	}
 }

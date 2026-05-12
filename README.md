@@ -103,7 +103,7 @@ golink does NOT run a daemon. Operators invoke `schedule run` via cron, launchd,
 go install github.com/mudrii/golink@v26.05.05
 ```
 
-Requires Go 1.26.2+.
+Requires Go 1.26.3+.
 
 Homebrew, after the `v26.05.05` tag is published:
 
@@ -493,7 +493,7 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 - A [LinkedIn Developer App](https://www.linkedin.com/developers/) with native PKCE enabled (contact LinkedIn support to enable PKCE for your app)
 - The current member social write scope: `w_member_social_feed` (`golink` also accepts legacy `w_member_social` where tokens still carry it)
 - Endpoint-family specific scopes as required (`r_member_social`, organization social feed permissions, and any LinkedIn product-specific approvals)
-- Go 1.26.2+ for building from source
+- Go 1.26.3+ for building from source
 
 ## Technical architecture
 

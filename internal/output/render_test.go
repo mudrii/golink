@@ -219,6 +219,44 @@ func TestRenderError_Text(t *testing.T) {
 	}
 }
 
+func TestRenderError_structuredAndTableModes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		want      string
+		wantJSON  bool
+		wantField string
+	}{
+		{name: "json", mode: ModeJSON, wantJSON: true, wantField: "command_id"},
+		{name: "jsonl", mode: ModeJSONL, wantJSON: true, wantField: "command"},
+		{name: "table", mode: ModeTable, want: "Token expired"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			env := fixtureEnvelope(StatusError, "auth status")
+			if err := RenderError(&buf, tc.mode, env, "no active session", "UNAUTHORIZED", "Token expired"); err != nil {
+				t.Fatalf("RenderError: %v", err)
+			}
+			if !tc.wantJSON {
+				if !strings.Contains(buf.String(), tc.want) {
+					t.Fatalf("output = %q, want to contain %q", buf.String(), tc.want)
+				}
+				return
+			}
+			var out map[string]any
+			if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if out["error"] != "no active session" {
+				t.Fatalf("error = %v", out["error"])
+			}
+			if _, ok := out[tc.wantField]; !ok {
+				t.Fatalf("missing field %q in %v", tc.wantField, out)
+			}
+		})
+	}
+}
+
 func TestTruncateCell(t *testing.T) {
 	short := "hello"
 	if got := truncateCell(short); got != short {

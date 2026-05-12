@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestFormatHelpers(t *testing.T) {
@@ -67,15 +69,21 @@ func TestTabularRowsCoverage(t *testing.T) {
 			Request:     ScheduleRequest{Text: "hello"},
 		}},
 	}
-	if len(scheduleRows.Headers()) != 4 || len(scheduleRows.Rows()) != 1 {
-		t.Fatalf("unexpected schedule rows")
+	if diff := cmp.Diff([]string{"COMMAND_ID", "STATE", "SCHEDULED_AT", "TEXT"}, scheduleRows.Headers()); diff != "" {
+		t.Fatalf("schedule headers mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([][]string{{"cmd_1", "pending", "2026-04-17T12:00:00Z", "hello"}}, scheduleRows.Rows()); diff != "" {
+		t.Fatalf("schedule rows mismatch (-want +got):\n%s", diff)
 	}
 
 	doctorRows := DoctorData{
 		Features: []DoctorFeature{{Command: "post create", Status: "supported", Reason: ""}},
 	}
-	if len(doctorRows.Headers()) != 3 || len(doctorRows.Rows()) != 1 {
-		t.Fatalf("unexpected doctor rows")
+	if diff := cmp.Diff([]string{"COMMAND", "STATUS", "REASON"}, doctorRows.Headers()); diff != "" {
+		t.Fatalf("doctor headers mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([][]string{{"post create", "supported", ""}}, doctorRows.Rows()); diff != "" {
+		t.Fatalf("doctor rows mismatch (-want +got):\n%s", diff)
 	}
 
 	socialRows := SocialMetadataData{
@@ -87,22 +95,31 @@ func TestTabularRowsCoverage(t *testing.T) {
 			CommentsState: "ENABLED",
 		}},
 	}
-	if rows := socialRows.Rows(); len(rows) != 1 || rows[0][0] == socialRows.Items[0].PostURN {
-		t.Fatalf("expected shortened urn in first column, got %+v", rows)
+	if diff := cmp.Diff([]string{"URN", "COMMENTS", "LIKES", "REACTIONS", "STATE"}, socialRows.Headers()); diff != "" {
+		t.Fatalf("social headers mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([][]string{{"...456789012345", "2", "3", "4", "ENABLED"}}, socialRows.Rows()); diff != "" {
+		t.Fatalf("social rows mismatch (-want +got):\n%s", diff)
 	}
 
 	searchRows := SearchPeopleData{
 		People: []Person{{URN: "urn:li:person:1", FullName: "Ada", Headline: "Math", Location: "London"}},
 	}
-	if len(searchRows.Headers()) != 4 || len(searchRows.Rows()) != 1 {
-		t.Fatalf("unexpected search rows")
+	if diff := cmp.Diff([]string{"URN", "NAME", "HEADLINE", "LOCATION"}, searchRows.Headers()); diff != "" {
+		t.Fatalf("search headers mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([][]string{{"urn:li:person:1", "Ada", "Math", "London"}}, searchRows.Rows()); diff != "" {
+		t.Fatalf("search rows mismatch (-want +got):\n%s", diff)
 	}
 
 	orgRows := OrgListData{
 		Items: []OrgListItem{{URN: "urn:li:organization:1", Role: "ADMINISTRATOR", State: "APPROVED", Name: "Acme"}},
 	}
-	if len(orgRows.Headers()) != 4 || len(orgRows.Rows()) != 1 {
-		t.Fatalf("unexpected org rows")
+	if diff := cmp.Diff([]string{"URN", "ROLE", "STATE", "NAME"}, orgRows.Headers()); diff != "" {
+		t.Fatalf("org headers mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([][]string{{"urn:li:organization:1", "ADMINISTRATOR", "APPROVED", "Acme"}}, orgRows.Rows()); diff != "" {
+		t.Fatalf("org rows mismatch (-want +got):\n%s", diff)
 	}
 }
 

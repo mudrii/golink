@@ -126,81 +126,7 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 		Short: "Execute past-due scheduled entries through the normal Posts API path",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			now := a.deps.Now().UTC()
-
-			var toRun []schedule.Entry
-
-			if len(args) == 1 {
-				// Run a specific entry by ID (even if not yet past-due).
-				commandID := strings.TrimSpace(args[0])
-				e, err := a.deps.ScheduleStore.Get(ctx, commandID)
-				if err != nil {
-					if errors.Is(err, schedule.ErrNotFound) {
-						return a.notFoundFailure(cmd, "schedule entry not found", commandID)
-					}
-					return a.transportFailure(cmd, "failed to get schedule entry", err.Error())
-				}
-				if e.State != schedule.StatePending && e.State != schedule.StateFailed {
-					return a.validationFailure(cmd,
-						fmt.Sprintf("entry %s is in state %s, only pending/failed entries can be run", commandID, e.State), "")
-				}
-				// Transition failed → pending in the store so MarkRunning (which
-				// requires pending) will accept the entry during runOneEntry.
-				if e.State == schedule.StateFailed {
-					if retryErr := a.deps.ScheduleStore.MarkRetrying(ctx, commandID); retryErr != nil {
-						return a.transportFailure(cmd, "failed to reset schedule entry for retry", retryErr.Error())
-					}
-					e.State = schedule.StatePending
-					e.LastError = ""
-				}
-				toRun = []schedule.Entry{e}
-			} else {
-				// Run all past-due pending entries.
-				due, err := a.deps.ScheduleStore.Due(ctx, now, flagLimit)
-				if err != nil {
-					return a.transportFailure(cmd, "failed to query due schedule entries", err.Error())
-				}
-				if len(due) == 0 {
-					data := output.ScheduleRunData{
-						Ran:     0,
-						Results: []output.ScheduleRunResult{},
-					}
-					return a.writeSuccess(cmd, data, "no past-due entries to run")
-				}
-				toRun = due
-			}
-
-			results := make([]output.ScheduleRunResult, 0, len(toRun))
-			succeeded, failed, skipped := 0, 0, 0
-
-			for i := range toRun {
-				result, runErr := runOneEntry(ctx, a, cmd, toRun[i])
-				results = append(results, result)
-				switch result.Status {
-				case "skipped":
-					skipped++
-				case "failed":
-					failed++
-				default:
-					succeeded++
-				}
-				if runErr != nil {
-					if flagFailFast {
-						break
-					}
-				}
-			}
-
-			data := output.ScheduleRunData{
-				Ran:       len(results),
-				Succeeded: succeeded,
-				Failed:    failed,
-				Skipped:   skipped,
-				Results:   results,
-			}
-			return a.writeSuccess(cmd, data,
-				fmt.Sprintf("ran %d entries: %d succeeded, %d failed, %d skipped", len(results), succeeded, failed, skipped))
+			return a.runScheduleRunCommand(cmd, args, flagLimit, flagFailFast)
 		},
 	}
 
@@ -208,6 +134,81 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 	cmd.Flags().BoolVar(&flagFailFast, "fail-fast", false, "stop at first error (default: continue)")
 
 	return cmd
+}
+
+func (a *app) runScheduleRunCommand(cmd *cobra.Command, args []string, limit int, failFast bool) error {
+	toRun, handled, err := a.scheduledEntriesToRun(cmd, args, limit)
+	if handled || err != nil {
+		return err
+	}
+	data := runScheduledEntries(cmd.Context(), a, cmd, toRun, failFast)
+	return a.writeSuccess(cmd, data,
+		fmt.Sprintf("ran %d entries: %d succeeded, %d failed, %d skipped", data.Ran, data.Succeeded, data.Failed, data.Skipped))
+}
+
+func (a *app) scheduledEntriesToRun(cmd *cobra.Command, args []string, limit int) ([]schedule.Entry, bool, error) {
+	if len(args) == 1 {
+		entry, err := a.scheduledEntryByID(cmd, strings.TrimSpace(args[0]))
+		return []schedule.Entry{entry}, false, err
+	}
+	due, err := a.deps.ScheduleStore.Due(cmd.Context(), a.deps.Now().UTC(), limit)
+	if err != nil {
+		return nil, false, a.transportFailure(cmd, "failed to query due schedule entries", err.Error())
+	}
+	if len(due) == 0 {
+		data := output.ScheduleRunData{Ran: 0, Results: []output.ScheduleRunResult{}}
+		return nil, true, a.writeSuccess(cmd, data, "no past-due entries to run")
+	}
+	return due, false, nil
+}
+
+func (a *app) scheduledEntryByID(cmd *cobra.Command, commandID string) (schedule.Entry, error) {
+	entry, err := a.deps.ScheduleStore.Get(cmd.Context(), commandID)
+	if err != nil {
+		if errors.Is(err, schedule.ErrNotFound) {
+			return schedule.Entry{}, a.notFoundFailure(cmd, "schedule entry not found", commandID)
+		}
+		return schedule.Entry{}, a.transportFailure(cmd, "failed to get schedule entry", err.Error())
+	}
+	if entry.State != schedule.StatePending && entry.State != schedule.StateFailed {
+		return schedule.Entry{}, a.validationFailure(cmd,
+			fmt.Sprintf("entry %s is in state %s, only pending/failed entries can be run", commandID, entry.State), "")
+	}
+	if entry.State == schedule.StateFailed {
+		if err := a.deps.ScheduleStore.MarkRetrying(cmd.Context(), commandID); err != nil {
+			return schedule.Entry{}, a.transportFailure(cmd, "failed to reset schedule entry for retry", err.Error())
+		}
+		entry.State = schedule.StatePending
+		entry.LastError = ""
+	}
+	return entry, nil
+}
+
+func runScheduledEntries(ctx context.Context, a *app, cmd *cobra.Command, entries []schedule.Entry, failFast bool) output.ScheduleRunData {
+	results := make([]output.ScheduleRunResult, 0, len(entries))
+	succeeded, failed, skipped := 0, 0, 0
+	for i := range entries {
+		result, err := runOneEntry(ctx, a, cmd, entries[i])
+		results = append(results, result)
+		switch result.Status {
+		case "skipped":
+			skipped++
+		case "failed":
+			failed++
+		default:
+			succeeded++
+		}
+		if err != nil && failFast {
+			break
+		}
+	}
+	return output.ScheduleRunData{
+		Ran:       len(results),
+		Succeeded: succeeded,
+		Failed:    failed,
+		Skipped:   skipped,
+		Results:   results,
+	}
 }
 
 // runOneEntry executes a single scheduled post entry. On success it moves the

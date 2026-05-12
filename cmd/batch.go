@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,11 +17,18 @@ import (
 
 	"github.com/mudrii/golink/internal/api"
 	"github.com/mudrii/golink/internal/approval"
+	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/mudrii/golink/internal/schedule"
 	"github.com/spf13/cobra"
 )
+
+var errBatchValidation = errors.New("batch validation")
+
+func batchValidationf(format string, args ...any) error {
+	return fmt.Errorf(format+": %w", append(args, errBatchValidation)...)
+}
 
 const (
 	batchMaxConcurrency = 4
@@ -119,11 +127,13 @@ Results stream to stdout as JSONL — one envelope per input line.`,
 				a:               a,
 				cmd:             cmd,
 				transport:       transport,
+				session:         session,
 				istore:          a.deps.IdempotencyStore,
 				out:             a.deps.Stdout,
 				progressPath:    progressPath,
 				continueOnError: continueOnError || !failFast,
 				failFast:        failFast,
+				now:             a.deps.Now,
 			}
 
 			anyError := runner.run(cmd.Context(), ops, done, concurrency)
@@ -159,11 +169,14 @@ type batchRunner struct {
 	a               *app
 	cmd             *cobra.Command
 	transport       api.Transport
+	session         auth.Session
 	istore          idempotency.Store
 	out             io.Writer
 	progressPath    string
 	continueOnError bool
 	failFast        bool
+	now             func() time.Time
+	sleep           func(context.Context, time.Duration)
 
 	outMu      sync.Mutex
 	progressMu sync.Mutex
@@ -360,6 +373,9 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 // batchErrorCode maps a transport error to a stable output.ErrorCode string.
 // Mirrors emitOpError's classification so audit codes match emitted envelopes.
 func batchErrorCode(err error) string {
+	if errors.Is(err, errBatchValidation) {
+		return string(output.ErrorCodeValidation)
+	}
 	if ae, ok := api.AsError(err); ok {
 		switch {
 		case ae.IsUnauthorized():
@@ -381,7 +397,10 @@ func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool
 	cmdID := newCommandID("post create", r.a.deps.Now().UTC())
 	text := stringArg(op.Args, "text")
 	if text == "" {
-		return nil, cmdID, 0, fmt.Errorf("missing required arg: text")
+		return nil, cmdID, 0, batchValidationf("missing required arg: text")
+	}
+	if len(text) < 5 || len(text) > 3000 {
+		return nil, cmdID, 0, batchValidationf("invalid text length: text must be between 5 and 3000 characters")
 	}
 	visStr := stringArg(op.Args, "visibility")
 	if visStr == "" {
@@ -389,7 +408,16 @@ func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool
 	}
 	visibility, err := output.ParseVisibility(visStr)
 	if err != nil {
-		return nil, cmdID, 0, fmt.Errorf("invalid visibility: %w", err)
+		return nil, cmdID, 0, fmt.Errorf("invalid visibility: %w: %w", err, errBatchValidation)
+	}
+	authorURN := stringArg(op.Args, "author_urn")
+	if authorURN != "" {
+		if !strings.HasPrefix(authorURN, "urn:li:organization:") {
+			return nil, cmdID, 0, batchValidationf("invalid author_urn: must be a urn:li:organization:... URN")
+		}
+		if !dryRun && !sessionHasAnyScope(r.session, orgWriteScopes...) {
+			return nil, cmdID, 0, batchValidationf("posting as an organization requires %s", formatScopeRequirement(orgWriteScopes...))
+		}
 	}
 	if dryRun {
 		data := output.PostCreateDryRunData{
@@ -398,6 +426,7 @@ func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool
 				Text:       text,
 				Visibility: visibility,
 				Media:      stringArg(op.Args, "media"),
+				AuthorURN:  authorURN,
 			},
 			Mode: "dry_run",
 		}
@@ -407,7 +436,7 @@ func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool
 		Text:       text,
 		Visibility: visibility,
 		Media:      stringArg(op.Args, "media"),
-		AuthorURN:  stringArg(op.Args, "author_urn"),
+		AuthorURN:  authorURN,
 	})
 	if err != nil {
 		return nil, cmdID, 0, err
@@ -419,7 +448,7 @@ func (r *batchRunner) runPostDelete(ctx context.Context, op batchOp, dryRun bool
 	cmdID := newCommandID("post delete", r.a.deps.Now().UTC())
 	postURN := stringArg(op.Args, "post_urn")
 	if postURN == "" {
-		return nil, cmdID, 0, fmt.Errorf("missing required arg: post_urn")
+		return nil, cmdID, 0, batchValidationf("missing required arg: post_urn")
 	}
 	if dryRun {
 		data := output.PostDeleteDryRunData{
@@ -442,11 +471,14 @@ func (r *batchRunner) runCommentAdd(ctx context.Context, op batchOp, dryRun bool
 	cmdID := newCommandID("comment add", r.a.deps.Now().UTC())
 	postURN := stringArg(op.Args, "post_urn")
 	if postURN == "" {
-		return nil, cmdID, 0, fmt.Errorf("missing required arg: post_urn")
+		return nil, cmdID, 0, batchValidationf("missing required arg: post_urn")
 	}
 	text := stringArg(op.Args, "text")
 	if text == "" {
-		return nil, cmdID, 0, fmt.Errorf("missing required arg: text")
+		return nil, cmdID, 0, batchValidationf("missing required arg: text")
+	}
+	if len(text) > 1250 {
+		return nil, cmdID, 0, batchValidationf("invalid text length: text must be between 1 and 1250 characters")
 	}
 	if dryRun {
 		data := output.CommentAddDryRunData{
@@ -470,7 +502,7 @@ func (r *batchRunner) runReactAdd(ctx context.Context, op batchOp, dryRun bool) 
 	cmdID := newCommandID("react add", r.a.deps.Now().UTC())
 	postURN := stringArg(op.Args, "post_urn")
 	if postURN == "" {
-		return nil, cmdID, 0, fmt.Errorf("missing required arg: post_urn")
+		return nil, cmdID, 0, batchValidationf("missing required arg: post_urn")
 	}
 	rtStr := stringArg(op.Args, "type")
 	if rtStr == "" {
@@ -478,7 +510,7 @@ func (r *batchRunner) runReactAdd(ctx context.Context, op batchOp, dryRun bool) 
 	}
 	rtype, err := output.ParseReactionType(rtStr)
 	if err != nil {
-		return nil, cmdID, 0, fmt.Errorf("invalid reaction type: %w", err)
+		return nil, cmdID, 0, fmt.Errorf("invalid reaction type: %w: %w", err, errBatchValidation)
 	}
 	if dryRun {
 		data := output.ReactionAddDryRunData{
@@ -503,20 +535,23 @@ func (r *batchRunner) runPostSchedule(ctx context.Context, op batchOp) (any, str
 
 	atStr := stringArg(op.Args, "at")
 	if atStr == "" {
-		return nil, cmdID, 0, fmt.Errorf("missing required arg: at")
+		return nil, cmdID, 0, batchValidationf("missing required arg: at")
 	}
 	scheduledAt, err := time.Parse(time.RFC3339, atStr)
 	if err != nil {
-		return nil, cmdID, 0, fmt.Errorf("invalid at value: %w", err)
+		return nil, cmdID, 0, fmt.Errorf("invalid at value: %w: %w", err, errBatchValidation)
 	}
 	scheduledAt = scheduledAt.UTC()
 	if !scheduledAt.After(r.a.deps.Now().UTC().Add(30 * time.Second)) {
-		return nil, cmdID, 0, fmt.Errorf("at must be at least 30 seconds in the future")
+		return nil, cmdID, 0, batchValidationf("at must be at least 30 seconds in the future")
 	}
 
 	text := stringArg(op.Args, "text")
 	if text == "" {
-		return nil, cmdID, 0, fmt.Errorf("missing required arg: text")
+		return nil, cmdID, 0, batchValidationf("missing required arg: text")
+	}
+	if len(text) < 5 || len(text) > 3000 {
+		return nil, cmdID, 0, batchValidationf("invalid text length: text must be between 5 and 3000 characters")
 	}
 	visStr := stringArg(op.Args, "visibility")
 	if visStr == "" {
@@ -524,11 +559,11 @@ func (r *batchRunner) runPostSchedule(ctx context.Context, op batchOp) (any, str
 	}
 	visibility, err := output.ParseVisibility(visStr)
 	if err != nil {
-		return nil, cmdID, 0, fmt.Errorf("invalid visibility: %w", err)
+		return nil, cmdID, 0, fmt.Errorf("invalid visibility: %w: %w", err, errBatchValidation)
 	}
 	imagePath := stringArg(op.Args, "image_path")
 	if imagePath != "" && !strings.HasPrefix(imagePath, "/") {
-		return nil, cmdID, 0, fmt.Errorf("image_path must be absolute")
+		return nil, cmdID, 0, batchValidationf("image_path must be absolute")
 	}
 
 	entry := schedule.Entry{
@@ -580,38 +615,70 @@ func (r *batchRunner) emitPendingApproval(ctx context.Context, lineNum int, op b
 	switch cmdName {
 	case "post create":
 		text := stringArg(op.Args, "text")
+		if text == "" {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "missing required arg: text")
+		}
+		if len(text) < 5 || len(text) > 3000 {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "invalid text length: text must be between 5 and 3000 characters")
+		}
 		visStr := stringArg(op.Args, "visibility")
 		if visStr == "" {
 			visStr = "PUBLIC"
 		}
-		vis, _ := output.ParseVisibility(visStr)
+		vis, err := output.ParseVisibility(visStr)
+		if err != nil {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "invalid visibility: "+err.Error())
+		}
+		authorURN := stringArg(op.Args, "author_urn")
+		if authorURN != "" && !strings.HasPrefix(authorURN, "urn:li:organization:") {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "invalid author_urn: must be a urn:li:organization:... URN")
+		}
 		payload = output.PostPayloadPreview{
 			Endpoint:   "POST /rest/posts",
 			Text:       text,
 			Visibility: vis,
 			Media:      stringArg(op.Args, "media"),
-			AuthorURN:  stringArg(op.Args, "author_urn"),
+			AuthorURN:  authorURN,
 		}
 	case "post delete":
 		postURN := stringArg(op.Args, "post_urn")
+		if postURN == "" {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "missing required arg: post_urn")
+		}
 		payload = output.PostDeletePreview{
 			Endpoint: "DELETE /rest/posts/" + postURN,
 			PostURN:  postURN,
 		}
 	case "comment add":
 		postURN := stringArg(op.Args, "post_urn")
+		if postURN == "" {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "missing required arg: post_urn")
+		}
+		text := stringArg(op.Args, "text")
+		if text == "" {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "missing required arg: text")
+		}
+		if len(text) > 1250 {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "invalid text length: text must be between 1 and 1250 characters")
+		}
 		payload = output.CommentAddPreview{
 			Endpoint: "POST /rest/socialActions/" + postURN + "/comments",
 			PostURN:  postURN,
-			Text:     stringArg(op.Args, "text"),
+			Text:     text,
 		}
 	case "react add":
 		postURN := stringArg(op.Args, "post_urn")
+		if postURN == "" {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "missing required arg: post_urn")
+		}
 		rtStr := stringArg(op.Args, "type")
 		if rtStr == "" {
 			rtStr = string(output.ReactionLike)
 		}
-		rt, _ := output.ParseReactionType(rtStr)
+		rt, err := output.ParseReactionType(rtStr)
+		if err != nil {
+			return r.emitApprovalValidationError(lineNum, op, cmdID, "invalid reaction type: "+err.Error())
+		}
 		payload = output.ReactionAddPreview{
 			Endpoint: "POST /rest/reactions",
 			PostURN:  postURN,
@@ -632,7 +699,7 @@ func (r *batchRunner) emitPendingApproval(ctx context.Context, lineNum int, op b
 	}
 	stagedPath, stageErr := r.a.deps.ApprovalStore.Stage(ctx, entry)
 	if stageErr != nil {
-		return r.emitValidationError(lineNum, op, fmt.Sprintf("approval stage failed: %s", stageErr))
+		return r.emitApprovalValidationError(lineNum, op, cmdID, fmt.Sprintf("approval stage failed: %s", stageErr))
 	}
 
 	r.a.auditMutation(r.cmd, cmdID, "pending_approval", "normal", "", 0, "", nil)
@@ -671,6 +738,11 @@ func (r *batchRunner) emitPendingApproval(ctx context.Context, lineNum int, op b
 	r.writeEnvelope(envelope)
 	// pending_approval is not an error; return nil so batch continues.
 	return nil
+}
+
+func (r *batchRunner) emitApprovalValidationError(lineNum int, op batchOp, cmdID, message string) error {
+	r.a.auditMutation(r.cmd, cmdID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
+	return r.emitValidationError(lineNum, op, message)
 }
 
 // emitSuccess writes a batch op result envelope for a successful op.
@@ -764,22 +836,7 @@ func (r *batchRunner) emitValidationError(lineNum int, op batchOp, msg string) e
 
 // emitOpError writes an error result for a failed transport op.
 func (r *batchRunner) emitOpError(lineNum int, op batchOp, cmdID string, opErr error) error {
-	errCode := string(output.ErrorCodeTransport)
-	if ae, ok := api.AsError(opErr); ok {
-		switch {
-		case ae.IsUnauthorized():
-			errCode = string(output.ErrorCodeUnauthorized)
-		case ae.IsForbidden():
-			errCode = string(output.ErrorCodeForbidden)
-		case ae.IsNotFound():
-			errCode = string(output.ErrorCodeNotFound)
-		case ae.IsRateLimited():
-			errCode = string(output.ErrorCodeRateLimited)
-		case ae.IsValidation():
-			errCode = string(output.ErrorCodeValidation)
-		}
-	}
-
+	errCode := batchErrorCode(opErr)
 	meta := r.a.metadata(r.cmd, output.StatusError)
 	meta.Command = "batch"
 	meta.CommandID = cmdID
@@ -852,14 +909,28 @@ func (r *batchRunner) paceRateLimit(ctx context.Context) {
 		return
 	}
 	sleepUntil := resetTime.Add(time.Second)
-	wait := time.Until(sleepUntil)
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	wait := sleepUntil.Sub(now())
 	if wait <= 0 {
 		return
 	}
 	r.a.logger.Warn("batch: rate limit low, pacing", "remaining", *rl.Remaining, "sleep_until", sleepUntil)
+	sleep := sleepContext
+	if r.sleep != nil {
+		sleep = r.sleep
+	}
+	sleep(ctx, wait)
+}
+
+func sleepContext(ctx context.Context, wait time.Duration) {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-	case <-time.After(wait):
+	case <-timer.C:
 	}
 }
 

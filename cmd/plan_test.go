@@ -103,6 +103,40 @@ func TestPlanPostDelete_emitsValidPlan(t *testing.T) {
 	}
 }
 
+func TestPlanPostEdit_emitsOnlyProvidedFields(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "plan", "post", "edit", "--post-urn", "urn:li:share:789", "--visibility", "CONNECTIONS"},
+		testDepsOptions{})
+	if code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, stderr)
+	}
+	var env output.PlanOutput
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Data.Command != "post edit" {
+		t.Fatalf("command = %q, want post edit", env.Data.Command)
+	}
+	if env.Data.Args["post_urn"] != "urn:li:share:789" {
+		t.Fatalf("post_urn = %v", env.Data.Args["post_urn"])
+	}
+	if env.Data.Args["visibility"] != "CONNECTIONS" {
+		t.Fatalf("visibility = %v", env.Data.Args["visibility"])
+	}
+	if _, ok := env.Data.Args["text"]; ok {
+		t.Fatalf("text should be omitted when not provided: %+v", env.Data.Args)
+	}
+}
+
+func TestPlanPostEdit_missingPostURN(t *testing.T) {
+	code, _, _ := executeTestCommand(t,
+		[]string{"--json", "plan", "post", "edit", "--text", "updated"},
+		testDepsOptions{})
+	if code == 0 {
+		t.Fatal("expected non-zero exit for missing --post-urn")
+	}
+}
+
 func TestPlanPostReshare_emitsValidPlan(t *testing.T) {
 	code, stdout, stderr := executeTestCommand(t,
 		[]string{"--json", "plan", "post", "reshare", "--parent-urn", "urn:li:share:999"},

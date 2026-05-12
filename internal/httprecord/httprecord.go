@@ -29,6 +29,7 @@ import (
 
 const maxInlineBodyBytes = 1024
 const maxCassetteLineBytes = 1 * 1024 * 1024 // 1 MiB
+const maxRecordedResponseBodyBytes = 8 << 20
 
 // Entry is one line of a JSONL cassette file.
 type Entry struct {
@@ -151,9 +152,14 @@ func (rt *RecordTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return nil, err
 	}
 
-	// Read and restore the response body.
-	respBody, readErr := io.ReadAll(resp.Body)
+	// Read and restore the response body, bounded to match the API client cap.
+	limitedBody := io.LimitReader(resp.Body, maxRecordedResponseBodyBytes+1)
+	respBody, readErr := io.ReadAll(limitedBody)
 	_ = resp.Body.Close()
+	if readErr == nil && len(respBody) > maxRecordedResponseBodyBytes {
+		readErr = fmt.Errorf("record: response body exceeds %d bytes", maxRecordedResponseBodyBytes)
+		respBody = respBody[:maxRecordedResponseBodyBytes]
+	}
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
 	if readErr != nil {
@@ -387,9 +393,6 @@ func shouldInlineRequestBody(req *http.Request, reqBody []byte) bool {
 		return false
 	}
 	contentType := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
-	if !strings.Contains(contentType, "json") && !strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
-		return false
-	}
 	if strings.HasPrefix(contentType, "application/x-www-form-urlencoded") {
 		path := strings.ToLower(req.URL.Path)
 		if strings.Contains(path, "/oauth/") || strings.Contains(path, "accesstoken") {
