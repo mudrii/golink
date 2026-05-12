@@ -2,7 +2,7 @@ class Golink < Formula
   desc "LinkedIn CLI for humans and LLM agents"
   homepage "https://github.com/mudrii/golink"
   url "https://github.com/mudrii/golink.git",
-      tag: "v26.05.05"
+      tag: "v26.05.12"
   license "MIT"
   head "https://github.com/mudrii/golink.git", branch: "main"
 
