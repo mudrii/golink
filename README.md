@@ -100,7 +100,7 @@ golink does NOT run a daemon. Operators invoke `schedule run` via cron, launchd,
 ## Installation
 
 ```sh
-go install github.com/mudrii/golink@v26.05.12
+go install github.com/mudrii/golink@v26.05.13
 ```
 
 Requires Go 1.26.3+.
