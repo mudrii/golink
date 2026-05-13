@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,6 +130,19 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		}
 		if respErr != nil {
 			if errors.Is(respErr, context.Canceled) || errors.Is(respErr, context.DeadlineExceeded) {
+				return false, respErr
+			}
+			// TLS alert errors are surfaced by the server and won't change on
+			// retry; a tight retry loop here only delays the user's failure.
+			var tlsAlert *tls.AlertError
+			if errors.As(respErr, &tlsAlert) {
+				return false, respErr
+			}
+			// url.Error.Temporary() is deprecated but still implemented by
+			// net.OpError for connection-refused/no-route-to-host cases that
+			// will not succeed on retry. Honor it when present.
+			var urlErr *url.Error
+			if errors.As(respErr, &urlErr) && !urlErr.Temporary() { //nolint:staticcheck // Temporary is deprecated but remains the practical signal for permanent dial errors
 				return false, respErr
 			}
 			return true, nil

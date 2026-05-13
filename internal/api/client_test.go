@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -190,6 +191,43 @@ func TestResolveURLEdgeCases(t *testing.T) {
 	}
 	if got, want := resolved.String(), "https://api.linkedin.test/rest/posts?q=hello%20world#frag"; got != want {
 		t.Fatalf("resolved URL = %q, want %q", got, want)
+	}
+}
+
+func TestClient_DoesNotRetryPermanentNetworkError(t *testing.T) {
+	// Reserve a port then close the listener so dialing yields a permanent
+	// connection-refused error (no DNS lookup involved).
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	client, err := NewClient(ClientConfig{
+		BaseURL:      "http://" + addr,
+		RetryMax:     5,
+		RetryWaitMin: 50 * time.Millisecond,
+		RetryWaitMax: 50 * time.Millisecond,
+		Token: func(_ context.Context) (string, error) {
+			return "t", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	start := time.Now()
+	_, err = client.Do(t.Context(), http.MethodGet, "/rest/x", nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected network error, got nil")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("permanent connection-refused should not have retried; elapsed = %s", elapsed)
 	}
 }
 
