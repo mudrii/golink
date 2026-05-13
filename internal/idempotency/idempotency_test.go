@@ -423,6 +423,88 @@ func TestFileStore_ConcurrentRecordIsAtomic(t *testing.T) {
 	}
 }
 
+func TestFileStore_ConcurrentRecordDuringPruneDoesNotLoseEntries(t *testing.T) {
+	// Given: a FileStore seeded with old + fresh entries.
+	// When: one goroutine repeatedly Prunes (read+rewrite) while another
+	// repeatedly Records new entries.
+	// Then: every Record we observed as success must be present in the final
+	// file. Without sidecar locking, Prune's read→rename window swallows
+	// concurrent appends.
+	path := filepath.Join(t.TempDir(), "idempotency.jsonl")
+
+	pruner := NewFileStore(path)
+	now := time.Now().UTC()
+	for i := range 4 {
+		old := Entry{
+			TS:      now.Add(-25 * time.Hour),
+			Key:     "old-" + string(rune('a'+i)),
+			Command: "post create",
+			Status:  "ok",
+		}
+		if err := pruner.Record(t.Context(), old); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	const writers = 8
+	const perWriter = 20
+	const pruneRounds = 30
+
+	var wg sync.WaitGroup
+	wg.Add(writers + 1)
+
+	for w := range writers {
+		go func(w int) {
+			defer wg.Done()
+			s := NewFileStore(path)
+			for i := range perWriter {
+				e := Entry{
+					TS:      time.Now().UTC(),
+					Key:     "k_" + string(rune('a'+w)) + "_" + string(rune('A'+i)),
+					Command: "post create",
+					Status:  "ok",
+				}
+				if err := s.Record(t.Context(), e); err != nil {
+					t.Errorf("Record: %v", err)
+					return
+				}
+			}
+		}(w)
+	}
+
+	go func() {
+		defer wg.Done()
+		for range pruneRounds {
+			if err := pruner.Prune(t.Context(), 24*time.Hour, 10_000); err != nil {
+				t.Errorf("Prune: %v", err)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	final := pruner.mustReadAll(t)
+	got := make(map[string]struct{}, len(final))
+	for _, e := range final {
+		got[e.Key] = struct{}{}
+	}
+
+	want := writers * perWriter
+	have := 0
+	for w := range writers {
+		for i := range perWriter {
+			key := "k_" + string(rune('a'+w)) + "_" + string(rune('A'+i))
+			if _, ok := got[key]; ok {
+				have++
+			}
+		}
+	}
+	if have != want {
+		t.Fatalf("lost %d entries to Prune race; have=%d want=%d", want-have, have, want)
+	}
+}
+
 func TestResolvePath(t *testing.T) {
 	t.Setenv("GOLINK_IDEMPOTENCY_PATH", "/tmp/test-idempotency.jsonl")
 	got := ResolvePath()

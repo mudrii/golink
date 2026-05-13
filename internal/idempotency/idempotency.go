@@ -128,83 +128,111 @@ func (s *FileStore) Lookup(_ context.Context, key, command string) (Entry, bool,
 }
 
 // Record appends entry to the file, creating it if necessary. The append is
-// guarded by flock(LOCK_EX) so concurrent golink processes serialize their
-// writes — POSIX only guarantees atomic O_APPEND up to PIPE_BUF.
+// guarded by an exclusive flock on a sidecar lock file so concurrent golink
+// processes serialize their writes and never interleave with a Prune rewrite.
+// POSIX only guarantees atomic O_APPEND up to PIPE_BUF, and Prune's tmp+rename
+// detaches any flock held on the data file itself — locking a stable sidecar
+// path survives that rename.
 func (s *FileStore) Record(_ context.Context, entry Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("idempotency mkdir: %w", err)
-	}
-
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("idempotency open: %w", err)
-	}
-
-	if err := lockFile(f); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("idempotency lock: %w", err)
-	}
 
 	if len(entry.Result) > 0 {
 		entry.Result = privacy.JSON(entry.Result)
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
-		_ = unlockFile(f)
-		_ = f.Close()
 		return fmt.Errorf("idempotency marshal: %w", err)
 	}
 	line = append(line, '\n')
 
-	_, writeErr := f.Write(line)
-	unlockErr := unlockFile(f)
-	closeErr := f.Close()
-	if writeErr != nil {
-		return fmt.Errorf("idempotency write: %w", writeErr)
+	return s.withLock(func() error {
+		f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("idempotency open: %w", err)
+		}
+		_, writeErr := f.Write(line)
+		closeErr := f.Close()
+		if writeErr != nil {
+			return fmt.Errorf("idempotency write: %w", writeErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("idempotency close: %w", closeErr)
+		}
+		return nil
+	})
+}
+
+// withLock acquires an exclusive cross-process lock on a sidecar file alongside
+// s.path, then runs fn. The sidecar (rather than s.path itself) is locked so
+// the lock survives Prune's tmp+rename cycle, which would otherwise detach the
+// lock from the live inode.
+func (s *FileStore) withLock(fn func() error) error {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("idempotency mkdir: %w", err)
+	}
+
+	lockPath := s.path + ".lock"
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("idempotency lock open: %w", err)
+	}
+	if err := lockFile(lf); err != nil {
+		_ = lf.Close()
+		return fmt.Errorf("idempotency lock: %w", err)
+	}
+
+	fnErr := fn()
+	unlockErr := unlockFile(lf)
+	closeErr := lf.Close()
+	if fnErr != nil {
+		return fnErr
 	}
 	if unlockErr != nil {
 		return unlockErr
 	}
 	if closeErr != nil {
-		return fmt.Errorf("idempotency close: %w", closeErr)
+		return fmt.Errorf("idempotency lock close: %w", closeErr)
 	}
 	return nil
 }
 
 // Prune removes entries older than window and caps the file at maxLines,
 // keeping the most recent entries. A no-op when the file does not exist.
+// The read-modify-write cycle runs under the same sidecar flock that Record
+// uses, so concurrent writers cannot slip an append between readAll and the
+// atomic rename in writeAll.
 func (s *FileStore) Prune(_ context.Context, window time.Duration, maxLines int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entries, err := s.readAll()
-	if err != nil {
-		if os.IsNotExist(err) {
+	return s.withLock(func() error {
+		entries, err := s.readAll()
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("idempotency prune read: %w", err)
+		}
+
+		cutoff := s.now().Add(-window)
+		kept := entries[:0]
+		for i := range entries {
+			if !entries[i].TS.Before(cutoff) {
+				kept = append(kept, entries[i])
+			}
+		}
+		if maxLines > 0 && len(kept) > maxLines {
+			kept = kept[len(kept)-maxLines:]
+		}
+
+		if len(kept) == len(entries) {
 			return nil
 		}
-		return fmt.Errorf("idempotency prune read: %w", err)
-	}
 
-	cutoff := s.now().Add(-window)
-	kept := entries[:0]
-	for i := range entries {
-		if !entries[i].TS.Before(cutoff) {
-			kept = append(kept, entries[i])
-		}
-	}
-	if maxLines > 0 && len(kept) > maxLines {
-		kept = kept[len(kept)-maxLines:]
-	}
-
-	if len(kept) == len(entries) {
-		return nil
-	}
-
-	return s.writeAll(kept)
+		return s.writeAll(kept)
+	})
 }
 
 func (s *FileStore) readAll() ([]Entry, error) {
