@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mudrii/golink/internal/filelock"
 	"github.com/mudrii/golink/internal/privacy"
 )
 
@@ -185,24 +186,15 @@ func (s *FileStore) withLock(fn func() error) error {
 		return fmt.Errorf("idempotency mkdir: %w", err)
 	}
 
-	lockPath := s.path + ".lock"
-	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	closer, err := filelock.Acquire(s.path + ".lock")
 	if err != nil {
-		return fmt.Errorf("idempotency lock open: %w", err)
-	}
-	if err := lockFile(lf); err != nil {
-		_ = lf.Close()
 		return fmt.Errorf("idempotency lock: %w", err)
 	}
 
 	fnErr := fn()
-	unlockErr := unlockFile(lf)
-	closeErr := lf.Close()
+	closeErr := closer.Close()
 	if fnErr != nil {
 		return fnErr
-	}
-	if unlockErr != nil {
-		return unlockErr
 	}
 	if closeErr != nil {
 		return fmt.Errorf("idempotency lock close: %w", closeErr)

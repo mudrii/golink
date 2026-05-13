@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/mudrii/golink/internal/audit"
 	"github.com/mudrii/golink/internal/auth"
 	"github.com/mudrii/golink/internal/config"
+	"github.com/mudrii/golink/internal/filelock"
 	"github.com/mudrii/golink/internal/idempotency"
 	"github.com/mudrii/golink/internal/output"
 	"github.com/mudrii/golink/internal/plan"
@@ -72,6 +74,12 @@ type Dependencies struct {
 	UserinfoURL string
 	// ProfileURL overrides the non-OIDC current-member profile endpoint.
 	ProfileURL string
+	// RefreshLockPath overrides the sidecar lock file used by
+	// maybeRefreshSession to serialise token-refresh attempts across
+	// concurrent golink processes. Tests inject a temp-dir path to avoid
+	// touching the user's state directory; production resolves to
+	// $XDG_STATE_HOME/golink/session.refresh.lock.
+	RefreshLockPath string
 }
 
 type app struct {
@@ -284,8 +292,29 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 	if deps.RandRead == nil {
 		deps.RandRead = rand.Read
 	}
+	if deps.RefreshLockPath == "" {
+		deps.RefreshLockPath = defaultRefreshLockPath()
+	}
 
 	return deps
+}
+
+// defaultRefreshLockPath resolves the sidecar flock path used by
+// maybeRefreshSession. Precedence: GOLINK_REFRESH_LOCK_PATH >
+// XDG_STATE_HOME/golink/session.refresh.lock >
+// $HOME/.local/state/golink/session.refresh.lock.
+func defaultRefreshLockPath() string {
+	if v := os.Getenv("GOLINK_REFRESH_LOCK_PATH"); v != "" {
+		return v
+	}
+	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
+		return filepath.Join(base, "golink", "session.refresh.lock")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".local", "state", "golink", "session.refresh.lock")
+	}
+	return filepath.Join(home, ".local", "state", "golink", "session.refresh.lock")
 }
 
 // defaultTransportFactory returns a TransportFactory that builds an official
@@ -520,12 +549,42 @@ func (a *app) loadAndVerifySession(cmd *cobra.Command, ctx context.Context, prof
 // 5 minutes of expiry and a refresh token is available. On success the
 // updated session is persisted and returned. On failure, the error is returned
 // for explicit handling by the caller.
+//
+// The refresh body runs under a cross-process advisory flock on
+// deps.RefreshLockPath so that concurrent golink invocations cannot both hit
+// the LinkedIn token endpoint and clobber one another's just-stored tokens.
+// After acquiring the lock the session is re-read from the store: if another
+// process already refreshed it (now > 5 minutes from expiry), the lock holder
+// returns the freshly stored session without making a network call.
 func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) (auth.Session, error) {
 	if session.RefreshToken == "" {
 		return session, nil
 	}
-	if session.ExpiresAt.Sub(a.deps.Now()) >= 5*time.Minute {
+	if !refreshDue(session, a.deps.Now()) {
 		return session, nil
+	}
+
+	closer, lockErr := a.acquireRefreshLock()
+	if lockErr != nil {
+		// Lock contention is rare and non-fatal: log and fall through to a
+		// best-effort refresh. The worst case is the same race window we
+		// already had before this guard existed.
+		a.logger.Warn("auto-refresh: lock unavailable, refreshing without serialisation", "error", lockErr)
+	} else {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				a.logger.Warn("auto-refresh: lock release failed", "error", err)
+			}
+		}()
+
+		// Re-read the session under the lock — another process may have
+		// already refreshed it while we waited for the lock.
+		if reloaded, err := a.deps.SessionStore.LoadSession(ctx, session.Profile); err == nil && reloaded != nil {
+			if !refreshDue(*reloaded, a.deps.Now()) {
+				return *reloaded, nil
+			}
+			session = *reloaded
+		}
 	}
 
 	token, err := auth.RefreshAccessToken(ctx, a.deps.HTTPClient, a.deps.TokenURL, a.settings.ClientID, session.RefreshToken)
@@ -552,6 +611,28 @@ func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) (au
 	}
 
 	return session, nil
+}
+
+// refreshDue reports whether session's access token is within the 5-minute
+// refresh window relative to now. A zero ExpiresAt is treated as "due" — the
+// caller already required a non-empty RefreshToken before reaching this point.
+func refreshDue(session auth.Session, now time.Time) bool {
+	return session.ExpiresAt.Sub(now) < 5*time.Minute
+}
+
+// acquireRefreshLock takes the sidecar flock guarding maybeRefreshSession. The
+// lock directory is created on demand so the helper works on a fresh install.
+func (a *app) acquireRefreshLock() (io.Closer, error) {
+	path := a.deps.RefreshLockPath
+	if path == "" {
+		path = defaultRefreshLockPath()
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("refresh lock mkdir: %w", err)
+		}
+	}
+	return filelock.Acquire(path)
 }
 
 // resolveTransport returns the Transport for the active settings and session,
@@ -885,13 +966,13 @@ func preflightFlags(args []string) (jsonMode bool, transport, outputMode string)
 	// Resolve output mode using same precedence as config.Loader.
 	switch {
 	case compact:
-		outputMode = "compact"
+		outputMode = output.ModeCompact
 	case outputFlag != "":
 		outputMode = outputFlag
 	case jsonMode:
-		outputMode = "json"
+		outputMode = output.ModeJSON
 	default:
-		outputMode = "text"
+		outputMode = output.ModeText
 	}
 
 	return jsonMode, transport, outputMode
