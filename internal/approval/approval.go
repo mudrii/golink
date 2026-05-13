@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/mudrii/golink/internal/privacy"
 )
 
 // State represents the lifecycle state of an approval entry.
@@ -128,11 +126,17 @@ func (s *FileStore) Stage(_ context.Context, entry Entry) (string, error) {
 	}
 
 	path := s.filePath(entry.CommandID, StatePending)
+	// The persisted payload is read back verbatim by approval run to dispatch
+	// the request, so it MUST NOT be redacted. The approvals directory is
+	// mode 0o700 and each file is mode 0o600 — the same trust boundary as
+	// the keyring that stores the access token. Redacting "text",
+	// "commentary", "image_alt", etc. here would cause the literal string
+	// "REDACTED" to be posted to LinkedIn (regression introduced in 696bef6
+	// and reverted here).
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return "", fmt.Errorf("approval marshal: %w", err)
 	}
-	data = privacy.JSON(data)
 
 	// O_EXCL ensures a duplicate command_id never silently overwrites an
 	// existing pending entry across processes.

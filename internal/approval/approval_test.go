@@ -216,22 +216,27 @@ func TestFileStore_StageListGrantRun(t *testing.T) {
 	}
 }
 
-func TestFileStore_StageRedactsFreeText(t *testing.T) {
+// TestFileStore_StagePersistsPayloadVerbatim guards H1: the staged payload is
+// the source of truth for `approval run`, so it MUST round-trip unchanged.
+// A prior version of Stage redacted free-text fields before writing, which
+// caused the literal string "REDACTED" to be dispatched to LinkedIn on run.
+func TestFileStore_StagePersistsPayloadVerbatim(t *testing.T) {
 	dir := t.TempDir()
 	store := approval.NewFileStore(dir)
 
+	original := output.PostPayloadPreview{
+		Endpoint:   "POST /rest/posts",
+		Text:       "Real announcement: we are launching tomorrow.",
+		Visibility: output.Visibility("PUBLIC"),
+		AuthorURN:  "urn:li:person:abc123",
+	}
 	e := approval.Entry{
-		CommandID: "cmd_post_create_redact",
+		CommandID: "cmd_post_create_verbatim",
 		Command:   "post create",
 		CreatedAt: time.Now().UTC(),
 		Transport: "official",
 		Profile:   "default",
-		Payload: output.PostPayloadPreview{
-			Endpoint:   "POST /rest/posts",
-			Text:       "confidential",
-			Visibility: output.Visibility("PUBLIC"),
-			AuthorURN:  "urn:li:person:abc123",
-		},
+		Payload:   original,
 	}
 	path, err := store.Stage(t.Context(), e)
 	if err != nil {
@@ -244,13 +249,32 @@ func TestFileStore_StageRedactsFreeText(t *testing.T) {
 	}
 	text := string(raw)
 
-	for _, leaked := range []string{"confidential", "urn:li:person:abc123"} {
-		if strings.Contains(text, leaked) {
-			t.Errorf("approval file leaked %q: %s", leaked, text)
+	if strings.Contains(text, "REDACTED") {
+		t.Fatalf("approval file contains REDACTED — payload would be lost on run: %s", text)
+	}
+	for _, want := range []string{original.Text, original.AuthorURN, "PUBLIC"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("approval file missing verbatim field %q: %s", want, text)
 		}
 	}
-	if !strings.Contains(text, "PUBLIC") {
-		t.Errorf("expected non-sensitive visibility to survive: %s", text)
+
+	// Round-trip: Show returns the same payload Stage received.
+	got, state, err := store.Show(t.Context(), e.CommandID)
+	if err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	if state != approval.StatePending {
+		t.Fatalf("state = %s, want pending", state)
+	}
+	payload, ok := got.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", got.Payload)
+	}
+	if payload["text"] != original.Text {
+		t.Errorf("text round-trip = %q, want %q", payload["text"], original.Text)
+	}
+	if payload["author_urn"] != original.AuthorURN {
+		t.Errorf("author_urn round-trip = %q, want %q", payload["author_urn"], original.AuthorURN)
 	}
 }
 

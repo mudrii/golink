@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,7 @@ type approvalRecordingTransport struct {
 	sawCreate      bool
 	sawInit        bool
 	sawUpload      bool
+	gotText        string
 }
 
 type approvalImageErrorTransport struct {
@@ -72,6 +74,7 @@ func (tpt *approvalImageErrorTransport) UploadImageBinary(context.Context, strin
 
 func (tpt *approvalRecordingTransport) CreatePost(_ context.Context, req api.CreatePostRequest) (*outputtest.PostSummary, error) {
 	tpt.sawCreate = true
+	tpt.gotText = req.Text
 	if req.AuthorURN != tpt.wantAuthorURN {
 		tpt.t.Fatalf("author_urn = %q, want %q", req.AuthorURN, tpt.wantAuthorURN)
 	}
@@ -1150,5 +1153,75 @@ func TestApprovalCancel(t *testing.T) {
 	items2, _ := astore.List(t.Context())
 	if len(items2) != 0 {
 		t.Errorf("expected empty list after cancel, got %d", len(items2))
+	}
+}
+
+// TestApprovalRun_FileStoreRoundTripsPayloadVerbatim is the end-to-end guard
+// for H1: stage a --require-approval post through a real on-disk FileStore,
+// grant it, run it, and assert the transport receives the operator's literal
+// text. A prior version of FileStore.Stage redacted "text" before writing,
+// which caused the literal string "REDACTED" to be posted to LinkedIn on run.
+func TestApprovalRun_FileStoreRoundTripsPayloadVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	astore := approval.NewFileStore(dir)
+
+	const wantText = "Real announcement: we are launching tomorrow."
+
+	code, _, stderr := executeTestCommand(t,
+		[]string{"--json", "post", "create", "--text", wantText, "--require-approval"},
+		testDepsOptions{approvalStore: astore})
+	if code != 3 {
+		t.Fatalf("stage exit %d stderr=%s", code, stderr)
+	}
+
+	items, err := astore.List(t.Context())
+	if err != nil {
+		t.Fatalf("list approvals: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 staged entry, got %d", len(items))
+	}
+	cmdID := items[0].CommandID
+
+	// Independently verify the on-disk file does not contain "REDACTED".
+	pending := filepath.Join(dir, cmdID+".pending.json")
+	raw, err := os.ReadFile(pending)
+	if err != nil {
+		t.Fatalf("read pending: %v", err)
+	}
+	if strings.Contains(string(raw), "REDACTED") {
+		t.Fatalf("pending file contains REDACTED: %s", raw)
+	}
+	if !strings.Contains(string(raw), wantText) {
+		t.Fatalf("pending file missing original text: %s", raw)
+	}
+
+	code, _, stderr = executeTestCommand(t,
+		[]string{"--json", "approval", "grant", cmdID},
+		testDepsOptions{approvalStore: astore})
+	if code != 0 {
+		t.Fatalf("grant exit %d stderr=%s", code, stderr)
+	}
+
+	transport := &approvalRecordingTransport{
+		fakeTransport: fakeTransport{name: "official"},
+		t:             t,
+	}
+
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "approval", "run", cmdID},
+		testDepsOptions{
+			store:            authenticatedStore(t),
+			approvalStore:    astore,
+			transportFactory: factoryReturning(transport),
+		})
+	if code != 0 {
+		t.Fatalf("run exit %d stderr=%s stdout=%s", code, stderr, stdout)
+	}
+	if !transport.sawCreate {
+		t.Fatal("expected CreatePost to be called")
+	}
+	if transport.gotText != wantText {
+		t.Fatalf("dispatched text = %q, want %q (H1 regression: payload was redacted on disk)", transport.gotText, wantText)
 	}
 }
