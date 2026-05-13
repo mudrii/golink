@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -258,8 +258,8 @@ func (s *FileStore) List(_ context.Context) ([]Entry, error) {
 		}
 	}
 
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].ScheduledAt.Before(entries[j].ScheduledAt)
+	slices.SortFunc(entries, func(a, b Entry) int {
+		return a.ScheduledAt.Compare(b.ScheduledAt)
 	})
 	return entries, nil
 }
@@ -358,8 +358,8 @@ func (s *FileStore) Due(_ context.Context, now time.Time, limit int) ([]Entry, e
 		}
 	}
 
-	sort.Slice(due, func(i, j int) bool {
-		return due[i].ScheduledAt.Before(due[j].ScheduledAt)
+	slices.SortFunc(due, func(a, b Entry) int {
+		return a.ScheduledAt.Compare(b.ScheduledAt)
 	})
 
 	if limit > 0 && len(due) > limit {
@@ -673,8 +673,8 @@ func (m *MemoryStore) List(_ context.Context) ([]Entry, error) {
 		e := m.entries[k]
 		entries = append(entries, e)
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].ScheduledAt.Before(entries[j].ScheduledAt)
+	slices.SortFunc(entries, func(a, b Entry) int {
+		return a.ScheduledAt.Compare(b.ScheduledAt)
 	})
 	return entries, nil
 }
@@ -704,8 +704,8 @@ func (m *MemoryStore) Due(_ context.Context, now time.Time, limit int) ([]Entry,
 			due = append(due, e)
 		}
 	}
-	sort.Slice(due, func(i, j int) bool {
-		return due[i].ScheduledAt.Before(due[j].ScheduledAt)
+	slices.SortFunc(due, func(a, b Entry) int {
+		return a.ScheduledAt.Compare(b.ScheduledAt)
 	})
 	if limit > 0 && len(due) > limit {
 		due = due[:limit]
