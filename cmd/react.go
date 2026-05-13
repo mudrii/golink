@@ -32,7 +32,7 @@ func newReactAddCommand(a *app) *cobra.Command {
 		Args:        cobra.ExactArgs(1),
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			postURN := trimmedText(args[0])

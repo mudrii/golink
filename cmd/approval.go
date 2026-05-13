@@ -112,7 +112,7 @@ func newApprovalGrantCommand(a *app) *cobra.Command {
 			commandID := trimmedText(args[0])
 			auditID := commandID
 			if auditID == "" {
-				auditID = newCommandID(commandName(cmd), a.deps.Now().UTC())
+				auditID = a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			}
 			if commandID == "" {
 				a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
@@ -146,7 +146,7 @@ func newApprovalDenyCommand(a *app) *cobra.Command {
 			commandID := trimmedText(args[0])
 			auditID := commandID
 			if auditID == "" {
-				auditID = newCommandID(commandName(cmd), a.deps.Now().UTC())
+				auditID = a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			}
 			if commandID == "" {
 				a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
@@ -180,7 +180,7 @@ func newApprovalCancelCommand(a *app) *cobra.Command {
 			commandID := trimmedText(args[0])
 			auditID := commandID
 			if auditID == "" {
-				auditID = newCommandID(commandName(cmd), a.deps.Now().UTC())
+				auditID = a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			}
 			if commandID == "" {
 				a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
@@ -262,7 +262,7 @@ func (a *app) approvalRunValidation(cmd *cobra.Command, commandID string) approv
 	return func(message, details string) error {
 		auditID := commandID
 		if auditID == "" {
-			auditID = newCommandID(commandName(cmd), a.deps.Now().UTC())
+			auditID = a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 		}
 		a.auditMutation(cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 		return a.validationFailure(cmd, message, details)

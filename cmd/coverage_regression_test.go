@@ -79,18 +79,20 @@ func TestDefaultTransportFactoryBranches(t *testing.T) {
 }
 
 func TestNewCommandIDFallbackWhenRandomFails(t *testing.T) {
-	oldRead := commandIDRandomRead
 	oldSeq := commandIDFallbackSeq
-	commandIDRandomRead = func([]byte) (int, error) {
-		return 0, errors.New("entropy unavailable")
-	}
 	commandIDFallbackSeq = 0
 	t.Cleanup(func() {
-		commandIDRandomRead = oldRead
 		commandIDFallbackSeq = oldSeq
 	})
 
-	got := newCommandID("post create", fixedNow())
+	deps := normalizeDependencies(Dependencies{
+		RandRead: func([]byte) (int, error) {
+			return 0, errors.New("entropy unavailable")
+		},
+	})
+	a := newApp(BuildInfo{}, deps, nil)
+
+	got := a.newCommandID("post create", fixedNow())
 	if got != "cmd_post_create_1776427200_000001" {
 		t.Fatalf("fallback command id = %q", got)
 	}

@@ -96,7 +96,7 @@ type preparedPostCreate struct {
 }
 
 func (a *app) runPostCreateCommand(cmd *cobra.Command, flags postCreateFlags) error {
-	cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+	cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 	ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 	prepared, err := a.preparePostCreate(cmd, cmdID, flags)
@@ -343,7 +343,7 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 		Args:        cobra.ExactArgs(1),
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			postURN := trimmedText(args[0])
@@ -460,7 +460,7 @@ type postEditChange struct {
 }
 
 func (a *app) runPostEditCommand(cmd *cobra.Command, input postEditInput) error {
-	cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+	cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 	ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 	change, err := a.buildPostEditChange(cmd, cmdID, input)
@@ -610,7 +610,7 @@ func newPostReshareCommand(a *app) *cobra.Command {
 		Args:        cobra.ExactArgs(1),
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			parentURN := trimmedText(args[0])

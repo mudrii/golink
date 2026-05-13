@@ -280,7 +280,7 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 	cmdName := strings.TrimSpace(op.Command)
 
 	if _, ok := batchSupportedCommands[cmdName]; !ok {
-		auditID := newCommandID(cmdName, r.a.deps.Now().UTC())
+		auditID := r.a.newCommandID(cmdName, r.a.deps.Now().UTC())
 		emitErr := r.emitValidationError(lineNum, op, fmt.Sprintf("unsupported command %q; supported: post create, post delete, comment add, react add, post schedule", cmdName))
 		r.a.auditMutation(r.cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 		return "", emitErr
@@ -293,7 +293,7 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 		defer release()
 		cached, hit, err := r.istore.Lookup(ctx, op.IdempotencyKey, cmdName)
 		if err != nil {
-			auditID := newCommandID(cmdName, r.a.deps.Now().UTC())
+			auditID := r.a.newCommandID(cmdName, r.a.deps.Now().UTC())
 			emitErr := r.emitValidationError(lineNum, op, err.Error())
 			r.a.auditMutation(r.cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 			return "", emitErr
@@ -317,7 +317,7 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 	requireApproval := op.RequireApproval
 	if requireApproval {
 		if cmdName == "post schedule" {
-			auditID := newCommandID(cmdName, r.a.deps.Now().UTC())
+			auditID := r.a.newCommandID(cmdName, r.a.deps.Now().UTC())
 			emitErr := r.emitValidationError(lineNum, op, "--require-approval is not supported with post schedule")
 			r.a.auditMutation(r.cmd, auditID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 			return "", emitErr
@@ -394,7 +394,7 @@ func batchErrorCode(err error) string {
 }
 
 func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool) (any, string, int, error) {
-	cmdID := newCommandID("post create", r.a.deps.Now().UTC())
+	cmdID := r.a.newCommandID("post create", r.a.deps.Now().UTC())
 	text := stringArg(op.Args, "text")
 	if text == "" {
 		return nil, cmdID, 0, batchValidationf("missing required arg: text")
@@ -445,7 +445,7 @@ func (r *batchRunner) runPostCreate(ctx context.Context, op batchOp, dryRun bool
 }
 
 func (r *batchRunner) runPostDelete(ctx context.Context, op batchOp, dryRun bool) (any, string, int, error) {
-	cmdID := newCommandID("post delete", r.a.deps.Now().UTC())
+	cmdID := r.a.newCommandID("post delete", r.a.deps.Now().UTC())
 	postURN := stringArg(op.Args, "post_urn")
 	if postURN == "" {
 		return nil, cmdID, 0, batchValidationf("missing required arg: post_urn")
@@ -468,7 +468,7 @@ func (r *batchRunner) runPostDelete(ctx context.Context, op batchOp, dryRun bool
 }
 
 func (r *batchRunner) runCommentAdd(ctx context.Context, op batchOp, dryRun bool) (any, string, int, error) {
-	cmdID := newCommandID("comment add", r.a.deps.Now().UTC())
+	cmdID := r.a.newCommandID("comment add", r.a.deps.Now().UTC())
 	postURN := stringArg(op.Args, "post_urn")
 	if postURN == "" {
 		return nil, cmdID, 0, batchValidationf("missing required arg: post_urn")
@@ -499,7 +499,7 @@ func (r *batchRunner) runCommentAdd(ctx context.Context, op batchOp, dryRun bool
 }
 
 func (r *batchRunner) runReactAdd(ctx context.Context, op batchOp, dryRun bool) (any, string, int, error) {
-	cmdID := newCommandID("react add", r.a.deps.Now().UTC())
+	cmdID := r.a.newCommandID("react add", r.a.deps.Now().UTC())
 	postURN := stringArg(op.Args, "post_urn")
 	if postURN == "" {
 		return nil, cmdID, 0, batchValidationf("missing required arg: post_urn")
@@ -531,7 +531,7 @@ func (r *batchRunner) runReactAdd(ctx context.Context, op batchOp, dryRun bool) 
 }
 
 func (r *batchRunner) runPostSchedule(ctx context.Context, op batchOp) (any, string, int, error) {
-	cmdID := newCommandID("post schedule", r.a.deps.Now().UTC())
+	cmdID := r.a.newCommandID("post schedule", r.a.deps.Now().UTC())
 
 	atStr := stringArg(op.Args, "at")
 	if atStr == "" {
@@ -607,7 +607,7 @@ func (r *batchRunner) runPostSchedule(ctx context.Context, op batchOp) (any, str
 // Batch continues with remaining ops — pending approval is not an error.
 func (r *batchRunner) emitPendingApproval(ctx context.Context, lineNum int, op batchOp) error {
 	cmdName := strings.TrimSpace(op.Command)
-	cmdID := newCommandID(cmdName, r.a.deps.Now().UTC())
+	cmdID := r.a.newCommandID(cmdName, r.a.deps.Now().UTC())
 	now := r.a.deps.Now().UTC()
 
 	// Build the preview payload reusing the same helpers as dry-run.
@@ -751,7 +751,7 @@ func (r *batchRunner) emitSuccess(lineNum int, op batchOp, cmdID string, httpSta
 	meta.Command = "batch"
 	meta.CommandID = cmdID
 	if cmdID == "" {
-		meta.CommandID = newCommandID("batch", r.a.deps.Now().UTC())
+		meta.CommandID = r.a.newCommandID("batch", r.a.deps.Now().UTC())
 	}
 	result := output.BatchOpResultData{
 		Line:           lineNum,
@@ -803,7 +803,7 @@ func (r *batchRunner) emitCachedResult(lineNum int, op batchOp, cached idempoten
 func (r *batchRunner) emitSkipped(lineNum int, op batchOp) {
 	meta := r.a.metadata(r.cmd, output.StatusOK)
 	meta.Command = "batch"
-	meta.CommandID = newCommandID("batch", r.a.deps.Now().UTC())
+	meta.CommandID = r.a.newCommandID("batch", r.a.deps.Now().UTC())
 	result := output.BatchOpResultData{
 		Line:           lineNum,
 		Status:         output.StatusOK,
@@ -820,7 +820,7 @@ func (r *batchRunner) emitSkipped(lineNum int, op batchOp) {
 func (r *batchRunner) emitValidationError(lineNum int, op batchOp, msg string) error {
 	meta := r.a.metadata(r.cmd, output.StatusValidation)
 	meta.Command = "batch"
-	meta.CommandID = newCommandID("batch", r.a.deps.Now().UTC())
+	meta.CommandID = r.a.newCommandID("batch", r.a.deps.Now().UTC())
 	result := output.BatchOpResultData{
 		Line:           lineNum,
 		Status:         output.StatusValidation,
@@ -841,7 +841,7 @@ func (r *batchRunner) emitOpError(lineNum int, op batchOp, cmdID string, opErr e
 	meta.Command = "batch"
 	meta.CommandID = cmdID
 	if cmdID == "" {
-		meta.CommandID = newCommandID("batch", r.a.deps.Now().UTC())
+		meta.CommandID = r.a.newCommandID("batch", r.a.deps.Now().UTC())
 	}
 	result := output.BatchOpResultData{
 		Line:           lineNum,

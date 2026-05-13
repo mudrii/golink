@@ -40,7 +40,6 @@ type BuildInfo struct {
 }
 
 var commandIDFallbackSeq uint64
-var commandIDRandomRead = rand.Read
 
 // TransportFactory constructs the Transport used by networked commands.
 // It receives the resolved settings and an optional session (may be empty
@@ -62,6 +61,9 @@ type Dependencies struct {
 	IdempotencyStore idempotency.Store
 	ApprovalStore    approval.Store
 	ScheduleStore    schedule.Store
+	// RandRead is the entropy seam used when generating command IDs.
+	// Tests inject deterministic readers; production defaults to crypto/rand.Read.
+	RandRead func([]byte) (int, error)
 	// TokenURL overrides the LinkedIn token endpoint; defaults to auth.TokenURL.
 	// Set in tests to point at a local httptest server.
 	TokenURL string
@@ -279,6 +281,9 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 		// loaded, unless the caller has opted out via GOLINK_AUDIT=off.
 		deps.AuditSink = audit.NoopSink{}
 	}
+	if deps.RandRead == nil {
+		deps.RandRead = rand.Read
+	}
 
 	return deps
 }
@@ -356,14 +361,18 @@ func defaultIsInteractive() bool {
 	return stdinInfo.Mode()&os.ModeCharDevice != 0 && stdoutInfo.Mode()&os.ModeCharDevice != 0
 }
 
-func newCommandID(command string, now time.Time) string {
+// newCommandID generates a command identifier using the app's injected
+// RandRead seam. Tests inject a deterministic reader to pin IDs; production
+// uses crypto/rand.Read. On entropy failure (rare in practice) the helper
+// falls back to a process-wide monotonic counter so IDs remain unique.
+func (a *app) newCommandID(command string, now time.Time) string {
 	commandSlug := strings.ReplaceAll(strings.TrimSpace(command), " ", "_")
 	if commandSlug == "" {
 		commandSlug = rootCommandName
 	}
 
 	randomBytes := make([]byte, 4)
-	if _, err := commandIDRandomRead(randomBytes); err != nil {
+	if _, err := a.deps.RandRead(randomBytes); err != nil {
 		// crypto/rand should not fail on supported Go platforms, but the
 		// sequence fallback keeps command IDs deterministic under that failure.
 		seq := atomic.AddUint64(&commandIDFallbackSeq, 1)
@@ -408,7 +417,7 @@ func (a *app) metadata(cmd *cobra.Command, status output.CommandStatus) output.E
 
 	return output.EnvelopeMeta{
 		Status:      status,
-		CommandID:   newCommandID(commandName(cmd), a.deps.Now().UTC()),
+		CommandID:   a.newCommandID(commandName(cmd), a.deps.Now().UTC()),
 		Command:     commandName(cmd),
 		Transport:   transport,
 		GeneratedAt: a.deps.Now().UTC(),

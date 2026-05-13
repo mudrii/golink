@@ -25,7 +25,7 @@ func newPostScheduleCommand(a *app) *cobra.Command {
 		Short: "Queue a post for later execution (no daemon — run via cron or golink schedule run)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			ikey, _ := cmd.Flags().GetString("idempotency-key")
 
 			// --require-approval is not supported in v1.

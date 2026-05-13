@@ -63,7 +63,7 @@ func newAuthLoginCommand(a *app) *cobra.Command {
 		Args:        cobra.NoArgs,
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			loginCtx, cancel := context.WithTimeout(cmd.Context(), a.settings.Timeout)
 			defer cancel()
 
@@ -201,7 +201,7 @@ func newAuthRefreshCommand(a *app) *cobra.Command {
 		Args:        cobra.NoArgs,
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 			refreshCtx, cancel := context.WithTimeout(cmd.Context(), a.settings.Timeout)
 			defer cancel()
 
@@ -285,7 +285,7 @@ func newAuthLogoutCommand(a *app) *cobra.Command {
 		Args:        cobra.NoArgs,
 		Annotations: map[string]string{"audit": "mutating"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cmdID := newCommandID(commandName(cmd), a.deps.Now().UTC())
+			cmdID := a.newCommandID(commandName(cmd), a.deps.Now().UTC())
 
 			err := a.deps.SessionStore.DeleteSession(cmd.Context(), a.settings.Profile)
 			if err != nil {
