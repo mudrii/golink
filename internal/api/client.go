@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	retryablehttp "github.com/hashicorp/go-retryablehttp"
 	"github.com/mudrii/golink/internal/httprecord"
 	"github.com/mudrii/golink/internal/output"
+	"github.com/mudrii/golink/internal/privacy"
 )
 
 const (
@@ -129,6 +131,19 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		}
 		if respErr != nil {
 			if errors.Is(respErr, context.Canceled) || errors.Is(respErr, context.DeadlineExceeded) {
+				return false, respErr
+			}
+			// TLS alert errors are surfaced by the server and won't change on
+			// retry; a tight retry loop here only delays the user's failure.
+			var tlsAlert *tls.AlertError
+			if errors.As(respErr, &tlsAlert) {
+				return false, respErr
+			}
+			// url.Error.Temporary() is deprecated but still implemented by
+			// net.OpError for connection-refused/no-route-to-host cases that
+			// will not succeed on retry. Honor it when present.
+			var urlErr *url.Error
+			if errors.As(respErr, &urlErr) && !urlErr.Temporary() { //nolint:staticcheck // Temporary is deprecated but remains the practical signal for permanent dial errors
 				return false, respErr
 			}
 			return true, nil
@@ -277,21 +292,42 @@ func (c *Client) resolveURL(relativePath string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse relative path: %w", err)
 	}
+	// Reject absolute URLs that would steer requests to another host —
+	// url.ResolveReference would otherwise honor them and leak the bearer
+	// token attached to the LinkedIn-bound request.
+	if ref.IsAbs() && ref.Host != "" && ref.Host != c.base.Host {
+		return nil, fmt.Errorf("refusing to resolve cross-host url: %s", ref.Host)
+	}
 	return c.base.ResolveReference(ref), nil
 }
 
 func decodeError(status int, body []byte, requestID string) *Error {
-	rawDetails := strings.TrimSpace(string(body))
-	apiErr := &Error{Status: status, RequestID: requestID, Message: rawDetails}
+	// Decode the envelope from the raw body so caller-visible fields (code,
+	// message) keep their original strings — LinkedIn's "message" carries
+	// the human-readable error like "Insufficient permissions". For Details
+	// (and the Message fallback when the body isn't valid JSON), redact PII
+	// like member URNs, emails, and local paths before persisting, since
+	// LinkedIn occasionally echoes the offending member's URN in error
+	// payloads and Details lands in audit logs.
 	var envelope struct {
 		Status           int    `json:"status"`
 		Code             string `json:"code"`
 		Message          string `json:"message"`
 		ServiceErrorCode string `json:"serviceErrorCode"`
 	}
-	if json.Unmarshal(body, &envelope) == nil {
+	envelopeOK := json.Unmarshal(body, &envelope) == nil
+
+	var redactedRaw string
+	if json.Valid(body) {
+		redactedRaw = strings.TrimSpace(string(privacy.JSON(body)))
+	} else {
+		redactedRaw = strings.TrimSpace(privacy.String(string(body)))
+	}
+
+	apiErr := &Error{Status: status, RequestID: requestID, Message: redactedRaw}
+	if envelopeOK {
 		if envelope.Message != "" {
-			apiErr.Message = envelope.Message
+			apiErr.Message = privacy.String(envelope.Message)
 		}
 		switch {
 		case envelope.Code != "":
@@ -299,8 +335,8 @@ func decodeError(status int, body []byte, requestID string) *Error {
 		case envelope.ServiceErrorCode != "":
 			apiErr.Code = envelope.ServiceErrorCode
 		}
-		if envelope.Message != "" && rawDetails != "" && rawDetails != envelope.Message {
-			apiErr.Details = rawDetails
+		if envelope.Message != "" && redactedRaw != "" && redactedRaw != apiErr.Message {
+			apiErr.Details = redactedRaw
 		}
 	}
 	return apiErr

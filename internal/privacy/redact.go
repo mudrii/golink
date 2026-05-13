@@ -131,6 +131,8 @@ func SensitiveKey(key string) bool {
 		"cookie",
 		"setcookie",
 		"clientsecret",
+		"codeverifier",
+		"codechallenge",
 		"email",
 		"emailaddress",
 		"sub",

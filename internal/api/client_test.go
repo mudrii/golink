@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -140,6 +142,31 @@ func TestClientDecodesError(t *testing.T) {
 	}
 }
 
+func TestDecodeError_RedactsURNFromDetails(t *testing.T) {
+	body := []byte(`{"status":403,"code":"ACCESS_DENIED","message":"denied","details":"member urn:li:person:abc123 not allowed"}`)
+	apiErr := decodeError(http.StatusForbidden, body, "req-1")
+	if apiErr == nil {
+		t.Fatal("expected *Error")
+	}
+	if strings.Contains(apiErr.Details, "urn:li:person:abc123") {
+		t.Fatalf("Details leaked member URN: %q", apiErr.Details)
+	}
+	if apiErr.Code != "ACCESS_DENIED" {
+		t.Fatalf("Code should still decode: %q", apiErr.Code)
+	}
+	if apiErr.Message != "denied" {
+		t.Fatalf("Message should still decode: %q", apiErr.Message)
+	}
+}
+
+func TestDecodeError_RedactsURNFromNonJSONBody(t *testing.T) {
+	body := []byte("plain text mentioning urn:li:person:abc123")
+	apiErr := decodeError(http.StatusForbidden, body, "req-1")
+	if strings.Contains(apiErr.Message, "urn:li:person:abc123") {
+		t.Fatalf("Message leaked URN: %q", apiErr.Message)
+	}
+}
+
 func TestParseRateLimitUnixSeconds(t *testing.T) {
 	header := http.Header{}
 	header.Set("X-RateLimit-Remaining", "12")
@@ -189,6 +216,73 @@ func TestResolveURLEdgeCases(t *testing.T) {
 	}
 	if got, want := resolved.String(), "https://api.linkedin.test/rest/posts?q=hello%20world#frag"; got != want {
 		t.Fatalf("resolved URL = %q, want %q", got, want)
+	}
+}
+
+func TestClient_DoesNotRetryPermanentNetworkError(t *testing.T) {
+	// Reserve a port then close the listener so dialing yields a permanent
+	// connection-refused error (no DNS lookup involved).
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	client, err := NewClient(ClientConfig{
+		BaseURL:      "http://" + addr,
+		RetryMax:     5,
+		RetryWaitMin: 50 * time.Millisecond,
+		RetryWaitMax: 50 * time.Millisecond,
+		Token: func(_ context.Context) (string, error) {
+			return "t", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	start := time.Now()
+	_, err = client.Do(t.Context(), http.MethodGet, "/rest/x", nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected network error, got nil")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("permanent connection-refused should not have retried; elapsed = %s", elapsed)
+	}
+}
+
+func TestResolveURLBlocksAbsoluteOverride(t *testing.T) {
+	var serverHits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&serverHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		BaseURL: server.URL,
+		Token: func(_ context.Context) (string, error) {
+			return "secret-token", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Do(t.Context(), http.MethodGet, "https://attacker.example.com/steal", nil)
+	if err == nil {
+		t.Fatal("expected error for cross-host absolute URL, got nil")
+	}
+	if atomic.LoadInt32(&serverHits) != 0 {
+		t.Fatalf("legitimate server should not have been hit, hits = %d", serverHits)
+	}
+	if !strings.Contains(err.Error(), "cross-host") {
+		t.Fatalf("expected cross-host error, got: %v", err)
 	}
 }
 
