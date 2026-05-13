@@ -1,11 +1,13 @@
 package idempotency
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -317,6 +319,59 @@ func (s *FileStore) mustReadAll(t *testing.T) []Entry {
 		t.Fatalf("readAll: %v", err)
 	}
 	return entries
+}
+
+func TestFileStore_ConcurrentRecordIsAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "idempotency.jsonl")
+
+	// One FileStore per writer simulates two processes appending to the
+	// same file: each Store has its own mu so the in-process mutex provides
+	// no cross-store ordering. Without flock, large payloads interleave.
+	bigResult, _ := json.Marshal(map[string]string{
+		"id":   "urn:li:share:1",
+		"blob": strings.Repeat("Y", 8192),
+	})
+
+	const writers = 16
+	const perWriter = 5
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for w := range writers {
+		go func(w int) {
+			defer wg.Done()
+			s := NewFileStore(path)
+			for i := range perWriter {
+				e := Entry{
+					TS:        time.Now().UTC(),
+					Key:       "k_" + string(rune('a'+w)) + "_" + string(rune('0'+i)),
+					Command:   "post create",
+					CommandID: "cmd_" + string(rune('a'+w)) + "_" + string(rune('0'+i)),
+					Status:    "ok",
+					Result:    bigResult,
+				}
+				if err := s.Record(t.Context(), e); err != nil {
+					t.Errorf("Record: %v", err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimRight(raw, "\n"), []byte("\n"))
+	if len(lines) != writers*perWriter {
+		t.Fatalf("got %d lines, want %d", len(lines), writers*perWriter)
+	}
+	for i, line := range lines {
+		var e Entry
+		if err := json.Unmarshal(line, &e); err != nil {
+			t.Fatalf("line %d failed to parse — interleaved write detected: %v", i+1, err)
+		}
+	}
 }
 
 func TestResolvePath(t *testing.T) {

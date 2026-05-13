@@ -189,6 +189,65 @@ func TestSinkRedactsPersonalData(t *testing.T) {
 	}
 }
 
+func TestFileSink_ConcurrentAppendsAreNotInterleaved(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	// Use one FileSink per writer to simulate two processes appending to the
+	// same file: each Sink has its own mu so the in-process mutex provides
+	// no cross-sink ordering. Without cross-process locking (flock), large
+	// payloads (> PIPE_BUF) interleave on POSIX O_APPEND.
+	bigPayload := json.RawMessage(`{"data":"` + strings.Repeat("X", 8192) + `"}`)
+
+	const writers = 16
+	const perWriter = 5
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for w := range writers {
+		go func(w int) {
+			defer wg.Done()
+			sink := NewFileSink(path)
+			for i := range perWriter {
+				entry := Entry{
+					TS:            time.Now().UTC(),
+					Command:       "post create",
+					CommandID:     "cmd_" + string(rune('a'+w)) + "_" + string(rune('0'+i)),
+					Status:        "ok",
+					DryRunPreview: bigPayload,
+				}
+				if err := sink.Append(t.Context(), entry); err != nil {
+					t.Errorf("Append: %v", err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	lines := 0
+	for scanner.Scan() {
+		var e Entry
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			t.Fatalf("line %d failed to parse — interleaved write detected: %v", lines+1, err)
+		}
+		lines++
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if lines != writers*perWriter {
+		t.Fatalf("got %d lines, want %d", lines, writers*perWriter)
+	}
+}
+
 func TestResolvePathFromEnv(t *testing.T) {
 	t.Setenv("GOLINK_AUDIT_PATH", "/tmp/custom-audit.jsonl")
 	t.Setenv("XDG_STATE_HOME", "")

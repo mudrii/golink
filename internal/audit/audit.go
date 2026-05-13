@@ -54,7 +54,8 @@ func NewFileSink(path string) *FileSink {
 // every call — CLI lifetime is short and this avoids fd leaks.
 //
 // In-process concurrency is serialised by mu; cross-process safety relies on
-// POSIX O_APPEND atomicity for writes ≤ PIPE_BUF (typically 4 KiB).
+// flock(LOCK_EX). POSIX only guarantees atomic O_APPEND up to PIPE_BUF
+// (typically 4 KiB) and audit entries can exceed that once previews grow.
 func (s *FileSink) Append(_ context.Context, entry Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -70,17 +71,27 @@ func (s *FileSink) Append(_ context.Context, entry Entry) error {
 		return fmt.Errorf("audit open: %w", err)
 	}
 
+	if err := lockFile(f); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("audit lock: %w", err)
+	}
+
 	line, err := json.Marshal(entry)
 	if err != nil {
+		_ = unlockFile(f)
 		_ = f.Close()
 		return fmt.Errorf("audit marshal: %w", err)
 	}
 	line = append(line, '\n')
 
 	_, writeErr := f.Write(line)
+	unlockErr := unlockFile(f)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return fmt.Errorf("audit write: %w", writeErr)
+	}
+	if unlockErr != nil {
+		return unlockErr
 	}
 	if closeErr != nil {
 		return fmt.Errorf("audit close: %w", closeErr)

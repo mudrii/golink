@@ -108,7 +108,9 @@ func (s *FileStore) Lookup(_ context.Context, key, command string) (Entry, bool,
 	return *found, true, nil
 }
 
-// Record appends entry to the file, creating it if necessary.
+// Record appends entry to the file, creating it if necessary. The append is
+// guarded by flock(LOCK_EX) so concurrent golink processes serialize their
+// writes — POSIX only guarantees atomic O_APPEND up to PIPE_BUF.
 func (s *FileStore) Record(_ context.Context, entry Entry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -123,20 +125,30 @@ func (s *FileStore) Record(_ context.Context, entry Entry) error {
 		return fmt.Errorf("idempotency open: %w", err)
 	}
 
+	if err := lockFile(f); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("idempotency lock: %w", err)
+	}
+
 	if len(entry.Result) > 0 {
 		entry.Result = privacy.JSON(entry.Result)
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
+		_ = unlockFile(f)
 		_ = f.Close()
 		return fmt.Errorf("idempotency marshal: %w", err)
 	}
 	line = append(line, '\n')
 
 	_, writeErr := f.Write(line)
+	unlockErr := unlockFile(f)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return fmt.Errorf("idempotency write: %w", writeErr)
+	}
+	if unlockErr != nil {
+		return unlockErr
 	}
 	if closeErr != nil {
 		return fmt.Errorf("idempotency close: %w", closeErr)
