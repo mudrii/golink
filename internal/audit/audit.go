@@ -12,6 +12,30 @@ import (
 	"github.com/mudrii/golink/internal/privacy"
 )
 
+// Status is the terminal outcome recorded in an audit entry. Values are
+// surfaced verbatim on the wire (JSONL) — existing log consumers and the
+// canonical wire strings must not change.
+type Status string
+
+// Mode records whether the command executed live or in dry-run.
+type Mode string
+
+const (
+	// StatusOK marks a successful mutation.
+	StatusOK Status = "ok"
+	// StatusError marks any non-validation failure (transport, auth, etc.).
+	StatusError Status = "error"
+	// StatusValidationError marks a 4xx validation rejection from upstream.
+	StatusValidationError Status = "validation_error"
+	// StatusPendingApproval marks a command staged behind the approval gate.
+	StatusPendingApproval Status = "pending_approval"
+
+	// ModeNormal marks live execution.
+	ModeNormal Mode = "normal"
+	// ModeDryRun marks a dry-run (no API mutation).
+	ModeDryRun Mode = "dry_run"
+)
+
 // Entry is a single audit log record written for every mutating command.
 type Entry struct {
 	TS            time.Time       `json:"ts"`
@@ -19,8 +43,8 @@ type Entry struct {
 	Transport     string          `json:"transport"`
 	Command       string          `json:"command"`
 	CommandID     string          `json:"command_id"`
-	Mode          string          `json:"mode,omitempty"`
-	Status        string          `json:"status"`
+	Mode          Mode            `json:"mode,omitempty"`
+	Status        Status          `json:"status"`
 	RequestID     string          `json:"request_id,omitempty"`
 	HTTPStatus    int             `json:"http_status,omitempty"`
 	ErrorCode     string          `json:"error_code,omitempty"`

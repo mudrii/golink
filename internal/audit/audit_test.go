@@ -290,3 +290,33 @@ func TestResolvePathFallback(t *testing.T) {
 		t.Errorf("expected relative fallback path %q, got %q", want, got)
 	}
 }
+
+// TestAuditStatus_MarshalsAsBareString locks in the wire contract for the
+// named Status and Mode types: each must marshal as a bare JSON string with
+// the historical value, so existing JSONL consumers and audit log readers keep
+// working after the type promotion.
+func TestAuditStatus_MarshalsAsBareString(t *testing.T) {
+	cases := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"StatusOK", StatusOK, `"ok"`},
+		{"StatusError", StatusError, `"error"`},
+		{"StatusValidationError", StatusValidationError, `"validation_error"`},
+		{"StatusPendingApproval", StatusPendingApproval, `"pending_approval"`},
+		{"ModeNormal", ModeNormal, `"normal"`},
+		{"ModeDryRun", ModeDryRun, `"dry_run"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.v)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("marshal = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

@@ -784,10 +784,14 @@ func (a *app) idempotencyRecord(ctx context.Context, entry idempotency.Entry) {
 // propagate — audit must not break the primary command.
 //
 // Call this at the end of every mutating command's RunE, passing:
-//   - status: "ok", "error", "validation_error", or "unsupported"
-//   - mode:   "normal" or "dry_run"
+//   - status: audit.StatusOK / StatusError / StatusValidationError / StatusPendingApproval
+//   - mode:   audit.ModeNormal or audit.ModeDryRun
 //   - requestID, httpStatus, errorCode: from the transport response when known
 //   - dryRunPreview: marshalled dry-run payload, or nil
+//
+// status/mode are accepted as plain strings to keep the 100+ call sites
+// concise; values are converted to the named audit.Status / audit.Mode types
+// at the boundary so the type discipline lives on the Entry, not the call site.
 func (a *app) auditMutation(cmd *cobra.Command, commandID, status, mode, requestID string, httpStatus int, errorCode string, dryRunPreview []byte) {
 	a.auditMutationWithAuthor(cmd, commandID, status, mode, requestID, httpStatus, errorCode, dryRunPreview, "")
 }
@@ -804,8 +808,8 @@ func (a *app) auditMutationWithAuthor(cmd *cobra.Command, commandID, status, mod
 		Transport:  a.settings.Transport,
 		Command:    commandName(cmd),
 		CommandID:  commandID,
-		Mode:       mode,
-		Status:     status,
+		Mode:       audit.Mode(mode),
+		Status:     audit.Status(status),
 		RequestID:  requestID,
 		HTTPStatus: httpStatus,
 		ErrorCode:  errorCode,
