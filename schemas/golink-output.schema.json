@@ -1028,7 +1028,7 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "created_at": { "$ref": "#/$defs/dateTime" },
-        "text": { "type": "string" },
+        "text": { "type": "string", "minLength": 1 },
         "visibility": { "$ref": "#/$defs/visibility" },
         "url": { "type": "string", "format": "uri" },
         "author_urn": { "type": "string", "pattern": "^urn:li:(person|organization):" },
