@@ -928,6 +928,138 @@ func TestOfficialCreatePostWithMedia(t *testing.T) {
 	}
 }
 
+// TestOfficialReadOnlyPostEndpoints_ErrorPaths covers 404 + malformed-body
+// behaviour for the read-only post endpoints (GetPost, DeletePost, ListComments,
+// ListReactions, ResharePost). 404 must surface as a typed api.Error; malformed
+// JSON on a 200 must surface as a wrapped decode error referencing the method.
+// Finding M3.
+func TestOfficialReadOnlyPostEndpoints_ErrorPaths(t *testing.T) {
+	type call struct {
+		name      string
+		invoke    func(*testing.T, *Official) error
+		decodeFor string // substring of the decode error
+	}
+	calls := []call{
+		{
+			name: "GetPost",
+			invoke: func(t *testing.T, o *Official) error {
+				t.Helper()
+				_, err := o.GetPost(t.Context(), "urn:li:share:9001")
+				return err
+			},
+			decodeFor: "decode post get",
+		},
+		{
+			name: "DeletePost",
+			invoke: func(t *testing.T, o *Official) error {
+				t.Helper()
+				_, err := o.DeletePost(t.Context(), "urn:li:share:9001")
+				return err
+			},
+			// DeletePost ignores body; no decode error case applies.
+		},
+		{
+			name: "ListComments",
+			invoke: func(t *testing.T, o *Official) error {
+				t.Helper()
+				_, err := o.ListComments(t.Context(), "urn:li:share:9001", 2, 0)
+				return err
+			},
+			decodeFor: "decode comment list",
+		},
+		{
+			name: "ListReactions",
+			invoke: func(t *testing.T, o *Official) error {
+				t.Helper()
+				_, err := o.ListReactions(t.Context(), "urn:li:share:9001")
+				return err
+			},
+			decodeFor: "decode reactions",
+		},
+		{
+			name: "ResharePost",
+			invoke: func(t *testing.T, o *Official) error {
+				t.Helper()
+				_, err := o.ResharePost(t.Context(), ResharePostRequest{
+					ParentURN:  "urn:li:share:1",
+					Commentary: "x",
+					Visibility: output.VisibilityPublic,
+				})
+				return err
+			},
+			// ResharePost only decodes the body when the x-restli-id header is
+			// missing; covered separately below.
+		},
+	}
+
+	for _, c := range calls {
+		t.Run(c.name+"/returns_typed_error_on_404", func(t *testing.T) {
+			o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"status":404,"code":"NOT_FOUND","message":"post not found"}`)
+			}, "urn:li:person:abc123")
+
+			err := c.invoke(t, o)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var apiErr *Error
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected api.Error, got %T: %v", err, err)
+			}
+			if apiErr.Status != 404 {
+				t.Fatalf("status = %d, want 404", apiErr.Status)
+			}
+			if !apiErr.IsNotFound() {
+				t.Fatalf("IsNotFound = false, want true (err = %+v)", apiErr)
+			}
+		})
+	}
+
+	for _, c := range calls {
+		if c.decodeFor == "" {
+			continue
+		}
+		t.Run(c.name+"/wraps_malformed_body", func(t *testing.T) {
+			o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"foo":`) // truncated JSON
+			}, "urn:li:person:abc123")
+
+			err := c.invoke(t, o)
+			if err == nil {
+				t.Fatal("expected decode error, got nil")
+			}
+			if !strings.Contains(err.Error(), c.decodeFor) {
+				t.Fatalf("error = %v, want substring %q", err, c.decodeFor)
+			}
+		})
+	}
+
+	// ResharePost has a different malformed-body path: when x-restli-id is
+	// absent, the body is decoded for the post URN. Truncated JSON is silently
+	// tolerated by the current decoder, so a missing id is the user-visible
+	// failure — assert that contract.
+	t.Run("ResharePost/wraps_malformed_body", func(t *testing.T) {
+		o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"foo":`) // truncated, no x-restli-id header
+		}, "urn:li:person:abc123")
+
+		_, err := o.ResharePost(t.Context(), ResharePostRequest{
+			ParentURN:  "urn:li:share:1",
+			Commentary: "x",
+			Visibility: output.VisibilityPublic,
+		})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "missing post urn") {
+			t.Fatalf("error = %v, want missing post urn", err)
+		}
+	})
+}
+
 func TestOfficialBubbles401(t *testing.T) {
 	o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
