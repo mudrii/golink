@@ -332,6 +332,85 @@ func TestRecordRejectsOversizedResponse(t *testing.T) {
 	}
 }
 
+func TestWrap_replayMissingCassette(t *testing.T) {
+	missingPath := filepath.Join(t.TempDir(), "does-not-exist.jsonl")
+	if _, err := httprecord.Wrap(nil, "", missingPath); err == nil {
+		t.Fatal("expected error opening missing replay cassette, got nil")
+	}
+}
+
+func TestWrap_replayMalformedCassetteLine(t *testing.T) {
+	cassettePath := filepath.Join(t.TempDir(), "bad.jsonl")
+	// Mix one valid line with a malformed one — LoadCassette should fail fast.
+	good := `{"seq":1,"method":"GET","url":"https://example.com/","body_sha256":"","response":{"status":200,"headers":{},"body_base64":""}}`
+	bad := `{"seq":2,"method":"GET",` // truncated, not valid JSON
+	contents := good + "\n" + bad + "\n"
+	if err := os.WriteFile(cassettePath, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write cassette: %v", err)
+	}
+	_, err := httprecord.Wrap(nil, "", cassettePath)
+	if err == nil {
+		t.Fatal("expected parse error for malformed cassette line, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse cassette line") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRecordReplay_replayedBodyStableAcrossReplays(t *testing.T) {
+	// The recorder may re-marshal a JSON payload before persisting (key order
+	// is not preserved). What MUST hold byte-for-byte is the replayed body
+	// across successive replays from the same cassette: cassette → response
+	// is deterministic and stable.
+	payload := []byte(`{"id":"abc","count":42,"items":[1,2,3],"status":"ok"}`)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	cassettePath := filepath.Join(t.TempDir(), "stable.jsonl")
+
+	recorder, err := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
+	if err != nil {
+		t.Fatalf("Wrap record: %v", err)
+	}
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/x", http.NoBody)
+	resp, err := (&http.Client{Transport: recorder}).Do(req)
+	if err != nil {
+		t.Fatalf("record request: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	replayer, err := httprecord.Wrap(nil, "", cassettePath)
+	if err != nil {
+		t.Fatalf("Wrap replay: %v", err)
+	}
+	client := &http.Client{Transport: replayer}
+
+	read := func(label string) ([]byte, int) {
+		r, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/x", http.NoBody)
+		r2, err := client.Do(r)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		b, _ := io.ReadAll(r2.Body)
+		_ = r2.Body.Close()
+		return b, r2.StatusCode
+	}
+
+	first, statusA := read("replay #1")
+	second, statusB := read("replay #2")
+	if !bytes.Equal(first, second) {
+		t.Fatalf("replay body not stable across reads:\n #1=%s\n #2=%s", first, second)
+	}
+	if statusA != http.StatusOK || statusB != http.StatusOK {
+		t.Fatalf("replay status mismatch: %d, %d", statusA, statusB)
+	}
+}
+
 func TestLoadedCassetteSaveRedactsPersonalData(t *testing.T) {
 	dir := t.TempDir()
 	inPath := filepath.Join(dir, "in.jsonl")
