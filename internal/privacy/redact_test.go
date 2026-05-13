@@ -113,6 +113,31 @@ func TestJSONRedactsNestedArraysAndMalformedPayload(t *testing.T) {
 	}
 }
 
+func TestString_RedactsBearerToken(t *testing.T) {
+	const token = "eyJhbGciOiJIUzI1NiJ9.payload.sig"
+	raw := "Authorization: Bearer " + token
+
+	got := String(raw)
+	if strings.Contains(got, token) {
+		t.Fatalf("bearer token not redacted: %s", got)
+	}
+	if !strings.Contains(got, redacted) {
+		t.Fatalf("expected REDACTED placeholder: %s", got)
+	}
+
+	// Short legitimate substrings (< 8 token chars) must not be clobbered.
+	short := "Bearer Cap"
+	if String(short) != short {
+		t.Fatalf("short Bearer prefix was clobbered: %q -> %q", short, String(short))
+	}
+
+	// Case-insensitive prefix should still match a JWT-shaped token.
+	mixed := "bearer " + token
+	if strings.Contains(String(mixed), token) {
+		t.Fatalf("case-insensitive bearer not redacted: %s", String(mixed))
+	}
+}
+
 func TestSensitiveKeyVariants(t *testing.T) {
 	for _, key := range []string{"access_token", "refresh-token", "client.secret", "memberURN", "image_path", "text"} {
 		if !SensitiveKey(key) {

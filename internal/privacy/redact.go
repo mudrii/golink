@@ -21,10 +21,17 @@ var (
 	unixUserPath       = regexp.MustCompile(`/Users/[A-Za-z0-9._-]+(?:/[^\s"'<>]*)?`)
 	linuxHomePath      = regexp.MustCompile(`/home/[A-Za-z0-9._-]+(?:/[^\s"'<>]*)?`)
 	homeRelativePath   = regexp.MustCompile(`~/[^\s"'<>]+`)
+	// bearerTokenPattern matches an inline `Bearer <token>` substring so that
+	// any code path that copies an Authorization header value into a free-text
+	// string (audit detail, cassette body, error envelope) cannot leak the
+	// token. Requires at least 8 token characters to avoid clobbering
+	// legitimate short strings like "Bearer Cap".
+	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9_\-\.=+/]{8,}`)
 )
 
 // String redacts personal identifiers inside a scalar string.
 func String(s string) string {
+	s = bearerTokenPattern.ReplaceAllString(s, redacted)
 	s = compoundURNPattern.ReplaceAllString(s, redacted)
 	s = linkedinURNPattern.ReplaceAllString(s, redacted)
 	s = unixUserPath.ReplaceAllString(s, redacted)
