@@ -1,6 +1,8 @@
 package plan_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,30 @@ func TestSHA256_differsOnChange(t *testing.T) {
 	}
 	if base.SHA256() == modified.SHA256() {
 		t.Error("expected different SHA256 for different args")
+	}
+}
+
+func TestSHA256_stableAcrossLoadRoundTrip(t *testing.T) {
+	original := &plan.Plan{
+		Schema:    plan.SchemaV1,
+		CreatedAt: time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC),
+		Command:   "post create",
+		Args:      map[string]any{"text": "hello", "count": 5, "ratio": 1.5},
+		Transport: "official",
+		Profile:   "default",
+	}
+	originalHash := original.SHA256()
+
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	loaded, err := plan.Load(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := loaded.SHA256(); got != originalHash {
+		t.Errorf("SHA256 changed across round-trip:\n original = %q\n loaded   = %q", originalHash, got)
 	}
 }
 

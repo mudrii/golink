@@ -102,18 +102,26 @@ func IsPlannableCommand(cmd string) bool {
 }
 
 // SHA256 returns the hex-encoded SHA-256 of the canonical JSON representation
-// of the plan. The result is deterministic for equal plans.
+// of the plan. The result is deterministic for equal plans across the
+// build → marshal → Load round-trip: numeric Args values are normalized to
+// json.Number so that an in-memory int and a post-Load float64 hash to the
+// same digest.
 func (p *Plan) SHA256() string {
-	canonical, err := json.Marshal(p)
+	first, err := json.Marshal(p)
 	if err != nil {
 		// json.Marshal on a plain struct cannot fail; this branch is unreachable.
 		return ""
 	}
-	// Compact to strip any whitespace variation before hashing.
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, canonical); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(first))
+	dec.UseNumber()
+	var normalized any
+	if err := dec.Decode(&normalized); err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(buf.Bytes())
+	canonical, err := json.Marshal(normalized)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:])
 }
