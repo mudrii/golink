@@ -41,6 +41,23 @@ func TestPlanPostCreate_emitsValidPlan(t *testing.T) {
 	}
 }
 
+func TestPlanPostCreate_notesFlagPropagates(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "plan", "post", "create", "--text", "hello", "--notes", "review by alice"},
+		testDepsOptions{})
+	if code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, stderr)
+	}
+
+	var env output.PlanOutput
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, stdout.String())
+	}
+	if env.Data.Notes != "review by alice" {
+		t.Errorf("notes = %q, want %q", env.Data.Notes, "review by alice")
+	}
+}
+
 func TestPlanPostCreate_missingText(t *testing.T) {
 	code, _, _ := executeTestCommand(t,
 		[]string{"--json", "plan", "post", "create"},

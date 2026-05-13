@@ -27,6 +27,8 @@ Review the plan JSON, then execute it with:
 		},
 	}
 
+	cmd.PersistentFlags().String("notes", "", "free-form notes recorded in the plan document")
+
 	cmd.AddCommand(
 		newPlanPostCommand(a),
 		newPlanCommentCommand(a),
