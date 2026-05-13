@@ -263,6 +263,12 @@ func (s *FileStore) Deny(_ context.Context, commandID string) error {
 }
 
 // LoadApproved reads an approved entry without renaming it.
+//
+// The load path is a single atomic ReadFile of the .approved.json file. Stat
+// checks for the other states are only consulted when the read returns
+// NotExist, so a concurrent rename (e.g. another process running Deny on a
+// freshly Granted entry) can never cause this function to surface bytes from
+// a denied/completed file as if they came from the approved file.
 func (s *FileStore) LoadApproved(_ context.Context, commandID string) (Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -270,30 +276,33 @@ func (s *FileStore) LoadApproved(_ context.Context, commandID string) (Entry, er
 	if err := validateCommandID(commandID); err != nil {
 		return Entry{}, err
 	}
-	// Check if pending first to give a clear error message.
-	if _, err := os.Stat(s.filePath(commandID, StatePending)); err == nil {
-		return Entry{}, fmt.Errorf("%w: %s is pending, not approved", ErrWrongState, commandID)
-	}
-	if _, err := os.Stat(s.filePath(commandID, StateDenied)); err == nil {
-		return Entry{}, fmt.Errorf("%w: %s was denied", ErrWrongState, commandID)
-	}
-	if _, err := os.Stat(s.filePath(commandID, StateCompleted)); err == nil {
-		return Entry{}, fmt.Errorf("%w: %s was already completed", ErrWrongState, commandID)
-	}
 
 	path := s.filePath(commandID, StateApproved)
 	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, commandID)
+	if err == nil {
+		var e Entry
+		if uerr := json.Unmarshal(data, &e); uerr != nil {
+			return Entry{}, fmt.Errorf("approval load unmarshal: %w", uerr)
 		}
+		return e, nil
+	}
+	if !os.IsNotExist(err) {
 		return Entry{}, fmt.Errorf("approval load: %w", err)
 	}
-	var e Entry
-	if err := json.Unmarshal(data, &e); err != nil {
-		return Entry{}, fmt.Errorf("approval load unmarshal: %w", err)
+
+	// The approved file does not exist — consult the other states only to
+	// produce a specific error message. These Stat calls cannot promote any
+	// non-approved entry to "approved" because the read above already failed.
+	if _, statErr := os.Stat(s.filePath(commandID, StatePending)); statErr == nil {
+		return Entry{}, fmt.Errorf("%w: %s is pending, not approved", ErrWrongState, commandID)
 	}
-	return e, nil
+	if _, statErr := os.Stat(s.filePath(commandID, StateDenied)); statErr == nil {
+		return Entry{}, fmt.Errorf("%w: %s was denied", ErrWrongState, commandID)
+	}
+	if _, statErr := os.Stat(s.filePath(commandID, StateCompleted)); statErr == nil {
+		return Entry{}, fmt.Errorf("%w: %s was already completed", ErrWrongState, commandID)
+	}
+	return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, commandID)
 }
 
 // Complete renames .approved.json → .completed.json.

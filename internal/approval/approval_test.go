@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -376,5 +377,62 @@ func TestFileStore_DenyAndCancel(t *testing.T) {
 	_, _, err = store.Show(ctx, e2.CommandID)
 	if !errors.Is(err, approval.ErrNotFound) {
 		t.Errorf("expected ErrNotFound after cancel, got %v", err)
+	}
+}
+
+// TestLoadApproved_RacesWithDeny covers the TOCTOU race between LoadApproved
+// and Deny by simulating two processes on the same directory (separate
+// FileStore instances so the mutex does not serialise them). The load path
+// must never return a Denied-state entry as if it were approved: it must
+// either succeed (with bytes that came from the .approved.json file) or
+// return ErrNotFound / ErrWrongState. Finding H7.
+func TestLoadApproved_RacesWithDeny(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping race iterations in -short mode")
+	}
+	ctx := t.Context()
+	root := t.TempDir()
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		iterDir := filepath.Join(root, "i", strings.Repeat("a", i+1))
+		if err := os.MkdirAll(iterDir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		id := "cmd_race_h7_001"
+		stager := approval.NewFileStore(iterDir)
+		e := testEntry(id, "post create")
+		if _, err := stager.Stage(ctx, e); err != nil {
+			t.Fatalf("stage: %v", err)
+		}
+
+		// Two independent FileStore instances simulate two processes
+		// hitting the same approvals dir concurrently.
+		denyStore := approval.NewFileStore(iterDir)
+		loadStore := approval.NewFileStore(iterDir)
+
+		var wg sync.WaitGroup
+		var loadErr error
+		var loaded approval.Entry
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = denyStore.Deny(ctx, id)
+		}()
+		go func() {
+			defer wg.Done()
+			// LoadApproved on a pending/denied entry must NEVER succeed.
+			loaded, loadErr = loadStore.LoadApproved(ctx, id)
+		}()
+		wg.Wait()
+
+		if loadErr == nil {
+			t.Fatalf("iter %d: LoadApproved returned a denied/pending entry: %#v", i, loaded)
+		}
+		if !errors.Is(loadErr, approval.ErrNotFound) && !errors.Is(loadErr, approval.ErrWrongState) {
+			t.Fatalf("iter %d: unexpected load error: %v", i, loadErr)
+		}
 	}
 }
