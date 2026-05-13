@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -823,6 +824,72 @@ func TestOfficialListOrganizationsHydratesNames(t *testing.T) {
 	}
 	if byURN["urn:li:organization:not-a-number"].Name != "" {
 		t.Fatalf("invalid org should not hydrate: %+v", byURN["urn:li:organization:not-a-number"])
+	}
+}
+
+// TestListOrganizationsContextCancelDoesNotLeakGoroutines verifies the
+// hydration fan-out cleans up cleanly when the caller cancels mid-flight.
+// Finding H12.
+func TestListOrganizationsContextCancelDoesNotLeakGoroutines(t *testing.T) {
+	block := make(chan struct{})
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/rest/organizations/") {
+			// Block until ctx cancellation propagates through the
+			// http client and the request returns.
+			select {
+			case <-block:
+			case <-r.Context().Done():
+			}
+			http.Error(w, "cancelled", http.StatusServiceUnavailable)
+			return
+		}
+		if r.URL.Path == "/rest/organizationAcls" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"elements": []map[string]any{
+					{"organization": "urn:li:organization:1", "role": "ADMINISTRATOR", "state": "APPROVED"},
+					{"organization": "urn:li:organization:2", "role": "ADMINISTRATOR", "state": "APPROVED"},
+					{"organization": "urn:li:organization:3", "role": "ADMINISTRATOR", "state": "APPROVED"},
+					{"organization": "urn:li:organization:4", "role": "ADMINISTRATOR", "state": "APPROVED"},
+					{"organization": "urn:li:organization:5", "role": "ADMINISTRATOR", "state": "APPROVED"},
+					{"organization": "urn:li:organization:6", "role": "ADMINISTRATOR", "state": "APPROVED"},
+					{"organization": "urn:li:organization:7", "role": "ADMINISTRATOR", "state": "APPROVED"},
+					{"organization": "urn:li:organization:8", "role": "ADMINISTRATOR", "state": "APPROVED"},
+				},
+			})
+			return
+		}
+		t.Fatalf("unexpected path = %q", r.URL.Path)
+	}, "urn:li:person:abc123")
+	defer close(block)
+
+	// Settle background goroutines from setup.
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = o.ListOrganizations(ctx)
+	}()
+
+	// Give the fan-out time to dispatch workers and block in HTTP.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ListOrganizations did not return after cancel")
+	}
+
+	// Settle and check goroutine count.
+	runtime.GC()
+	time.Sleep(200 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > baseline+2 {
+		t.Fatalf("goroutine leak: baseline=%d after=%d", baseline, after)
 	}
 }
 

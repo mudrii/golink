@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/mudrii/golink/internal/output"
 )
@@ -847,10 +850,13 @@ func (o *Official) ListOrganizations(ctx context.Context) (*output.OrgListData, 
 		}
 	}
 
-	// Hydrate org names in parallel with bounded concurrency.
-	sem := make(chan struct{}, orgListMaxConcurrency)
+	// Hydrate org names in parallel with bounded concurrency. errgroup
+	// guarantees Wait() blocks until every dispatched goroutine returns and
+	// SetLimit serialises the fan-out so cancellation can never desync the
+	// worker count from a manual semaphore.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(orgListMaxConcurrency)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 
 	for i := range items {
 		idx := i
@@ -868,21 +874,15 @@ func (o *Official) ListOrganizations(ctx context.Context) (*output.OrgListData, 
 			continue
 		}
 
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			wg.Wait()
-			return nil, ctx.Err()
-		}
-
-		wg.Add(1)
-		go func(i int, id string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			orgResp, lookupErr := o.do(ctx, "GET", "/rest/organizations/"+id, nil)
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return nil
+			}
+			orgResp, lookupErr := o.do(gctx, "GET", "/rest/organizations/"+orgID, nil)
 			if lookupErr != nil {
-				return
+				// Per-org lookup failures are tolerated; the item is
+				// returned with Name left empty.
+				return nil
 			}
 			var orgRaw struct {
 				LocalizedName string `json:"localizedName"`
@@ -892,18 +892,29 @@ func (o *Official) ListOrganizations(ctx context.Context) (*output.OrgListData, 
 				} `json:"logoV2"`
 			}
 			if decErr := orgResp.UnmarshalJSON(&orgRaw); decErr != nil {
-				return
+				return nil
 			}
 			mu.Lock()
-			items[i].Name = orgRaw.LocalizedName
-			items[i].Vanity = orgRaw.VanityName
+			items[idx].Name = orgRaw.LocalizedName
+			items[idx].Vanity = orgRaw.VanityName
 			if orgRaw.LogoV2 != nil {
-				items[i].LogoURL = orgRaw.LogoV2.Original
+				items[idx].LogoURL = orgRaw.LogoV2.Original
 			}
 			mu.Unlock()
-		}(idx, orgID)
+			return nil
+		})
 	}
-	wg.Wait()
+	if werr := g.Wait(); werr != nil {
+		// Workers themselves never return errors; this can only happen if
+		// the group context is cancelled before Wait returns.
+		if errors.Is(werr, context.Canceled) || errors.Is(werr, context.DeadlineExceeded) {
+			return nil, werr
+		}
+		return nil, werr
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, cerr
+	}
 
 	return &output.OrgListData{
 		Count: len(items),
