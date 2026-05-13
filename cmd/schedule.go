@@ -137,6 +137,7 @@ func newScheduleRunCommand(a *app) *cobra.Command {
 }
 
 func (a *app) runScheduleRunCommand(cmd *cobra.Command, args []string, limit int, failFast bool) error {
+	a.recoverStaleSchedule(cmd)
 	toRun, handled, err := a.scheduledEntriesToRun(cmd, args, limit)
 	if handled || err != nil {
 		return err
@@ -144,6 +145,29 @@ func (a *app) runScheduleRunCommand(cmd *cobra.Command, args []string, limit int
 	data := runScheduledEntries(cmd.Context(), a, cmd, toRun, failFast)
 	return a.writeSuccess(cmd, data,
 		fmt.Sprintf("ran %d entries: %d succeeded, %d failed, %d skipped", data.Ran, data.Succeeded, data.Failed, data.Skipped))
+}
+
+// staleRunningThreshold is how long an entry can be in StateRunning before
+// recoverStaleSchedule transitions it back to StateFailed. A previous run
+// that died mid-execution leaves entries pinned in running; without recovery
+// they never reappear in Due.
+const staleRunningThreshold = 10 * time.Minute
+
+// recoverStaleSchedule transitions stale running entries to failed so they
+// don't stay invisible after a process crash. Errors are logged but never
+// block the run — recovery is best-effort.
+func (a *app) recoverStaleSchedule(cmd *cobra.Command) {
+	recovered, err := a.deps.ScheduleStore.MarkStale(cmd.Context(), staleRunningThreshold)
+	if err != nil {
+		a.logger.Warn("schedule stale recovery failed", "err", err.Error())
+		return
+	}
+	for i := range recovered {
+		a.logger.Warn("schedule entry recovered from running",
+			"command_id", recovered[i].CommandID,
+			"started_at", recovered[i].StartedAt,
+		)
+	}
 }
 
 func (a *app) scheduledEntriesToRun(cmd *cobra.Command, args []string, limit int) ([]schedule.Entry, bool, error) {

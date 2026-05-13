@@ -451,6 +451,148 @@ func TestFileStore_Next(t *testing.T) {
 	}
 }
 
+func TestFileStore_MarkStaleRecoversRunningEntries(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+	s := NewFileStore(dir)
+
+	// Stale: running with old StartedAt — should be recovered to failed.
+	stale := sampleEntry("stale1", t0)
+	if err := s.Add(ctx, stale); err != nil {
+		t.Fatalf("Add stale1: %v", err)
+	}
+	if err := s.MarkRunning(ctx, "stale1"); err != nil {
+		t.Fatalf("MarkRunning stale1: %v", err)
+	}
+	got, err := s.Get(ctx, "stale1")
+	if err != nil {
+		t.Fatalf("Get stale1: %v", err)
+	}
+	old := time.Now().UTC().Add(-1 * time.Hour)
+	got.StartedAt = &old
+	if err := s.writeEntryAtomic(s.filePath(got), got); err != nil {
+		t.Fatalf("write backdated entry: %v", err)
+	}
+
+	// Fresh: running but StartedAt is recent — must NOT be recovered.
+	fresh := sampleEntry("fresh1", t0)
+	if err := s.Add(ctx, fresh); err != nil {
+		t.Fatalf("Add fresh1: %v", err)
+	}
+	if err := s.MarkRunning(ctx, "fresh1"); err != nil {
+		t.Fatalf("MarkRunning fresh1: %v", err)
+	}
+
+	// Legacy: running without any StartedAt (pre-fix entry from disk) —
+	// must NOT be recovered. Only entries with a non-zero StartedAt are
+	// considered for stale recovery.
+	legacy := sampleEntry("legacy1", t0)
+	if err := s.Add(ctx, legacy); err != nil {
+		t.Fatalf("Add legacy1: %v", err)
+	}
+	if err := s.MarkRunning(ctx, "legacy1"); err != nil {
+		t.Fatalf("MarkRunning legacy1: %v", err)
+	}
+	legacyEntry, err := s.Get(ctx, "legacy1")
+	if err != nil {
+		t.Fatalf("Get legacy1: %v", err)
+	}
+	legacyEntry.StartedAt = nil
+	if err := s.writeEntryAtomic(s.filePath(legacyEntry), legacyEntry); err != nil {
+		t.Fatalf("write legacy entry: %v", err)
+	}
+
+	recovered, err := s.MarkStale(ctx, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("recovered = %d, want 1: %+v", len(recovered), recovered)
+	}
+	if recovered[0].CommandID != "stale1" {
+		t.Fatalf("recovered[0] = %s, want stale1", recovered[0].CommandID)
+	}
+	if recovered[0].State != StateFailed {
+		t.Fatalf("recovered[0].State = %s, want failed", recovered[0].State)
+	}
+
+	staleNow, err := s.Get(ctx, "stale1")
+	if err != nil {
+		t.Fatalf("Get stale1 after recovery: %v", err)
+	}
+	if staleNow.State != StateFailed {
+		t.Fatalf("stale1 state = %s, want failed", staleNow.State)
+	}
+	if staleNow.LastError != "stale: process crashed mid-run" {
+		t.Fatalf("stale1 last_error = %q", staleNow.LastError)
+	}
+
+	freshNow, err := s.Get(ctx, "fresh1")
+	if err != nil {
+		t.Fatalf("Get fresh1 after recovery: %v", err)
+	}
+	if freshNow.State != StateRunning {
+		t.Fatalf("fresh1 state = %s, want still running", freshNow.State)
+	}
+
+	legacyNow, err := s.Get(ctx, "legacy1")
+	if err != nil {
+		t.Fatalf("Get legacy1 after recovery: %v", err)
+	}
+	if legacyNow.State != StateRunning {
+		t.Fatalf("legacy1 state = %s, want still running (no StartedAt)", legacyNow.State)
+	}
+}
+
+func TestMemoryStore_MarkStaleRecoversRunningEntries(t *testing.T) {
+	ctx := t.Context()
+	m := NewMemoryStore()
+
+	stale := sampleEntry("stale1", t0)
+	if err := m.Add(ctx, stale); err != nil {
+		t.Fatalf("Add stale1: %v", err)
+	}
+	if err := m.MarkRunning(ctx, "stale1"); err != nil {
+		t.Fatalf("MarkRunning stale1: %v", err)
+	}
+	e := m.entries["stale1"]
+	old := time.Now().UTC().Add(-1 * time.Hour)
+	e.StartedAt = &old
+	m.entries["stale1"] = e
+
+	fresh := sampleEntry("fresh1", t0)
+	if err := m.Add(ctx, fresh); err != nil {
+		t.Fatalf("Add fresh1: %v", err)
+	}
+	if err := m.MarkRunning(ctx, "fresh1"); err != nil {
+		t.Fatalf("MarkRunning fresh1: %v", err)
+	}
+
+	recovered, err := m.MarkStale(ctx, 10*time.Minute)
+	if err != nil {
+		t.Fatalf("MarkStale: %v", err)
+	}
+	if len(recovered) != 1 || recovered[0].CommandID != "stale1" {
+		t.Fatalf("recovered = %+v, want [stale1]", recovered)
+	}
+	if recovered[0].State != StateFailed {
+		t.Fatalf("recovered[0].State = %s, want failed", recovered[0].State)
+	}
+
+	got, _ := m.Get(ctx, "stale1")
+	if got.State != StateFailed {
+		t.Fatalf("stale1 state = %s, want failed", got.State)
+	}
+	if got.LastError != "stale: process crashed mid-run" {
+		t.Fatalf("stale1 last_error = %q", got.LastError)
+	}
+
+	fresh1, _ := m.Get(ctx, "fresh1")
+	if fresh1.State != StateRunning {
+		t.Fatalf("fresh1 state = %s, want still running", fresh1.State)
+	}
+}
+
 func TestFilenameHasCommandID_HyphenatedID(t *testing.T) {
 	cases := []struct {
 		name      string

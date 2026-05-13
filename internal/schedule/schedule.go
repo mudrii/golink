@@ -52,11 +52,17 @@ type Request struct {
 }
 
 // Entry is the on-disk representation of a scheduled post.
+//
+// StartedAt is set when an entry transitions to StateRunning. MarkStale uses
+// it to detect entries that crashed mid-run. Entries written before this
+// field existed will have StartedAt nil; those are left alone by MarkStale
+// because we cannot tell when (or whether) they actually started running.
 type Entry struct {
 	CommandID      string     `json:"command_id"`
 	State          State      `json:"state"`
 	ScheduledAt    time.Time  `json:"scheduled_at"`
 	CreatedAt      time.Time  `json:"created_at"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
 	LastRunAt      *time.Time `json:"last_run_at,omitempty"`
 	LastError      string     `json:"last_error,omitempty"`
 	RetryCount     int        `json:"retry_count,omitempty"`
@@ -100,7 +106,16 @@ type Store interface {
 
 	// Next returns the earliest pending entry.
 	Next(ctx context.Context) (Entry, error)
+
+	// MarkStale transitions running entries whose StartedAt is older than
+	// time.Now() - olderThan to StateFailed with a "stale" LastError. Entries
+	// without a StartedAt are left untouched. Returns the recovered entries
+	// (post-transition snapshot) so the caller can log them.
+	MarkStale(ctx context.Context, olderThan time.Duration) ([]Entry, error)
 }
+
+// staleError is the LastError value written when MarkStale recovers an entry.
+const staleError = "stale: process crashed mid-run"
 
 // FileStore implements Store using the schedule directory.
 // Files are named <scheduled_at_rfc3339>-<command_id>.json for lexical sort.
@@ -325,6 +340,7 @@ func (s *FileStore) Due(_ context.Context, now time.Time, limit int) ([]Entry, e
 }
 
 // MarkRunning transitions pending → running and rewrites the file.
+// StartedAt is set to the current UTC time so MarkStale can detect crashes.
 func (s *FileStore) MarkRunning(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -333,6 +349,8 @@ func (s *FileStore) MarkRunning(_ context.Context, commandID string) error {
 			return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
 		}
 		e.State = StateRunning
+		now := time.Now().UTC()
+		e.StartedAt = &now
 		return nil
 	})
 }
@@ -448,6 +466,61 @@ func (s *FileStore) Next(_ context.Context) (Entry, error) {
 		return Entry{}, fmt.Errorf("%w: no pending entries", ErrNotFound)
 	}
 	return *earliest, nil
+}
+
+// MarkStale recovers running entries whose StartedAt is older than now -
+// olderThan by transitioning them to StateFailed with a stale LastError.
+// Entries without a StartedAt are left untouched.
+func (s *FileStore) MarkStale(_ context.Context, olderThan time.Duration) ([]Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.ensureDir(); err != nil {
+		return nil, err
+	}
+
+	des, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("schedule stale readdir: %w", err)
+	}
+
+	cutoff := time.Now().UTC().Add(-olderThan)
+	now := time.Now().UTC()
+
+	var recovered []Entry
+	for _, de := range des {
+		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.dir, de.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var e Entry
+		if err := json.Unmarshal(data, &e); err != nil {
+			continue
+		}
+		if e.State != StateRunning || e.StartedAt == nil {
+			continue
+		}
+		if !e.StartedAt.Before(cutoff) {
+			continue
+		}
+		e.State = StateFailed
+		e.LastError = staleError
+		e.RetryCount++
+		t := now
+		e.LastRunAt = &t
+		if err := s.writeEntryAtomic(path, e); err != nil {
+			return recovered, err
+		}
+		recovered = append(recovered, e)
+	}
+	return recovered, nil
 }
 
 // findInMain locates a file by commandID in the main schedule directory.
@@ -604,7 +677,8 @@ func (m *MemoryStore) Due(_ context.Context, now time.Time, limit int) ([]Entry,
 	return due, nil
 }
 
-// MarkRunning transitions pending → running.
+// MarkRunning transitions pending → running. StartedAt is set so MarkStale
+// can detect crashes mid-run.
 func (m *MemoryStore) MarkRunning(_ context.Context, commandID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -619,6 +693,8 @@ func (m *MemoryStore) MarkRunning(_ context.Context, commandID string) error {
 		return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
 	}
 	e.State = StateRunning
+	now := time.Now().UTC()
+	e.StartedAt = &now
 	m.entries[commandID] = e
 	return nil
 }
@@ -723,6 +799,35 @@ func (m *MemoryStore) Next(_ context.Context) (Entry, error) {
 		return Entry{}, fmt.Errorf("%w: no pending entries", ErrNotFound)
 	}
 	return *earliest, nil
+}
+
+// MarkStale recovers running entries whose StartedAt is older than now -
+// olderThan by transitioning them to StateFailed.
+func (m *MemoryStore) MarkStale(_ context.Context, olderThan time.Duration) ([]Entry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-olderThan)
+	now := time.Now().UTC()
+
+	var recovered []Entry
+	for k := range m.entries {
+		e := m.entries[k]
+		if e.State != StateRunning || e.StartedAt == nil {
+			continue
+		}
+		if !e.StartedAt.Before(cutoff) {
+			continue
+		}
+		e.State = StateFailed
+		e.LastError = staleError
+		e.RetryCount++
+		t := now
+		e.LastRunAt = &t
+		m.entries[k] = e
+		recovered = append(recovered, e)
+	}
+	return recovered, nil
 }
 
 func validateCommandID(commandID string) error {
