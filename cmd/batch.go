@@ -881,10 +881,34 @@ func (r *batchRunner) appendProgress(lineNum int, ikey, cmdID, status string) {
 	defer r.progressMu.Unlock()
 	f, err := os.OpenFile(r.progressPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		r.a.logger.Warn("batch: open progress file", "path", r.progressPath, "err", err)
 		return
 	}
-	_, _ = f.Write(line)
-	_ = f.Close()
+	// Order: write -> fsync -> close. fsync forces the entry to stable storage
+	// before the fd is closed, so a kernel crash or power loss after the line
+	// has been written cannot lose it. Without this, resume re-executes an
+	// already-completed idempotent op on the next run (M8). Same pattern as
+	// audit.FileSink and idempotency.FileStore (commit fe4459a). Errors are
+	// logged at warn level — the progress sidecar is a best-effort accelerator
+	// over the idempotency store, so we surface the problem without aborting
+	// the in-flight batch.
+	_, writeErr := f.Write(line)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = f.Sync()
+	}
+	closeErr := f.Close()
+	if writeErr != nil {
+		r.a.logger.Warn("batch: write progress entry", "path", r.progressPath, "err", writeErr)
+		return
+	}
+	if syncErr != nil {
+		r.a.logger.Warn("batch: fsync progress entry", "path", r.progressPath, "err", syncErr)
+		return
+	}
+	if closeErr != nil {
+		r.a.logger.Warn("batch: close progress file", "path", r.progressPath, "err", closeErr)
+	}
 }
 
 // paceRateLimit sleeps until the rate-limit reset window if remaining is low.

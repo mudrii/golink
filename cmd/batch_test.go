@@ -735,6 +735,41 @@ func TestSleepContextReturnsOnCancellation(t *testing.T) {
 	}
 }
 
+// TestBatchAppendProgressPersistsEntry guards the durability contract of the
+// resume sidecar (M8). userspace cannot directly observe whether the bytes
+// reached stable storage, so this test asserts the observable contract: after
+// appendProgress returns, the file holds exactly one well-formed JSON entry.
+// The load-bearing fix lives in appendProgress itself — fsync the file before
+// close, matching the same write -> fsync -> close pattern that audit.FileSink
+// and idempotency.FileStore adopted in commit fe4459a. Without that fsync, a
+// kernel crash between Write and Close can lose the entry and cause resume to
+// re-execute an already-completed idempotent op on the next run.
+func TestBatchAppendProgressPersistsEntry(t *testing.T) {
+	progressPath := filepath.Join(t.TempDir(), "ops.jsonl.progress")
+	runner := &batchRunner{
+		a:            newCoverageApp(t),
+		progressPath: progressPath,
+	}
+
+	runner.appendProgress(7, "ikey-abc", "cmd_xyz", "ok")
+
+	raw, err := os.ReadFile(progressPath)
+	if err != nil {
+		t.Fatalf("read progress file: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("progress lines = %d, want 1: %q", len(lines), raw)
+	}
+	var entry progressEntry
+	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
+		t.Fatalf("unmarshal progress entry: %v", err)
+	}
+	if entry.Line != 7 || entry.Status != "ok" || entry.IdempotencyKey != "ikey-abc" || entry.CommandID != "cmd_xyz" {
+		t.Fatalf("progress entry = %+v", entry)
+	}
+}
+
 type rateLimitTransport struct {
 	fakeTransport
 	rate *output.RateLimitInfo
