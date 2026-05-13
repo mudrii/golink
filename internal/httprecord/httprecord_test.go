@@ -1,14 +1,17 @@
 package httprecord_test
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mudrii/golink/internal/httprecord"
@@ -530,5 +533,74 @@ func TestLoadedCassetteSaveRedactsPersonalData(t *testing.T) {
 		if strings.Contains(string(raw), leaked) {
 			t.Fatalf("saved cassette leaked %q: %s", leaked, raw)
 		}
+	}
+}
+
+// TestConcurrentRecordersProduceValidJSONL asserts that two independent
+// RecordTransport instances writing to the same cassette path do not interleave
+// partial lines. The sidecar flock at `<path>.lock` is the only protection
+// against cross-process recorders; this test simulates that contention by
+// driving distinct transports (separate writeMu) in parallel goroutines.
+func TestConcurrentRecordersProduceValidJSONL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+
+	const writers = 4
+	const perWriter = 12
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for w := 0; w < writers; w++ {
+		go func() {
+			defer wg.Done()
+			rt, err := httprecord.Wrap(http.DefaultTransport, cassettePath, "")
+			if err != nil {
+				t.Errorf("Wrap: %v", err)
+				return
+			}
+			client := &http.Client{Transport: rt}
+			for i := 0; i < perWriter; i++ {
+				req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/test", http.NoBody)
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Errorf("do: %v", err)
+					return
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+
+	f, err := os.Open(cassettePath)
+	if err != nil {
+		t.Fatalf("open cassette: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
+	var lines int
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("cassette line %d not valid JSON (interleaved write?): %v\n%s", lines+1, err, line)
+		}
+		lines++
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan cassette: %v", err)
+	}
+	if want := writers * perWriter; lines != want {
+		t.Errorf("recorded %d entries, want %d", lines, want)
 	}
 }

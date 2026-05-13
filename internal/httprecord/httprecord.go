@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/mudrii/golink/internal/filelock"
 	"github.com/mudrii/golink/internal/privacy"
 )
 
@@ -108,6 +109,12 @@ func (c *Cassette) Save(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	lock, err := filelock.Acquire(path + ".lock")
+	if err != nil {
+		return fmt.Errorf("cassette lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open cassette for write: %w", err)
@@ -123,6 +130,9 @@ func (c *Cassette) Save(path string) error {
 		if _, err := f.Write(append(line, '\n')); err != nil {
 			return fmt.Errorf("write cassette entry: %w", err)
 		}
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("cassette sync: %w", err)
 	}
 	return nil
 }
@@ -349,20 +359,36 @@ func (c *Cassette) nextSeq() int {
 	return c.seq
 }
 
+// appendEntry serialises e to a single JSONL line on disk. A sidecar flock at
+// `<path>.lock` guards against concurrent cross-process recorders interleaving
+// partial writes, and f.Sync ensures the line survives a kernel crash before
+// the function returns.
 func appendEntry(path string, e Entry) error {
 	e = redactEntry(e)
 	line, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
+	lock, err := filelock.Acquire(path + ".lock")
+	if err != nil {
+		return fmt.Errorf("cassette lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	_, writeErr := f.Write(append(line, '\n'))
+	var syncErr error
+	if writeErr == nil {
+		syncErr = f.Sync()
+	}
 	closeErr := f.Close()
 	if writeErr != nil {
 		return writeErr
+	}
+	if syncErr != nil {
+		return fmt.Errorf("cassette sync: %w", syncErr)
 	}
 	return closeErr
 }
