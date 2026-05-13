@@ -101,6 +101,41 @@ func schedule1SchemaFixtures() []schemaFixture {
 					}`),
 		},
 		{
+			// Mixed-state run: one succeeded, one failed, one skipped. Existing
+			// fixtures cover the all-success and all-fail edges; this guards
+			// the array-item heterogeneity against future regressions.
+			name: "schedule run mixed",
+			payload: []byte(`{
+						"status": "ok",
+						"command_id": "cmd_schedule_run_mixed_01",
+						"command": "schedule run",
+						"transport": "official",
+						"generated_at": "2026-04-17T12:36:30Z",
+						"data": {
+							"ran": 3,
+							"succeeded": 1,
+							"failed": 1,
+							"skipped": 1,
+							"results": [
+								{
+									"command_id": "cmd_post_schedule_a",
+									"status": "succeeded",
+									"post_urn": "urn:li:share:789"
+								},
+								{
+									"command_id": "cmd_post_schedule_b",
+									"status": "failed",
+									"error": "transport error: 502"
+								},
+								{
+									"command_id": "cmd_post_schedule_c",
+									"status": "skipped"
+								}
+							]
+						}
+					}`),
+		},
+		{
 			name: "schedule cancel",
 			payload: []byte(`{
 						"status": "ok",
