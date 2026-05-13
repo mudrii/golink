@@ -196,10 +196,10 @@ func (s *FileStore) Add(_ context.Context, entry Entry) error {
 		return fmt.Errorf("schedule marshal: %w", err)
 	}
 
-	if existing, _, err := s.findInMain(entry.CommandID); err == nil {
-		return fmt.Errorf("schedule add: %w: %s already %s", ErrAlreadyAdded, existing.CommandID, existing.State)
-	}
-
+	// Uniqueness is enforced atomically by O_EXCL below — a separate
+	// pre-check via findInMain would be racy (another caller could create
+	// the file between the check and the open) and is strictly dominated
+	// by the kernel-side O_EXCL guarantee.
 	path := s.filePath(entry)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {

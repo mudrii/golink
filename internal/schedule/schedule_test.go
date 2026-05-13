@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -286,6 +287,45 @@ func TestFileStore_AddListGet(t *testing.T) {
 	}
 	if got.CommandID != "fid1" {
 		t.Errorf("want fid1, got %s", got.CommandID)
+	}
+}
+
+func TestFileStore_AddDuplicateReturnsErrAlreadyAdded(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+	s := NewFileStore(dir)
+
+	if err := s.Add(ctx, sampleEntry("dup", t0)); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	err := s.Add(ctx, sampleEntry("dup", t0))
+	if err == nil {
+		t.Fatal("expected duplicate Add to fail, got nil")
+	}
+	if !errors.Is(err, ErrAlreadyAdded) {
+		t.Fatalf("err = %v, want errors.Is(_, ErrAlreadyAdded)", err)
+	}
+	if !strings.Contains(err.Error(), "dup") {
+		t.Fatalf("err = %q, want command_id in message", err.Error())
+	}
+}
+
+func TestMemoryStore_AddDuplicateReturnsErrAlreadyAdded(t *testing.T) {
+	ctx := t.Context()
+	m := NewMemoryStore()
+
+	if err := m.Add(ctx, sampleEntry("dup", t0)); err != nil {
+		t.Fatalf("first Add: %v", err)
+	}
+	err := m.Add(ctx, sampleEntry("dup", t0))
+	if err == nil {
+		t.Fatal("expected duplicate Add to fail, got nil")
+	}
+	if !errors.Is(err, ErrAlreadyAdded) {
+		t.Fatalf("err = %v, want errors.Is(_, ErrAlreadyAdded)", err)
+	}
+	if !strings.Contains(err.Error(), "dup") {
+		t.Fatalf("err = %q, want command_id in message", err.Error())
 	}
 }
 
