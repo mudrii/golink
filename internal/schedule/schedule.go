@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mudrii/golink/internal/filelock"
 )
 
 // State is the lifecycle state of a scheduled post entry.
@@ -174,6 +176,41 @@ func (s *FileStore) completedDir() string {
 	return filepath.Join(s.dir, "completed")
 }
 
+// lockPath is the sidecar flock file used to serialize state-transition
+// decisions across processes. A sidecar (rather than the per-entry .json
+// file) is locked because state transitions span multiple files (e.g.
+// MarkCompleted moves an entry into completed/) and the lock must outlive
+// any single atomic rename. Holding this lock for the read-decide-write
+// window prevents two `golink schedule run` daemons from both observing
+// state=pending and both claiming the same entry by racing on
+// writeEntryAtomic.
+func (s *FileStore) lockPath() string {
+	return filepath.Join(s.dir, ".schedule.lock")
+}
+
+// withLock acquires the sidecar cross-process advisory lock, runs fn, then
+// releases the lock. The in-process s.mu mutex must already be held by the
+// caller; the flock layers on top to serialize against other processes that
+// share the same GOLINK_SCHEDULE_DIR.
+func (s *FileStore) withLock(fn func() error) error {
+	if err := s.ensureDir(); err != nil {
+		return err
+	}
+	closer, err := filelock.Acquire(s.lockPath())
+	if err != nil {
+		return fmt.Errorf("schedule lock: %w", err)
+	}
+	fnErr := fn()
+	closeErr := closer.Close()
+	if fnErr != nil {
+		return fnErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("schedule lock close: %w", closeErr)
+	}
+	return nil
+}
+
 func (s *FileStore) filePath(entry Entry) string {
 	ts := entry.ScheduledAt.UTC().Format(time.RFC3339)
 	// Replace colons so the filename is safe on all filesystems.
@@ -205,43 +242,49 @@ func (s *FileStore) Add(_ context.Context, entry Entry) error {
 		return fmt.Errorf("schedule marshal: %w", err)
 	}
 
-	// Uniqueness is enforced atomically by O_EXCL below — a separate
-	// pre-check via findInMain would be racy (another caller could create
-	// the file between the check and the open) and is strictly dominated
-	// by the kernel-side O_EXCL guarantee.
-	path := s.filePath(entry)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("schedule add: %w: %s", ErrAlreadyAdded, entry.CommandID)
+	// O_EXCL alone is sufficient to prevent duplicate command_ids across
+	// processes; the flock here is belt-and-suspenders so Add observes the
+	// same serialization discipline as the state-transition methods.
+	return s.withLock(func() error {
+		// Uniqueness is enforced atomically by O_EXCL below — a separate
+		// pre-check via findInMain would be racy (another caller could
+		// create the file between the check and the open) and is
+		// strictly dominated by the kernel-side O_EXCL guarantee.
+		path := s.filePath(entry)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("schedule add: %w: %s", ErrAlreadyAdded, entry.CommandID)
+			}
+			return fmt.Errorf("schedule write: %w", err)
 		}
-		return fmt.Errorf("schedule write: %w", err)
-	}
-	// Order: write → fsync(file) → close → fsync(dir). fsync forces the
-	// pending entry to stable storage before Add returns so a kernel crash or
-	// power loss cannot lose an entry the user believes is scheduled. The
-	// directory fsync makes the newly-created filename durable. Sync errors
-	// on the file are fatal; directory fsync is best-effort because the
-	// creation has already succeeded at the VFS layer.
-	_, writeErr := f.Write(data)
-	var syncErr error
-	if writeErr == nil {
-		syncErr = f.Sync()
-	}
-	closeErr := f.Close()
-	if writeErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("schedule write: %w", writeErr)
-	}
-	if syncErr != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("schedule sync: %w", syncErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("schedule close: %w", closeErr)
-	}
-	syncDir(s.dir, s.logger)
-	return nil
+		// Order: write → fsync(file) → close → fsync(dir). fsync forces
+		// the pending entry to stable storage before Add returns so a
+		// kernel crash or power loss cannot lose an entry the user
+		// believes is scheduled. The directory fsync makes the
+		// newly-created filename durable. Sync errors on the file are
+		// fatal; directory fsync is best-effort because the creation has
+		// already succeeded at the VFS layer.
+		_, writeErr := f.Write(data)
+		var syncErr error
+		if writeErr == nil {
+			syncErr = f.Sync()
+		}
+		closeErr := f.Close()
+		if writeErr != nil {
+			_ = os.Remove(path)
+			return fmt.Errorf("schedule write: %w", writeErr)
+		}
+		if syncErr != nil {
+			_ = os.Remove(path)
+			return fmt.Errorf("schedule sync: %w", syncErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("schedule close: %w", closeErr)
+		}
+		syncDir(s.dir, s.logger)
+		return nil
+	})
 }
 
 // syncDir fsyncs dir so file creations and renames survive a crash.
@@ -416,17 +459,22 @@ func (s *FileStore) Due(_ context.Context, now time.Time, limit int) ([]Entry, e
 
 // MarkRunning transitions pending → running and rewrites the file.
 // StartedAt is set to the current UTC time so MarkStale can detect crashes.
+// The cross-process flock is critical here: two `schedule run` daemons
+// sharing a directory would otherwise both observe state=pending and both
+// transition the same entry to running, double-dispatching the post.
 func (s *FileStore) MarkRunning(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateEntry(commandID, func(e *Entry) error {
-		if e.State != StatePending {
-			return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
-		}
-		e.State = StateRunning
-		now := s.now()
-		e.StartedAt = &now
-		return nil
+	return s.withLock(func() error {
+		return s.updateEntry(commandID, func(e *Entry) error {
+			if e.State != StatePending {
+				return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
+			}
+			e.State = StateRunning
+			now := s.now()
+			e.StartedAt = &now
+			return nil
+		})
 	})
 }
 
@@ -434,49 +482,52 @@ func (s *FileStore) MarkRunning(_ context.Context, commandID string) error {
 func (s *FileStore) MarkCompleted(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.withLock(func() error {
+		entry, path, err := s.findInMain(commandID)
+		if err != nil {
+			return err
+		}
+		if entry.State != StateRunning {
+			return fmt.Errorf("%w: %s (state=%s, want running)", ErrInvalidState, commandID, entry.State)
+		}
+		entry.State = StateCompleted
 
-	entry, path, err := s.findInMain(commandID)
-	if err != nil {
-		return err
-	}
-	if entry.State != StateRunning {
-		return fmt.Errorf("%w: %s (state=%s, want running)", ErrInvalidState, commandID, entry.State)
-	}
-	entry.State = StateCompleted
+		if err := os.MkdirAll(s.completedDir(), 0o700); err != nil {
+			return fmt.Errorf("schedule completed mkdir: %w", err)
+		}
 
-	if err := os.MkdirAll(s.completedDir(), 0o700); err != nil {
-		return fmt.Errorf("schedule completed mkdir: %w", err)
-	}
-
-	dst := s.completedPath(entry)
-	if err := s.writeEntryAtomic(path, entry); err != nil {
-		return err
-	}
-	if err := os.Rename(path, dst); err != nil {
-		return fmt.Errorf("schedule move completed: %w", err)
-	}
-	// Cross-directory rename — fsync both source and destination so the
-	// move survives a crash regardless of which directory entry the kernel
-	// flushes first.
-	syncDir(s.dir, s.logger)
-	syncDir(s.completedDir(), s.logger)
-	return nil
+		dst := s.completedPath(entry)
+		if err := s.writeEntryAtomic(path, entry); err != nil {
+			return err
+		}
+		if err := os.Rename(path, dst); err != nil {
+			return fmt.Errorf("schedule move completed: %w", err)
+		}
+		// Cross-directory rename — fsync both source and destination so
+		// the move survives a crash regardless of which directory entry
+		// the kernel flushes first.
+		syncDir(s.dir, s.logger)
+		syncDir(s.completedDir(), s.logger)
+		return nil
+	})
 }
 
 // MarkFailed transitions running → failed; increments retry_count and stores error.
 func (s *FileStore) MarkFailed(_ context.Context, commandID, lastError string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateEntry(commandID, func(e *Entry) error {
-		if e.State != StateRunning {
-			return fmt.Errorf("%w: %s (state=%s, want running)", ErrInvalidState, commandID, e.State)
-		}
-		e.State = StateFailed
-		e.LastError = lastError
-		e.RetryCount++
-		t := now.UTC()
-		e.LastRunAt = &t
-		return nil
+	return s.withLock(func() error {
+		return s.updateEntry(commandID, func(e *Entry) error {
+			if e.State != StateRunning {
+				return fmt.Errorf("%w: %s (state=%s, want running)", ErrInvalidState, commandID, e.State)
+			}
+			e.State = StateFailed
+			e.LastError = lastError
+			e.RetryCount++
+			t := now.UTC()
+			e.LastRunAt = &t
+			return nil
+		})
 	})
 }
 
@@ -484,13 +535,15 @@ func (s *FileStore) MarkFailed(_ context.Context, commandID, lastError string, n
 func (s *FileStore) MarkRetrying(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateEntry(commandID, func(e *Entry) error {
-		if e.State != StateFailed {
-			return fmt.Errorf("%w: %s (state=%s, want failed)", ErrInvalidState, commandID, e.State)
-		}
-		e.State = StatePending
-		e.LastError = ""
-		return nil
+	return s.withLock(func() error {
+		return s.updateEntry(commandID, func(e *Entry) error {
+			if e.State != StateFailed {
+				return fmt.Errorf("%w: %s (state=%s, want failed)", ErrInvalidState, commandID, e.State)
+			}
+			e.State = StatePending
+			e.LastError = ""
+			return nil
+		})
 	})
 }
 
@@ -498,12 +551,14 @@ func (s *FileStore) MarkRetrying(_ context.Context, commandID string) error {
 func (s *FileStore) MarkCancelled(_ context.Context, commandID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.updateEntry(commandID, func(e *Entry) error {
-		if e.State != StatePending {
-			return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
-		}
-		e.State = StateCancelled
-		return nil
+	return s.withLock(func() error {
+		return s.updateEntry(commandID, func(e *Entry) error {
+			if e.State != StatePending {
+				return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
+			}
+			e.State = StateCancelled
+			return nil
+		})
 	})
 }
 
@@ -558,54 +613,53 @@ func (s *FileStore) MarkStale(_ context.Context, olderThan time.Duration) ([]Ent
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := s.ensureDir(); err != nil {
-		return nil, err
-	}
-
-	des, err := os.ReadDir(s.dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("schedule stale readdir: %w", err)
-	}
-
-	now := s.now()
-	cutoff := now.Add(-olderThan)
-
 	var recovered []Entry
-	for _, de := range des {
-		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(s.dir, de.Name())
-		data, err := os.ReadFile(path)
+	err := s.withLock(func() error {
+		des, err := os.ReadDir(s.dir)
 		if err != nil {
-			s.logger.Warn("schedule stale: read failed", "path", path, "err", err.Error())
-			continue
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("schedule stale readdir: %w", err)
 		}
-		var e Entry
-		if err := json.Unmarshal(data, &e); err != nil {
-			s.logger.Warn("schedule stale: corrupted entry, skipped", "path", path, "err", err.Error())
-			continue
+
+		now := s.now()
+		cutoff := now.Add(-olderThan)
+
+		for _, de := range des {
+			if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
+				continue
+			}
+			path := filepath.Join(s.dir, de.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				s.logger.Warn("schedule stale: read failed", "path", path, "err", err.Error())
+				continue
+			}
+			var e Entry
+			if err := json.Unmarshal(data, &e); err != nil {
+				s.logger.Warn("schedule stale: corrupted entry, skipped", "path", path, "err", err.Error())
+				continue
+			}
+			if e.State != StateRunning || e.StartedAt == nil {
+				continue
+			}
+			if !e.StartedAt.Before(cutoff) {
+				continue
+			}
+			e.State = StateFailed
+			e.LastError = staleError
+			e.RetryCount++
+			t := now
+			e.LastRunAt = &t
+			if err := s.writeEntryAtomic(path, e); err != nil {
+				return err
+			}
+			recovered = append(recovered, e)
 		}
-		if e.State != StateRunning || e.StartedAt == nil {
-			continue
-		}
-		if !e.StartedAt.Before(cutoff) {
-			continue
-		}
-		e.State = StateFailed
-		e.LastError = staleError
-		e.RetryCount++
-		t := now
-		e.LastRunAt = &t
-		if err := s.writeEntryAtomic(path, e); err != nil {
-			return recovered, err
-		}
-		recovered = append(recovered, e)
-	}
-	return recovered, nil
+		return nil
+	})
+	return recovered, err
 }
 
 // findInMain locates a file by commandID in the main schedule directory.

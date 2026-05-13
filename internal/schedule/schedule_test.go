@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -359,11 +360,14 @@ func TestFileStore_StateTransitionsAndCompleted(t *testing.T) {
 			jsonCount++
 		}
 	}
-	// Only the completed/ subdir should remain in the main dir
+	// Only the completed/ subdir should remain in the main dir.
+	// The .schedule.lock sidecar (used for cross-process serialization) is
+	// expected to persist and is intentionally excluded from the check.
 	for _, de := range mainDes {
-		if !de.IsDir() {
-			t.Errorf("unexpected file in main dir after completion: %s", de.Name())
+		if de.IsDir() || de.Name() == ".schedule.lock" {
+			continue
 		}
+		t.Errorf("unexpected file in main dir after completion: %s", de.Name())
 	}
 }
 
@@ -867,5 +871,102 @@ func TestFileStore_NowSeam_MarkStaleUsesInjectedClock(t *testing.T) {
 	}
 	if recovered[0].LastRunAt == nil || !recovered[0].LastRunAt.Equal(fixed) {
 		t.Fatalf("LastRunAt: want %s, got %v", fixed, recovered[0].LastRunAt)
+	}
+}
+
+// TestFileStore_MarkRunning_ConcurrentProcessesSerializeViaFlock simulates
+// two `golink schedule run` daemons sharing a GOLINK_SCHEDULE_DIR. They are
+// modeled as two separate *FileStore values, so the per-process s.mu mutex
+// is distinct — exactly as it would be across two OS processes. Without the
+// sidecar flock, both stores can pass the state==pending check inside
+// MarkRunning and both can transition the same entry to running, leading to
+// a double-dispatch. With the flock, the read-decide-write window is
+// serialized across stores: exactly one MarkRunning succeeds and the other
+// observes state=running and returns ErrInvalidState.
+func TestFileStore_MarkRunning_ConcurrentProcessesSerializeViaFlock(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+
+	seed := NewFileStore(dir)
+	if err := seed.Add(ctx, sampleEntry("race", t0)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	const attempts = 32
+	for attempt := range attempts {
+		// Reset the entry to pending between iterations so each round
+		// exercises a fresh pending→running race window.
+		if attempt > 0 {
+			s := NewFileStore(dir)
+			got, err := s.Get(ctx, "race")
+			if err != nil {
+				t.Fatalf("Get reset: %v", err)
+			}
+			switch got.State {
+			case StateRunning:
+				if err := s.MarkFailed(ctx, "race", "reset", time.Now()); err != nil {
+					t.Fatalf("MarkFailed reset: %v", err)
+				}
+				if err := s.MarkRetrying(ctx, "race"); err != nil {
+					t.Fatalf("MarkRetrying reset: %v", err)
+				}
+			case StateFailed:
+				if err := s.MarkRetrying(ctx, "race"); err != nil {
+					t.Fatalf("MarkRetrying reset: %v", err)
+				}
+			case StatePending:
+				// already pending
+			default:
+				t.Fatalf("unexpected state after race: %s", got.State)
+			}
+		}
+
+		// Two distinct FileStore values → two distinct s.mu mutexes.
+		// Only the cross-process flock can serialize them.
+		a := NewFileStore(dir)
+		b := NewFileStore(dir)
+
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		start := make(chan struct{})
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[0] = a.MarkRunning(ctx, "race")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[1] = b.MarkRunning(ctx, "race")
+		}()
+		close(start)
+		wg.Wait()
+
+		var successes, invalidState int
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				successes++
+			case errors.Is(err, ErrInvalidState):
+				invalidState++
+			default:
+				t.Fatalf("attempt %d: unexpected MarkRunning error: %v", attempt, err)
+			}
+		}
+		if successes != 1 || invalidState != 1 {
+			t.Fatalf("attempt %d: want exactly 1 success + 1 ErrInvalidState, got %d success / %d invalid (errs=%v)",
+				attempt, successes, invalidState, errs)
+		}
+
+		// On-disk consistency check: exactly one running entry.
+		got, err := a.Get(ctx, "race")
+		if err != nil {
+			t.Fatalf("attempt %d: Get post-race: %v", attempt, err)
+		}
+		if got.State != StateRunning {
+			t.Fatalf("attempt %d: post-race state = %s, want running", attempt, got.State)
+		}
 	}
 }
