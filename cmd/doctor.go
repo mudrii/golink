@@ -238,18 +238,12 @@ func buildDoctorSession(session *auth.Session, profile string, now time.Time) ou
 
 	if !session.ExpiresAt.IsZero() {
 		doc.ExpiresAt = session.ExpiresAt.UTC().Format(time.RFC3339)
-		hours := int(session.ExpiresAt.Sub(now).Hours())
-		if hours < 0 {
-			hours = 0
-		}
+		hours := max(int(session.ExpiresAt.Sub(now).Hours()), 0)
 		doc.ExpiresInHours = hours
 	}
 	if !session.RefreshExpiresAt.IsZero() {
 		doc.RefreshExpiresAt = session.RefreshExpiresAt.UTC().Format(time.RFC3339)
-		days := int(session.RefreshExpiresAt.Sub(now).Hours() / 24)
-		if days < 0 {
-			days = 0
-		}
+		days := max(int(session.RefreshExpiresAt.Sub(now).Hours()/24), 0)
 		doc.RefreshInDays = days
 	}
 	if !session.ConnectedAt.IsZero() {

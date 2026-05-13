@@ -317,11 +317,11 @@ func filenameHasCommandID(fileName, commandID string) bool {
 		return false
 	}
 	base := strings.TrimSuffix(fileName, ".json")
-	idx := strings.Index(base, "Z-")
-	if idx < 0 {
+	_, after, ok := strings.Cut(base, "Z-")
+	if !ok {
 		return base == commandID
 	}
-	return base[idx+2:] == commandID
+	return after == commandID
 }
 
 // Due returns pending entries with scheduled_at <= now, up to limit, sorted by scheduled_at.

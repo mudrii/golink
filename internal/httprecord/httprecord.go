@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -244,9 +245,7 @@ func (rt *ReplayTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	header := make(http.Header)
-	for k, vs := range recorded.Headers {
-		header[k] = vs
-	}
+	maps.Copy(header, recorded.Headers)
 
 	return &http.Response{
 		StatusCode: recorded.Status,

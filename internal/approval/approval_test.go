@@ -394,7 +394,7 @@ func TestLoadApproved_RacesWithDeny(t *testing.T) {
 	root := t.TempDir()
 
 	const iterations = 50
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		iterDir := filepath.Join(root, "i", strings.Repeat("a", i+1))
 		if err := os.MkdirAll(iterDir, 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)

@@ -106,7 +106,7 @@ func writeOpsFile(t *testing.T, lines []string) string {
 func parseBatchLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	t.Helper()
 	var results []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
 		if line == "" {
 			continue
 		}
@@ -700,10 +700,10 @@ func TestBatchRunnerPaceRateLimitNoops(t *testing.T) {
 		{name: "not aware", transport: &fakeTransport{name: "official"}},
 		{name: "nil rate", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}}},
 		{name: "nil remaining", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{ResetAt: "2026-04-17T12:00:05Z"}}},
-		{name: "remaining above threshold", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(11), ResetAt: "2026-04-17T12:00:05Z"}}},
-		{name: "missing reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(2)}}},
-		{name: "bad reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(2), ResetAt: "not-time"}}},
-		{name: "past reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: intPtr(2), ResetAt: "2026-04-17T11:59:00Z"}}},
+		{name: "remaining above threshold", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: new(11), ResetAt: "2026-04-17T12:00:05Z"}}},
+		{name: "missing reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: new(2)}}},
+		{name: "bad reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: new(2), ResetAt: "not-time"}}},
+		{name: "past reset", transport: &rateLimitTransport{fakeTransport: fakeTransport{name: "official"}, rate: &output.RateLimitInfo{Remaining: new(2), ResetAt: "2026-04-17T11:59:00Z"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -742,8 +742,4 @@ type rateLimitTransport struct {
 
 func (t *rateLimitTransport) LastRateLimit() *output.RateLimitInfo {
 	return t.rate
-}
-
-func intPtr(v int) *int {
-	return &v
 }

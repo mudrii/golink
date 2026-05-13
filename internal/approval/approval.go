@@ -519,8 +519,8 @@ func parseFilename(name string) (commandID string, state State, ok bool) {
 	name = strings.TrimSuffix(name, ".json")
 	for _, s := range []State{StatePending, StateApproved, StateDenied, StateCompleted} {
 		suffix := "." + string(s)
-		if strings.HasSuffix(name, suffix) {
-			commandID := strings.TrimSuffix(name, suffix)
+		if before, ok0 := strings.CutSuffix(name, suffix); ok0 {
+			commandID := before
 			if err := validateCommandID(commandID); err != nil {
 				return "", "", false
 			}
