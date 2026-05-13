@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -371,7 +372,15 @@ func WaitForOAuthCallback(ctx context.Context, listener net.Listener, expectedSt
 		// detached from caller cancel: Shutdown must complete even after parent ctx cancels; 2s ceiling bounds wait
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		// Surface Shutdown errors at WARN: a hung handler exceeding the 2s ceiling
+		// returns context.DeadlineExceeded and signals a real listener leak — the
+		// loopback server is process-local, so any failure points at our own
+		// handler, not the network. No regression test: forcing this branch
+		// requires racing an in-flight handler against the 2s timeout, which is
+		// flaky to assert deterministically.
+		if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Default().Warn("auth: oauth callback server shutdown failed", "err", err.Error())
+		}
 		<-doneCh
 	}()
 
