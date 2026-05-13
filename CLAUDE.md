@@ -20,8 +20,9 @@ internal/approval/     approval gate (Store interface, FileStore, MemoryStore; s
 internal/audit/        append-only JSONL audit log (Sink interface, FileSink, MemorySink, NoopSink)
 internal/auth/         PKCE OAuth + standard OAuth 2.0 fallback + keyring session store
 internal/config/       viper settings with env/flag/file precedence
-internal/httprecord/   HTTP record/replay cassette (RecordTransport, ReplayTransport, Wrap); activated by GOLINK_RECORD / GOLINK_REPLAY
-internal/idempotency/  append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore)
+internal/filelock/     cross-process advisory flock helper (sidecar pattern), used by audit/idempotency/schedule/refresh paths
+internal/httprecord/   HTTP record/replay cassette (RecordTransport, ReplayTransport, Wrap); sidecar `<path>.lock` flock + fsync on append/save; activated by GOLINK_RECORD / GOLINK_REPLAY
+internal/idempotency/  append-only JSONL idempotency store (FileStore, MemoryStore, NoopStore); Store interface includes `Acquire(ctx, key) (release, error)` for per-key cross-process serialisation
 internal/output/       JSON envelopes, schema validator, enum parsers
 internal/plan/         golink.plan/v1 document type — Load (envelope-aware), SHA256, IsPlannableCommand
 internal/privacy/      redaction helpers for persisted audit previews and HTTP record/replay cassettes
@@ -70,6 +71,7 @@ Run `go vet ./...` and `go test -race ./...` after any code change. Only run `go
 | `GOLINK_SCHEDULE_DIR` | no | Override schedule store directory (default: `$XDG_STATE_HOME/golink/schedule/`) |
 | `GOLINK_RECORD` | no | Path to a JSONL cassette file; wraps the HTTP client to record every exchange |
 | `GOLINK_REPLAY` | no | Path to a JSONL cassette file; serves responses from cassette without network access (mutually exclusive with `GOLINK_RECORD`) |
+| `GOLINK_REFRESH_LOCK_PATH` | no | Override sidecar flock path for auto-refresh serialisation (default: `$XDG_STATE_HOME/golink/session.refresh.lock`) |
 
 Client secrets are only used for `GOLINK_AUTH_FLOW=oauth2` and must stay in
 local environment variables or a secret manager. Tokens via keyring only.
@@ -137,7 +139,8 @@ Implementation:
 - **Config**: loaded and validated at startup via `internal/config.Loader`; no hardcoded runtime values
 - **HTTP**: all LinkedIn calls go through `internal/api.Client`; always close bodies (`errcheck` is enabled)
 - **Security**: `govulncheck` on dep changes and before release; gated by `make ci`
-- **Audit**: every mutating command's `RunE` must call `a.auditMutation(cmd, cmdID, status, mode, ...)` before returning. Opt-out via `GOLINK_AUDIT=off` or `audit: false` in config. Tokens, secrets, member URNs, email addresses, and free-text payloads must never appear in persisted audit entries. `doctor` is read-only and is never audited.
+- **Audit**: every mutating command's `RunE` must call `a.auditMutation(cmd, cmdID, status, mode, ...)` before returning. Opt-out via `GOLINK_AUDIT=off` or `audit: false` in config. Tokens, secrets, member URNs, email addresses, and free-text payloads must never appear in persisted audit entries. The approval store is the documented exception: payloads persist verbatim so `approval run` can dispatch them literally, and the store relies on 0o600 file mode for access control rather than redaction. `doctor` is read-only and is never audited.
+- **Cross-process state**: append-only JSONL stores (audit, idempotency, approval, schedule, httprecord cassette) use `internal/filelock.Acquire(path+".lock")` sidecar flock and fsync writes before close. The flock binds to the sidecar inode so it survives the `O_APPEND` rename-safety pattern. Idempotency exposes `Store.Acquire(key)` for callers that need to span a Lookup→Record sequence under a single lock; FileStore uses a per-key SHA256-hashed lockfile.
 
 ## Review rejects (blocking)
 
@@ -152,3 +155,4 @@ Implementation:
 - JSON schema and Go struct out of sync
 - Missing tests on a user-visible behavior change
 - `go fix` applied blindly without reviewing the diff
+- Append-only JSONL store without sidecar flock and fsync before close
