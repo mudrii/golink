@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fixedTime is a stable timestamp for test envelopes.
@@ -264,8 +265,8 @@ func TestTruncateCell(t *testing.T) {
 	}
 	long := strings.Repeat("x", 70)
 	got := truncateCell(long)
-	if len(got) != maxCellWidth+3 {
-		t.Fatalf("expected length %d, got %d", maxCellWidth+3, len(got))
+	if utf8.RuneCountInString(got) != maxCellWidth {
+		t.Fatalf("expected rune count %d, got %d", maxCellWidth, utf8.RuneCountInString(got))
 	}
 	if !strings.HasSuffix(got, "...") {
 		t.Fatal("truncated cell should end with ...")

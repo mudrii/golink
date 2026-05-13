@@ -212,13 +212,14 @@ func renderTable(w io.Writer, td TabularData) error {
 	return tw.Flush()
 }
 
-// truncateCell truncates a cell value to maxCellWidth chars with ellipsis.
+// truncateCell truncates a cell value to maxCellWidth runes total, including the trailing ellipsis.
 func truncateCell(s string) string {
 	runes := []rune(s)
 	if len(runes) <= maxCellWidth {
 		return s
 	}
-	return string(runes[:maxCellWidth]) + "..."
+	const ellipsis = "..."
+	return string(runes[:maxCellWidth-len(ellipsis)]) + ellipsis
 }
 
 func sanitizeCell(s string) string {
