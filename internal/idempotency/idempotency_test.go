@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -319,6 +320,54 @@ func (s *FileStore) mustReadAll(t *testing.T) []Entry {
 		t.Fatalf("readAll: %v", err)
 	}
 	return entries
+}
+
+func TestFileStore_LogsCorruptedLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "idempotency.jsonl")
+
+	// Mix one valid record with one garbage line. readAll must surface
+	// the corrupt line via the injected slog handler instead of silently
+	// dropping it. Use a fresh TS so the entry falls within Lookup's
+	// 24h window.
+	validEntry := Entry{
+		TS:      time.Now().UTC(),
+		Key:     "k1",
+		Command: "post create",
+		Status:  "ok",
+	}
+	validBytes, err := json.Marshal(validEntry)
+	if err != nil {
+		t.Fatalf("marshal valid: %v", err)
+	}
+	garbage := `{not json`
+	if err := os.WriteFile(path, []byte(string(validBytes)+"\n"+garbage+"\n"), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger := slog.New(handler)
+	s := NewFileStore(path, WithLogger(logger))
+
+	// Trigger readAll via Lookup.
+	got, hit, err := s.Lookup(t.Context(), "k1", "post create")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !hit {
+		t.Fatalf("expected hit for valid entry")
+	}
+	if got.Key != "k1" {
+		t.Fatalf("got.Key = %q, want k1", got.Key)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Fatalf("expected WARN log, got: %s", out)
+	}
+	if !strings.Contains(out, "corrupted") {
+		t.Fatalf("expected message about corrupted line, got: %s", out)
+	}
 }
 
 func TestFileStore_ConcurrentRecordIsAtomic(t *testing.T) {

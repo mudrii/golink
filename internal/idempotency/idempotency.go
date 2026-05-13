@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -51,19 +52,37 @@ type Store interface {
 // FileStore implements Store using an append-only JSONL file.
 // It is safe for concurrent use within one process.
 type FileStore struct {
-	mu   sync.Mutex
-	path string
+	mu     sync.Mutex
+	path   string
+	logger *slog.Logger
 	// Now is overridable for testing. Defaults to time.Now when nil.
 	Now func() time.Time
 }
 
+// Option configures a FileStore at construction time.
+type Option func(*FileStore)
+
+// WithLogger overrides the slog.Logger used by FileStore to surface
+// corrupted JSONL lines. When unset, slog.Default() is used.
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *FileStore) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
+}
+
 // NewFileStore returns a FileStore that writes to path.
 // If path is empty, ResolvePath() is used.
-func NewFileStore(path string) *FileStore {
+func NewFileStore(path string, opts ...Option) *FileStore {
 	if path == "" {
 		path = ResolvePath()
 	}
-	return &FileStore{path: path}
+	s := &FileStore{path: path, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *FileStore) now() time.Time {
@@ -201,13 +220,20 @@ func (s *FileStore) readAll() ([]Entry, error) {
 	var entries []Entry
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	lineNum := 0
 	for sc.Scan() {
+		lineNum++
 		line := sc.Bytes()
 		if len(line) == 0 {
 			continue
 		}
 		var e Entry
 		if err := json.Unmarshal(line, &e); err != nil {
+			s.logger.Warn("idempotency: corrupted line, skipped",
+				"path", s.path,
+				"line", lineNum,
+				"err", err.Error(),
+			)
 			continue
 		}
 		entries = append(entries, e)
