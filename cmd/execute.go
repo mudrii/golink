@@ -112,7 +112,10 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 				Command:         p.Command,
 				Args:            p.Args,
 				IdempotencyKey:  ikey,
-				RequireApproval: func() bool { v, _ := cmd.Flags().GetBool("require-approval"); return v }(),
+				// Honour the resolved setting (flag > env > config) rather
+				// than the raw flag, so GOLINK_REQUIRE_APPROVAL / config-file
+				// opt-ins also gate plan execution.
+				RequireApproval: a.settings.RequireApproval,
 			}
 			if effectiveDryRun {
 				t := true
