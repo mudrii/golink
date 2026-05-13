@@ -3,7 +3,9 @@ package idempotency
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -178,6 +180,48 @@ func TestFileStoreRecordAndLookup(t *testing.T) {
 	}
 	if got.HTTPStatus != 201 {
 		t.Errorf("http_status: want 201, got %d", got.HTTPStatus)
+	}
+}
+
+func TestFileStore_RecordRedactsFreeText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "idempotency.jsonl")
+	s := NewFileStore(path)
+
+	// Result mirrors the post-create response shape: an opaque share URN plus
+	// the sensitive free-text fields the caller is forbidden to persist.
+	e := Entry{
+		TS:        time.Now().UTC(),
+		Key:       "abc-123",
+		Command:   "post create",
+		CommandID: "cmd_post_create_xxx",
+		Status:    "ok",
+		Result:    json.RawMessage(`{"text":"secret","author_urn":"urn:li:person:xyz","id":"urn:li:share:1"}`),
+	}
+	if err := s.Record(t.Context(), e); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	text := string(raw)
+
+	for _, leaked := range []string{"secret", "urn:li:person:xyz"} {
+		if strings.Contains(text, leaked) {
+			t.Errorf("idempotency file leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, "urn:li:share:1") {
+		t.Errorf("expected share id to survive redaction: %s", text)
+	}
+
+	got, hit, err := s.Lookup(t.Context(), "abc-123", "post create")
+	if err != nil || !hit {
+		t.Fatalf("lookup after redacted record: hit=%v err=%v", hit, err)
+	}
+	if got.CommandID != "cmd_post_create_xxx" {
+		t.Errorf("command_id corrupted by redaction: %q", got.CommandID)
 	}
 }
 

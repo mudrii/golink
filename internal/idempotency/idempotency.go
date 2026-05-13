@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/mudrii/golink/internal/privacy"
 )
 
 const (
@@ -121,6 +123,9 @@ func (s *FileStore) Record(_ context.Context, entry Entry) error {
 		return fmt.Errorf("idempotency open: %w", err)
 	}
 
+	if len(entry.Result) > 0 {
+		entry.Result = privacy.JSON(entry.Result)
+	}
 	line, err := json.Marshal(entry)
 	if err != nil {
 		_ = f.Close()
