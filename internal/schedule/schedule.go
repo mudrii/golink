@@ -125,6 +125,8 @@ type FileStore struct {
 	mu     sync.Mutex
 	dir    string
 	logger *slog.Logger
+	// Now is overridable for testing. Defaults to time.Now when nil.
+	Now func() time.Time
 }
 
 // Option configures a FileStore at construction time.
@@ -152,6 +154,13 @@ func NewFileStore(dir string, opts ...Option) *FileStore {
 		opt(s)
 	}
 	return s
+}
+
+func (s *FileStore) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (s *FileStore) ensureDir() error {
@@ -378,7 +387,7 @@ func (s *FileStore) MarkRunning(_ context.Context, commandID string) error {
 			return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
 		}
 		e.State = StateRunning
-		now := time.Now().UTC()
+		now := s.now()
 		e.StartedAt = &now
 		return nil
 	})
@@ -519,8 +528,8 @@ func (s *FileStore) MarkStale(_ context.Context, olderThan time.Duration) ([]Ent
 		return nil, fmt.Errorf("schedule stale readdir: %w", err)
 	}
 
-	cutoff := time.Now().UTC().Add(-olderThan)
-	now := time.Now().UTC()
+	now := s.now()
+	cutoff := now.Add(-olderThan)
 
 	var recovered []Entry
 	for _, de := range des {
@@ -642,11 +651,20 @@ func (s *FileStore) writeEntryAtomic(path string, entry Entry) error {
 type MemoryStore struct {
 	mu      sync.Mutex
 	entries map[string]Entry
+	// Now is overridable for testing. Defaults to time.Now when nil.
+	Now func() time.Time
 }
 
 // NewMemoryStore returns an empty MemoryStore.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{entries: make(map[string]Entry)}
+}
+
+func (m *MemoryStore) now() time.Time {
+	if m.Now != nil {
+		return m.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Add stores the entry in memory.
@@ -729,7 +747,7 @@ func (m *MemoryStore) MarkRunning(_ context.Context, commandID string) error {
 		return fmt.Errorf("%w: %s (state=%s, want pending)", ErrInvalidState, commandID, e.State)
 	}
 	e.State = StateRunning
-	now := time.Now().UTC()
+	now := m.now()
 	e.StartedAt = &now
 	m.entries[commandID] = e
 	return nil
@@ -843,8 +861,8 @@ func (m *MemoryStore) MarkStale(_ context.Context, olderThan time.Duration) ([]E
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	cutoff := time.Now().UTC().Add(-olderThan)
-	now := time.Now().UTC()
+	now := m.now()
+	cutoff := now.Add(-olderThan)
 
 	var recovered []Entry
 	for k := range m.entries {

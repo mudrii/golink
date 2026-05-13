@@ -741,3 +741,131 @@ func TestResolvePath(t *testing.T) {
 		t.Errorf("want relative fallback path, got %s", p)
 	}
 }
+
+// Tests for the Now clock seam (L2).
+//
+// The Now field on FileStore/MemoryStore allows tests to pin the clock so
+// time-dependent transitions (MarkRunning's StartedAt, MarkStale's cutoff)
+// are deterministic.
+
+func TestMemoryStore_NowSeam_MarkRunningRecordsInjectedClock(t *testing.T) {
+	ctx := t.Context()
+	fixed := time.Date(2027, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	m := NewMemoryStore()
+	m.Now = func() time.Time { return fixed }
+
+	if err := m.Add(ctx, sampleEntry("id1", t0)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.MarkRunning(ctx, "id1"); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
+	}
+	got, err := m.Get(ctx, "id1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.StartedAt == nil || !got.StartedAt.Equal(fixed) {
+		t.Fatalf("StartedAt: want %s, got %v", fixed, got.StartedAt)
+	}
+}
+
+func TestFileStore_NowSeam_MarkRunningRecordsInjectedClock(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	fixed := time.Date(2027, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	s := NewFileStore(dir)
+	s.Now = func() time.Time { return fixed }
+
+	if err := s.Add(ctx, sampleEntry("id1", t0)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := s.MarkRunning(ctx, "id1"); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
+	}
+	got, err := s.Get(ctx, "id1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.StartedAt == nil || !got.StartedAt.Equal(fixed) {
+		t.Fatalf("StartedAt: want %s, got %v", fixed, got.StartedAt)
+	}
+}
+
+func TestMemoryStore_NowSeam_MarkStaleUsesInjectedClock(t *testing.T) {
+	ctx := t.Context()
+	// Pin "now" to a fixed instant. The entry's StartedAt is one hour before
+	// "now"; a 30-minute olderThan window must classify it as stale, while a
+	// 2-hour window must leave it alone. Without the seam, MarkStale would
+	// use wall-clock time and StartedAt would always look ancient.
+	fixed := time.Date(2027, 6, 1, 12, 0, 0, 0, time.UTC)
+	started := fixed.Add(-time.Hour)
+
+	m := NewMemoryStore()
+	m.Now = func() time.Time { return fixed }
+
+	e := sampleEntry("id1", t0)
+	e.State = StateRunning
+	e.StartedAt = &started
+	m.entries["id1"] = e
+
+	recovered, err := m.MarkStale(ctx, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("MarkStale 2h: %v", err)
+	}
+	if len(recovered) != 0 {
+		t.Fatalf("2h window should not recover entry started 1h ago, got %d", len(recovered))
+	}
+
+	recovered, err = m.MarkStale(ctx, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("MarkStale 30m: %v", err)
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("30m window should recover entry started 1h ago, got %d", len(recovered))
+	}
+	if recovered[0].LastRunAt == nil || !recovered[0].LastRunAt.Equal(fixed) {
+		t.Fatalf("LastRunAt: want %s, got %v", fixed, recovered[0].LastRunAt)
+	}
+}
+
+func TestFileStore_NowSeam_MarkStaleUsesInjectedClock(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	fixed := time.Date(2027, 6, 1, 12, 0, 0, 0, time.UTC)
+	started := fixed.Add(-time.Hour)
+
+	s := NewFileStore(dir)
+
+	// Add the entry, then transition to running using a clock pinned at
+	// fixed-1h so StartedAt is exactly one hour before "now".
+	if err := s.Add(ctx, sampleEntry("id1", t0)); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	s.Now = func() time.Time { return started }
+	if err := s.MarkRunning(ctx, "id1"); err != nil {
+		t.Fatalf("MarkRunning: %v", err)
+	}
+	// Restore the "now" clock for MarkStale.
+	s.Now = func() time.Time { return fixed }
+
+	recovered, err := s.MarkStale(ctx, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("MarkStale 2h: %v", err)
+	}
+	if len(recovered) != 0 {
+		t.Fatalf("2h window should not recover entry started 1h ago, got %d", len(recovered))
+	}
+
+	recovered, err = s.MarkStale(ctx, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("MarkStale 30m: %v", err)
+	}
+	if len(recovered) != 1 {
+		t.Fatalf("30m window should recover entry started 1h ago, got %d", len(recovered))
+	}
+	if recovered[0].LastRunAt == nil || !recovered[0].LastRunAt.Equal(fixed) {
+		t.Fatalf("LastRunAt: want %s, got %v", fixed, recovered[0].LastRunAt)
+	}
+}
