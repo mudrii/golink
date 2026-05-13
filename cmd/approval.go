@@ -651,24 +651,9 @@ func (a *app) resolveStoredSessionAndTransport(ctx context.Context, cmd *cobra.C
 		resolvedProfile = a.settings.Profile
 	}
 
-	session, err := a.deps.SessionStore.LoadSession(ctx, resolvedProfile)
+	session, err := a.loadAndVerifySession(cmd, ctx, resolvedProfile, sessionContextStored)
 	if err != nil {
-		if errors.Is(err, auth.ErrSessionNotFound) {
-			return auth.Session{}, nil, a.authFailure(cmd,
-				"Token expired or invalid. Re-run: golink auth login",
-				fmt.Sprintf("no active session for stored profile %s", resolvedProfile))
-		}
-		return auth.Session{}, nil, a.transportFailure(cmd, "failed to resolve session", err.Error())
-	}
-
-	authenticated, err := session.IsAuthenticated(a.deps.Now())
-	if err != nil {
-		return auth.Session{}, nil, a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", err.Error())
-	}
-	if !authenticated {
-		return auth.Session{}, nil, a.authFailure(cmd,
-			"Token expired or invalid. Re-run: golink auth login",
-			fmt.Sprintf("session for stored profile %s has no usable access token", resolvedProfile))
+		return auth.Session{}, nil, err
 	}
 
 	settings := a.settings
@@ -679,7 +664,7 @@ func (a *app) resolveStoredSessionAndTransport(ctx context.Context, cmd *cobra.C
 		settings.Transport = transport
 	}
 
-	resolvedSession, refreshErr := a.maybeRefreshSession(ctx, *session)
+	resolvedSession, refreshErr := a.maybeRefreshSession(ctx, session)
 	if refreshErr != nil {
 		return auth.Session{}, nil, a.authFailure(cmd,
 			"Token expired or invalid. Re-run: golink auth login",

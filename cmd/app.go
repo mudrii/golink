@@ -469,10 +469,40 @@ func (a *app) writeDryRun(cmd *cobra.Command, data any, text string) error {
 // it is currently usable. On failure it returns a commandFailure primed with
 // the right envelope and exit code so command handlers can simply return.
 func (a *app) resolveSession(cmd *cobra.Command) (auth.Session, error) {
-	session, err := a.deps.SessionStore.LoadSession(cmd.Context(), a.settings.Profile)
+	return a.loadAndVerifySession(cmd, cmd.Context(), a.settings.Profile, sessionContextActive)
+}
+
+// sessionContextDescriptor renders profile-specific detail strings for the
+// auth/transport failure envelopes produced by loadAndVerifySession.
+type sessionContextDescriptor struct {
+	notFound      func(profile string) string
+	noAccessToken func(profile string) string
+}
+
+var (
+	sessionContextActive = sessionContextDescriptor{
+		notFound:      func(string) string { return "no active session for the selected profile" },
+		noAccessToken: func(string) string { return "session has no usable access token" },
+	}
+	sessionContextStored = sessionContextDescriptor{
+		notFound: func(p string) string {
+			return fmt.Sprintf("no active session for stored profile %s", p)
+		},
+		noAccessToken: func(p string) string {
+			return fmt.Sprintf("session for stored profile %s has no usable access token", p)
+		},
+	}
+)
+
+// loadAndVerifySession centralizes the load → ErrSessionNotFound → IsAuthenticated
+// → !authenticated branching used by resolveSession and
+// resolveStoredSessionAndTransport. The descriptor parameterizes the
+// detail strings so callers can preserve their existing user-facing wording.
+func (a *app) loadAndVerifySession(cmd *cobra.Command, ctx context.Context, profile string, desc sessionContextDescriptor) (auth.Session, error) {
+	session, err := a.deps.SessionStore.LoadSession(ctx, profile)
 	if err != nil {
 		if errors.Is(err, auth.ErrSessionNotFound) {
-			return auth.Session{}, a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", "no active session for the selected profile")
+			return auth.Session{}, a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", desc.notFound(profile))
 		}
 		return auth.Session{}, a.transportFailure(cmd, "failed to resolve session", err.Error())
 	}
@@ -481,7 +511,7 @@ func (a *app) resolveSession(cmd *cobra.Command) (auth.Session, error) {
 		return auth.Session{}, a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", err.Error())
 	}
 	if !authenticated {
-		return auth.Session{}, a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", "session has no usable access token")
+		return auth.Session{}, a.authFailure(cmd, "Token expired or invalid. Re-run: golink auth login", desc.noAccessToken(profile))
 	}
 	return *session, nil
 }
