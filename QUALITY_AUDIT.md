@@ -310,3 +310,65 @@ Scope: `/Users/mudrii/src/golink` at `bf58ddb3e9a023fb17bd5a299e6d26271fff6e52`
 24. LOW: `internal/idempotency/idempotency.go:293-318` memory/no-op helper paths are 0% covered.
 25. LOW: widespread test `context.Background()` use diverges from repo's `t.Context()` idiom.
 
+## Wave-2 Review-and-Fix Cycle
+
+Date: 2026-05-13
+Scope: review/wave-fixes branch at worktree `review-fix-wave-2`
+Gates: `make ci` clean (vet + golangci-lint 0 issues + test + race + govulncheck).
+
+### Summary
+
+- Initial review surfaced 17 findings: H1-H4 (high), M1-M14 (medium), L1-L2 (low). All 17 landed as atomic commits.
+- A post-validation re-scan surfaced 4 additional issues — H1 approval data-loss, H2 idempotency cross-process race, M6 schedule state-transition race, plus crash-durability residuals. All resolved.
+- No new findings were carried forward; the wave is closed.
+
+### Highest-impact findings
+
+1. HIGH (post-validation): `internal/approval` persisted payload data loss.
+   - Symptom: `approval.Stage` ran `privacy.JSON` over the payload before disk write. On `approval run`, dispatch read the stored payload back literally and posted `"REDACTED"` strings to LinkedIn.
+   - Fix: removed the redaction at persist time. File mode `0o600` on the approval directory remains the access-control boundary; redaction stays scoped to audit previews and HTTP cassettes.
+   - Commit: `c4faef4`.
+
+2. HIGH (post-validation): `internal/idempotency` cross-process race between Lookup and Record.
+   - Symptom: callers performed `Lookup` then `Record` as two separate calls. Two concurrent processes could both miss, both execute the side-effect, and both record.
+   - Fix: extended `Store` with `Acquire(ctx, key) (release, error)` taking a per-key sidecar `flock`. Justified the interface expansion in code comments on the consumer-side seam; `MemoryStore.Acquire` is documented as non-reentrant.
+   - Commits: `c911813`, `48b4222`.
+
+3. MEDIUM (M3/M4): refresh hard-fail policy change in `cmd` token refresh.
+   - Before: `maybeRefreshSession` logged a warning and proceeded when the sidecar flock or `SaveSession` failed.
+   - After: both failures are now fatal. Rationale: refresh-token rotation makes a silent half-state (new token issued, not persisted) strictly worse than an upfront error the caller can retry.
+   - Commits: `7cc797c`, `d277e79`.
+
+### Full commit list (most recent first)
+
+```
+e073fe1 fix(auth): surface oauth callback server Shutdown errors (M5)
+48b4222 docs(idempotency): document MemoryStore.Acquire is non-reentrant
+646f5e1 fix(batch): log idempotency marshal/record errors instead of dropping (L2)
+60ded12 fix(batch): fsync progress sidecar to survive kernel crash (M8)
+7cc797c fix(cmd): hard-fail token refresh on lock or save error (M3, M4)
+0d3c625 fix(httprecord): fsync cassette writes and serialise with sidecar flock (M1, M2)
+c911813 fix(idempotency): hold sidecar flock during Lookup to close cross-process race (H2-followup)
+d45ba33 fix(schedule): serialize state transitions across processes with sidecar flock (M6-followup)
+c4faef4 fix(approval): do not redact persisted payload — dispatch reads it back literally (H1)
+ec33b22 fix(schedule): fsync writes and directories for crash durability (M4/M5 follow-up)
+9fd04f8 test(api): widen HTTP-date Retry-After window to 2s to deflake test
+14ccf1c style: gofmt + gocritic fixes in execute and redact
+ebe7bd1 refactor(output): use typed ScheduleRunStatus in ScheduleRunResult (M7)
+d277e79 fix(cmd): serialize token refresh to prevent concurrent-process race (M13)
+22f3bc3 refactor(output): centralize output-mode validation (M12)
+14ff2dc refactor(schedule): add Now clock seam on stores for test injection (L2)
+fe4459a fix: fsync append-only stores before close to survive kernel crash (M4, M5)
+af74487 docs(batch): document results-channel ownership invariant (L1)
+b46eef5 fix(httprecord): canonicalize URL for record/replay matching (M6)
+c1fb7ce fix(api): decode percent-encoded URN keys in SocialMetadata (M10)
+89c1568 refactor(schedule): drop redundant duplicate-key pre-check in Add (M14)
+ab4ce0c fix(privacy): redact inline "Bearer <token>" strings (M11)
+ef95aea fix(execute): use settings.RequireApproval, honor env/config (M3)
+adf4b21 fix(api): honor Retry-After header on 429/503 retries (H2)
+29a2c5b docs(execute): document settings mutation invariant (H4)
+708b012 fix(idempotency): hold sidecar flock across Prune read+rewrite (H3)
+d87a4d4 fix(plan): canonicalize Args through json.Number for stable SHA256 (M8)
+8ed8a32 fix(plan): register --notes persistent flag (H1)
+```
+
