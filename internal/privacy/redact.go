@@ -11,16 +11,24 @@ import (
 const redacted = "REDACTED"
 
 var (
-	emailPattern       = regexp.MustCompile(`(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}`)
+	emailPattern = regexp.MustCompile(`(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}`)
+	// compoundURNPattern matches nested forms like
+	// `urn:li:comment:(urn:li:activity:9001,99)` that the simple URN pattern
+	// would only partially cover. It runs before linkedinURNPattern so the
+	// whole compound form is replaced once.
+	compoundURNPattern = regexp.MustCompile(`urn:li:[a-zA-Z]+:\([^)]+\)`)
 	linkedinURNPattern = regexp.MustCompile(`urn:li:(person|member|organization):[A-Za-z0-9_-]+`)
 	unixUserPath       = regexp.MustCompile(`/Users/[A-Za-z0-9._-]+(?:/[^\s"'<>]*)?`)
+	linuxHomePath      = regexp.MustCompile(`/home/[A-Za-z0-9._-]+(?:/[^\s"'<>]*)?`)
 	homeRelativePath   = regexp.MustCompile(`~/[^\s"'<>]+`)
 )
 
 // String redacts personal identifiers inside a scalar string.
 func String(s string) string {
+	s = compoundURNPattern.ReplaceAllString(s, redacted)
 	s = linkedinURNPattern.ReplaceAllString(s, redacted)
 	s = unixUserPath.ReplaceAllString(s, redacted)
+	s = linuxHomePath.ReplaceAllString(s, redacted)
 	s = homeRelativePath.ReplaceAllString(s, redacted)
 	s = emailPattern.ReplaceAllString(s, redacted)
 	return s
