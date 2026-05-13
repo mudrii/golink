@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -173,5 +176,144 @@ func TestMaybeRefreshSessionSkipsWhenAlreadyFresh(t *testing.T) {
 	}
 	if session.AccessToken != "fresh-token" {
 		t.Errorf("returned access token: want fresh-token (from store), got %q", session.AccessToken)
+	}
+}
+
+// saveFailingStore wraps an auth.Store and forces SaveSession to return an
+// error. Used by TestMaybeRefreshSessionFailsOnSaveError to verify M4: the
+// refresh contract requires that we never return a refreshed session that
+// has not been durably persisted.
+type saveFailingStore struct {
+	inner   auth.Store
+	saveErr error
+}
+
+func (s *saveFailingStore) LoadSession(ctx context.Context, profile string) (*auth.Session, error) {
+	return s.inner.LoadSession(ctx, profile)
+}
+
+func (s *saveFailingStore) SaveSession(context.Context, auth.Session) error {
+	return s.saveErr
+}
+
+func (s *saveFailingStore) DeleteSession(ctx context.Context, profile string) error {
+	return s.inner.DeleteSession(ctx, profile)
+}
+
+// TestMaybeRefreshSessionFailsOnSaveError guards M4: if SaveSession fails after
+// a successful network refresh, maybeRefreshSession must return the persistence
+// error (not the new session). Otherwise the in-memory caller would use the new
+// access token while the next CLI invocation reloads a stale refresh-token,
+// double-consuming a rotated credential.
+func TestMaybeRefreshSessionFailsOnSaveError(t *testing.T) {
+	t.Parallel()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"new-token","expires_in":3600,"refresh_token":"new-refresh"}`)
+	}))
+	defer tokenServer.Close()
+
+	inner := auth.NewMemoryStore()
+	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	if err := inner.SaveSession(t.Context(), auth.Session{
+		Profile:      "default",
+		Transport:    "official",
+		AccessToken:  "old-token",
+		ExpiresAt:    now.Add(2 * time.Minute),
+		RefreshToken: "old-refresh",
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	wantErr := errors.New("disk full")
+	store := &saveFailingStore{inner: inner, saveErr: wantErr}
+
+	deps := normalizeDependencies(Dependencies{
+		HTTPClient:      tokenServer.Client(),
+		TokenURL:        tokenServer.URL,
+		SessionStore:    store,
+		Now:             func() time.Time { return now },
+		RefreshLockPath: filepath.Join(t.TempDir(), "refresh.lock"),
+	})
+	a := &app{
+		deps:     deps,
+		settings: config.Settings{ClientID: "client-123"},
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	stale, err := inner.LoadSession(t.Context(), "default")
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+
+	session, err := a.maybeRefreshSession(t.Context(), *stale)
+	if err == nil {
+		t.Fatalf("expected error from SaveSession failure, got nil; session=%+v", session)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("error chain: want %v, got %v", wantErr, err)
+	}
+	// On save failure the caller must observe the OLD session, not the
+	// half-persisted refresh result.
+	if session.AccessToken != "old-token" {
+		t.Errorf("returned access token after save failure: want old-token, got %q", session.AccessToken)
+	}
+}
+
+// TestMaybeRefreshSessionFailsOnLockError guards M3: if the refresh lock cannot
+// be acquired, the function must hard-fail rather than silently fall through
+// to an unserialised refresh.
+func TestMaybeRefreshSessionFailsOnLockError(t *testing.T) {
+	t.Parallel()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Errorf("token endpoint should not be hit when lock fails")
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer tokenServer.Close()
+
+	store := auth.NewMemoryStore()
+	now := time.Date(2026, 4, 16, 12, 0, 0, 0, time.UTC)
+	if err := store.SaveSession(t.Context(), auth.Session{
+		Profile:      "default",
+		Transport:    "official",
+		AccessToken:  "old-token",
+		ExpiresAt:    now.Add(2 * time.Minute),
+		RefreshToken: "old-refresh",
+	}); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+
+	// Point RefreshLockPath at a path that cannot be created because its
+	// parent is a regular file, not a directory. acquireRefreshLock's
+	// MkdirAll will return an error.
+	tmp := t.TempDir()
+	blocker := filepath.Join(tmp, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	lockPath := filepath.Join(blocker, "refresh.lock")
+
+	deps := normalizeDependencies(Dependencies{
+		HTTPClient:      tokenServer.Client(),
+		TokenURL:        tokenServer.URL,
+		SessionStore:    store,
+		Now:             func() time.Time { return now },
+		RefreshLockPath: lockPath,
+	})
+	a := &app{
+		deps:     deps,
+		settings: config.Settings{ClientID: "client-123"},
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	stale, err := store.LoadSession(t.Context(), "default")
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+
+	if _, err := a.maybeRefreshSession(t.Context(), *stale); err == nil {
+		t.Fatalf("expected hard-fail on lock error, got nil")
 	}
 }

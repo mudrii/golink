@@ -566,25 +566,26 @@ func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) (au
 
 	closer, lockErr := a.acquireRefreshLock()
 	if lockErr != nil {
-		// Lock contention is rare and non-fatal: log and fall through to a
-		// best-effort refresh. The worst case is the same race window we
-		// already had before this guard existed.
-		a.logger.Warn("auto-refresh: lock unavailable, refreshing without serialisation", "error", lockErr)
-	} else {
-		defer func() {
-			if err := closer.Close(); err != nil {
-				a.logger.Warn("auto-refresh: lock release failed", "error", err)
-			}
-		}()
-
-		// Re-read the session under the lock — another process may have
-		// already refreshed it while we waited for the lock.
-		if reloaded, err := a.deps.SessionStore.LoadSession(ctx, session.Profile); err == nil && reloaded != nil {
-			if !refreshDue(*reloaded, a.deps.Now()) {
-				return *reloaded, nil
-			}
-			session = *reloaded
+		// Without the lock we cannot guarantee single-flight token refresh.
+		// Two concurrent processes that both fall through here would each
+		// consume the (rotating) refresh token, invalidating one side and
+		// forcing the user to re-login. Hard-fail and let the caller surface
+		// a typed auth error instead of corrupting the session.
+		return session, fmt.Errorf("auto-refresh: acquire lock: %w", lockErr)
+	}
+	defer func() {
+		if err := closer.Close(); err != nil {
+			a.logger.Warn("auto-refresh: lock release failed", "error", err)
 		}
+	}()
+
+	// Re-read the session under the lock — another process may have
+	// already refreshed it while we waited for the lock.
+	if reloaded, err := a.deps.SessionStore.LoadSession(ctx, session.Profile); err == nil && reloaded != nil {
+		if !refreshDue(*reloaded, a.deps.Now()) {
+			return *reloaded, nil
+		}
+		session = *reloaded
 	}
 
 	token, err := auth.RefreshAccessToken(ctx, a.deps.HTTPClient, a.deps.TokenURL, a.settings.ClientID, session.RefreshToken)
@@ -592,25 +593,32 @@ func (a *app) maybeRefreshSession(ctx context.Context, session auth.Session) (au
 		return session, err
 	}
 
-	session.AccessToken = token.AccessToken
+	refreshed := session
+	refreshed.AccessToken = token.AccessToken
 	if token.ExpiresIn > 0 {
-		session.ExpiresAt = a.deps.Now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second)
+		refreshed.ExpiresAt = a.deps.Now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 	if token.Scope != "" {
-		session.Scopes = grantedScopes(token.Scope)
+		refreshed.Scopes = grantedScopes(token.Scope)
 	}
 	if token.RefreshToken != "" {
-		session.RefreshToken = token.RefreshToken
+		refreshed.RefreshToken = token.RefreshToken
 		if token.RefreshTokenExpiresIn > 0 {
-			session.RefreshExpiresAt = a.deps.Now().UTC().Add(time.Duration(token.RefreshTokenExpiresIn) * time.Second)
+			refreshed.RefreshExpiresAt = a.deps.Now().UTC().Add(time.Duration(token.RefreshTokenExpiresIn) * time.Second)
 		}
 	}
 
-	if err := a.deps.SessionStore.SaveSession(ctx, session); err != nil {
-		a.logger.Warn("auto-refresh: failed to persist refreshed session", "error", err)
+	// Persist before returning the refreshed session. If we returned the new
+	// access token but the disk still holds the old refresh-token, the next
+	// process loads stale credentials and either consumes a rotated
+	// refresh-token a second time (invalidating it) or quietly reuses an
+	// already-expired access token. Both outcomes look like "session broke
+	// itself" to the user. Surface the error so the caller can react.
+	if err := a.deps.SessionStore.SaveSession(ctx, refreshed); err != nil {
+		return session, fmt.Errorf("auto-refresh: persist session: %w", err)
 	}
 
-	return session, nil
+	return refreshed, nil
 }
 
 // refreshDue reports whether session's access token is within the 5-minute
