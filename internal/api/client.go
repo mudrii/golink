@@ -19,6 +19,7 @@ import (
 	retryablehttp "github.com/hashicorp/go-retryablehttp"
 	"github.com/mudrii/golink/internal/httprecord"
 	"github.com/mudrii/golink/internal/output"
+	"github.com/mudrii/golink/internal/privacy"
 )
 
 const (
@@ -301,17 +302,32 @@ func (c *Client) resolveURL(relativePath string) (*url.URL, error) {
 }
 
 func decodeError(status int, body []byte, requestID string) *Error {
-	rawDetails := strings.TrimSpace(string(body))
-	apiErr := &Error{Status: status, RequestID: requestID, Message: rawDetails}
+	// Decode the envelope from the raw body so caller-visible fields (code,
+	// message) keep their original strings — LinkedIn's "message" carries
+	// the human-readable error like "Insufficient permissions". For Details
+	// (and the Message fallback when the body isn't valid JSON), redact PII
+	// like member URNs, emails, and local paths before persisting, since
+	// LinkedIn occasionally echoes the offending member's URN in error
+	// payloads and Details lands in audit logs.
 	var envelope struct {
 		Status           int    `json:"status"`
 		Code             string `json:"code"`
 		Message          string `json:"message"`
 		ServiceErrorCode string `json:"serviceErrorCode"`
 	}
-	if json.Unmarshal(body, &envelope) == nil {
+	envelopeOK := json.Unmarshal(body, &envelope) == nil
+
+	var redactedRaw string
+	if json.Valid(body) {
+		redactedRaw = strings.TrimSpace(string(privacy.JSON(body)))
+	} else {
+		redactedRaw = strings.TrimSpace(privacy.String(string(body)))
+	}
+
+	apiErr := &Error{Status: status, RequestID: requestID, Message: redactedRaw}
+	if envelopeOK {
 		if envelope.Message != "" {
-			apiErr.Message = envelope.Message
+			apiErr.Message = privacy.String(envelope.Message)
 		}
 		switch {
 		case envelope.Code != "":
@@ -319,8 +335,8 @@ func decodeError(status int, body []byte, requestID string) *Error {
 		case envelope.ServiceErrorCode != "":
 			apiErr.Code = envelope.ServiceErrorCode
 		}
-		if envelope.Message != "" && rawDetails != "" && rawDetails != envelope.Message {
-			apiErr.Details = rawDetails
+		if envelope.Message != "" && redactedRaw != "" && redactedRaw != apiErr.Message {
+			apiErr.Details = redactedRaw
 		}
 	}
 	return apiErr

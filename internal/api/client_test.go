@@ -142,6 +142,31 @@ func TestClientDecodesError(t *testing.T) {
 	}
 }
 
+func TestDecodeError_RedactsURNFromDetails(t *testing.T) {
+	body := []byte(`{"status":403,"code":"ACCESS_DENIED","message":"denied","details":"member urn:li:person:abc123 not allowed"}`)
+	apiErr := decodeError(http.StatusForbidden, body, "req-1")
+	if apiErr == nil {
+		t.Fatal("expected *Error")
+	}
+	if strings.Contains(apiErr.Details, "urn:li:person:abc123") {
+		t.Fatalf("Details leaked member URN: %q", apiErr.Details)
+	}
+	if apiErr.Code != "ACCESS_DENIED" {
+		t.Fatalf("Code should still decode: %q", apiErr.Code)
+	}
+	if apiErr.Message != "denied" {
+		t.Fatalf("Message should still decode: %q", apiErr.Message)
+	}
+}
+
+func TestDecodeError_RedactsURNFromNonJSONBody(t *testing.T) {
+	body := []byte("plain text mentioning urn:li:person:abc123")
+	apiErr := decodeError(http.StatusForbidden, body, "req-1")
+	if strings.Contains(apiErr.Message, "urn:li:person:abc123") {
+		t.Fatalf("Message leaked URN: %q", apiErr.Message)
+	}
+}
+
 func TestParseRateLimitUnixSeconds(t *testing.T) {
 	header := http.Header{}
 	header.Set("X-RateLimit-Remaining", "12")
