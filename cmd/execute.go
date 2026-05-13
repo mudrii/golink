@@ -109,9 +109,9 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 			}
 
 			op := batchOp{
-				Command:         p.Command,
-				Args:            p.Args,
-				IdempotencyKey:  ikey,
+				Command:        p.Command,
+				Args:           p.Args,
+				IdempotencyKey: ikey,
 				// Honour the resolved setting (flag > env > config) rather
 				// than the raw flag, so GOLINK_REQUIRE_APPROVAL / config-file
 				// opt-ins also gate plan execution.

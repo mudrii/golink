@@ -26,7 +26,7 @@ var (
 	// string (audit detail, cassette body, error envelope) cannot leak the
 	// token. Requires at least 8 token characters to avoid clobbering
 	// legitimate short strings like "Bearer Cap".
-	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9_\-\.=+/]{8,}`)
+	bearerTokenPattern = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9_\-.=+/]{8,}`)
 )
 
 // String redacts personal identifiers inside a scalar string.
