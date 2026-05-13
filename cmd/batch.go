@@ -202,6 +202,11 @@ func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool,
 		anyErr bool
 	}
 
+	// Ownership: the orchestrator (this goroutine) owns close(results); workers
+	// only send. Closing after wg.Wait() is the single safe point — if any
+	// worker closed, a parallel sender would panic on send-to-closed-channel.
+	// Buffer is len(ops) so a send never blocks, which means ctx cancellation
+	// can't strand a worker on `results <- ...` and deadlock wg.Wait().
 	results := make(chan result, len(ops))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
