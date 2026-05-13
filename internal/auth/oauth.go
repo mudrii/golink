@@ -365,7 +365,8 @@ func WaitForOAuthCallback(ctx context.Context, listener net.Listener, expectedSt
 		}
 	}()
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// detached from caller cancel: Shutdown must complete even after parent ctx cancels; 2s ceiling bounds wait
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 		<-doneCh

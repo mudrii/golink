@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -121,6 +122,47 @@ func TestWaitForOAuthCallback(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatalf("timed out waiting for callback result: %v", ctx.Err())
+	}
+}
+
+func TestWaitForOAuthCallback_ContextCancelReturnsQuickly(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	errorCh := make(chan error, 1)
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		_, waitErr := WaitForOAuthCallback(ctx, listener, "state-123")
+		errorCh <- waitErr
+	}()
+
+	// Give the server a moment to start, then cancel parent ctx.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	start := time.Now()
+	select {
+	case <-doneCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("WaitForOAuthCallback did not return within 500ms after ctx cancel; shutdown is using parent ctx")
+	}
+	elapsed := time.Since(start)
+
+	waitErr := <-errorCh
+	if waitErr == nil {
+		t.Fatal("expected error after context cancel")
+	}
+	if !errors.Is(waitErr, context.Canceled) {
+		t.Fatalf("expected error wrapping context.Canceled, got: %v", waitErr)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("returned too slowly after cancel: %s", elapsed)
 	}
 }
 
