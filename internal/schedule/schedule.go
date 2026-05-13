@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -121,17 +122,36 @@ const staleError = "stale: process crashed mid-run"
 // Files are named <scheduled_at_rfc3339>-<command_id>.json for lexical sort.
 // Completed entries are moved to a completed/ subdirectory.
 type FileStore struct {
-	mu  sync.Mutex
-	dir string
+	mu     sync.Mutex
+	dir    string
+	logger *slog.Logger
+}
+
+// Option configures a FileStore at construction time.
+type Option func(*FileStore)
+
+// WithLogger overrides the slog.Logger used by FileStore to surface
+// corrupted JSONL lines and other recoverable errors. When unset,
+// slog.Default() is used.
+func WithLogger(logger *slog.Logger) Option {
+	return func(s *FileStore) {
+		if logger != nil {
+			s.logger = logger
+		}
+	}
 }
 
 // NewFileStore returns a FileStore rooted at dir.
 // If dir is empty, ResolvePath() is used.
-func NewFileStore(dir string) *FileStore {
+func NewFileStore(dir string, opts ...Option) *FileStore {
 	if dir == "" {
 		dir = ResolvePath()
 	}
-	return &FileStore{dir: dir}
+	s := &FileStore{dir: dir, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *FileStore) ensureDir() error {
@@ -223,12 +243,15 @@ func (s *FileStore) List(_ context.Context) ([]Entry, error) {
 			if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(dir, de.Name()))
+			path := filepath.Join(dir, de.Name())
+			data, err := os.ReadFile(path)
 			if err != nil {
+				s.logger.Warn("schedule list: read failed", "path", path, "err", err.Error())
 				continue
 			}
 			var e Entry
 			if err := json.Unmarshal(data, &e); err != nil {
+				s.logger.Warn("schedule list: corrupted entry, skipped", "path", path, "err", err.Error())
 				continue
 			}
 			entries = append(entries, e)
@@ -265,12 +288,15 @@ func (s *FileStore) Get(_ context.Context, commandID string) (Entry, error) {
 			if !filenameHasCommandID(de.Name(), commandID) {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(dir, de.Name()))
+			path := filepath.Join(dir, de.Name())
+			data, err := os.ReadFile(path)
 			if err != nil {
+				s.logger.Warn("schedule get: read failed", "path", path, "err", err.Error())
 				continue
 			}
 			var e Entry
 			if err := json.Unmarshal(data, &e); err != nil {
+				s.logger.Warn("schedule get: corrupted entry, skipped", "path", path, "err", err.Error())
 				continue
 			}
 			if e.CommandID == commandID {
@@ -316,12 +342,15 @@ func (s *FileStore) Due(_ context.Context, now time.Time, limit int) ([]Entry, e
 		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(s.dir, de.Name()))
+		path := filepath.Join(s.dir, de.Name())
+		data, err := os.ReadFile(path)
 		if err != nil {
+			s.logger.Warn("schedule due: read failed", "path", path, "err", err.Error())
 			continue
 		}
 		var e Entry
 		if err := json.Unmarshal(data, &e); err != nil {
+			s.logger.Warn("schedule due: corrupted entry, skipped", "path", path, "err", err.Error())
 			continue
 		}
 		if e.State == StatePending && !e.ScheduledAt.After(now) {
@@ -445,12 +474,15 @@ func (s *FileStore) Next(_ context.Context) (Entry, error) {
 		if de.IsDir() || !strings.HasSuffix(de.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(s.dir, de.Name()))
+		path := filepath.Join(s.dir, de.Name())
+		data, err := os.ReadFile(path)
 		if err != nil {
+			s.logger.Warn("schedule next: read failed", "path", path, "err", err.Error())
 			continue
 		}
 		var e Entry
 		if err := json.Unmarshal(data, &e); err != nil {
+			s.logger.Warn("schedule next: corrupted entry, skipped", "path", path, "err", err.Error())
 			continue
 		}
 		if e.State != StatePending {
@@ -498,10 +530,12 @@ func (s *FileStore) MarkStale(_ context.Context, olderThan time.Duration) ([]Ent
 		path := filepath.Join(s.dir, de.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
+			s.logger.Warn("schedule stale: read failed", "path", path, "err", err.Error())
 			continue
 		}
 		var e Entry
 		if err := json.Unmarshal(data, &e); err != nil {
+			s.logger.Warn("schedule stale: corrupted entry, skipped", "path", path, "err", err.Error())
 			continue
 		}
 		if e.State != StateRunning || e.StartedAt == nil {
@@ -546,10 +580,12 @@ func (s *FileStore) findInMain(commandID string) (Entry, string, error) {
 		path := filepath.Join(s.dir, de.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
+			s.logger.Warn("schedule find: read failed", "path", path, "err", err.Error())
 			continue
 		}
 		var e Entry
 		if err := json.Unmarshal(data, &e); err != nil {
+			s.logger.Warn("schedule find: corrupted entry, skipped", "path", path, "err", err.Error())
 			continue
 		}
 		if e.CommandID == commandID {

@@ -1,11 +1,44 @@
 package schedule
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestFileStore_LogsCorruptedLinesViaSlog(t *testing.T) {
+	dir := t.TempDir()
+	ctx := t.Context()
+
+	// Write a corrupt JSON entry that List/Due/Next would silently skip
+	// without a logger.
+	corrupt := filepath.Join(dir, "2027-01-01T09-00-00Z-bad.json")
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt: %v", err)
+	}
+
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	logger := slog.New(handler)
+	s := NewFileStore(dir, WithLogger(logger))
+
+	// Any read path that scans the dir should surface the parse failure.
+	if _, err := s.List(ctx); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "bad.json") {
+		t.Fatalf("expected warning mentioning bad.json, got: %s", out)
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Fatalf("expected WARN level, got: %s", out)
+	}
+}
 
 var t0 = time.Date(2027, 1, 1, 9, 0, 0, 0, time.UTC)
 var t1 = time.Date(2027, 1, 2, 9, 0, 0, 0, time.UTC)
