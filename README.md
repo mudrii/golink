@@ -15,7 +15,7 @@ golink talks to LinkedIn through a transport-pluggable architecture. The default
 | `auth login` | ✅ | via httptest | Native PKCE S256 with loopback callback |
 | `auth status` | ✅ | ✅ | Reports unauthenticated when token is missing or expired; shows refresh expiry when available |
 | `auth logout` | ✅ | ✅ | Clears the keyring entry |
-| `auth refresh` | ✅ | via httptest | Exchanges refresh token for new access token; silently auto-runs within 5 min of expiry |
+| `auth refresh` | ✅ | via httptest | Exchanges refresh token for new access token; auto-runs within 5 min of expiry under a single-flight sidecar lock |
 | `profile me` | ✅ | ✅ | Reads cached OIDC claims from the session |
 | `post create` | ✅ | httptest | `--dry-run` previews the exact payload |
 | `post create --dry-run` | ✅ | ✅ | Schema-validated envelope, no network |
@@ -210,9 +210,20 @@ golink --output=table react list urn:li:share:123
 | `GOLINK_IDEMPOTENCY_PATH` | No | Override idempotency store path |
 | `GOLINK_AUDIT`, `GOLINK_AUDIT_PATH` | No | Disable audit or override path |
 | `GOLINK_APPROVAL_DIR`, `GOLINK_SCHEDULE_DIR` | No | Override approval / schedule store dirs |
+| `GOLINK_REFRESH_LOCK_PATH` | No | Override sidecar flock path for auto-refresh single-flight serialisation (default: `$XDG_STATE_HOME/golink/session.refresh.lock`) |
 | `GOLINK_RECORD`, `GOLINK_REPLAY` | No | Record/replay HTTP exchanges to a JSONL cassette |
 
 Tokens are stored in the OS keyring — never on disk or in logs.
+
+> **Auto-refresh hard-fail.** When a session is within 5 minutes of access-token
+> expiry, golink runs `auth refresh` inline before dispatching the user's
+> command. The refresh is serialised across processes via a sidecar flock
+> (`GOLINK_REFRESH_LOCK_PATH`, default `$XDG_STATE_HOME/golink/session.refresh.lock`).
+> If the lock cannot be acquired, or if persisting the refreshed session fails,
+> the command exits 4 with an auth error — prior versions warned and proceeded.
+> Because LinkedIn rotates refresh tokens, silent half-state is worse than an
+> upfront failure: re-run the command (or run `golink auth refresh` explicitly)
+> after resolving the underlying issue.
 
 > **Redirect URI gotcha.** LinkedIn matches OAuth redirects on the exact
 > registered URL including the port. Register `http://127.0.0.1:<port>/callback`
@@ -477,6 +488,12 @@ Add `--strict` to treat warnings (token expiring in < 7 days, missing `GOLINK_CL
 
 `golink doctor` is read-only and is not audited.
 
+**Troubleshooting**: errors mentioning `auto-refresh: acquire lock` or
+`auto-refresh: persist session` indicate that the state directory
+(`$XDG_STATE_HOME/golink/`, or the override path under
+`GOLINK_REFRESH_LOCK_PATH`) is unwritable — check directory mode, ownership,
+and free space, then re-run the command.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -504,9 +521,9 @@ Configuration is resolved by `internal/config` with flag and environment overrid
 
 Machine-readable output is centralized in `internal/output` and validated against `schemas/golink-output.schema.json` for `--json`. Text, compact, table, and JSONL modes are renderings of the same command data and are intentionally easier to read or stream.
 
-Local persistence is append-only where practical. Idempotency and audit stores are JSONL files under `$XDG_STATE_HOME/golink/` by default, while approvals and scheduled posts are directory-backed state machines. Stores create `0700` directories and `0600` files.
+Local persistence is append-only where practical. Idempotency and audit stores are JSONL files under `$XDG_STATE_HOME/golink/` by default, while approvals and scheduled posts are directory-backed state machines. Stores create `0700` directories and `0600` files. Every JSONL store (audit, idempotency, approval, schedule, batch progress sidecar, httprecord cassette) uses a sidecar `.lock` file for cross-process serialisation and fsyncs writes before close so concurrent invocations and kernel crashes do not corrupt state.
 
-Privacy redaction is centralized in `internal/privacy` and is applied before writing audit previews or HTTP record/replay cassettes. Tokens, secrets, auth codes, email addresses, LinkedIn URNs, local file paths, profile names, locations, and post/comment text must not be persisted in logs or cassettes.
+Privacy redaction is centralized in `internal/privacy` and is applied before writing audit previews or HTTP record/replay cassettes. Tokens, secrets, auth codes, email addresses, LinkedIn URNs, local file paths, profile names, locations, and post/comment text must not be persisted in logs or cassettes. Inline `Bearer <token>` substrings are redacted across all persisted strings via the `(?i)Bearer\s+\S{8,}` pattern. The approval store is the deliberate exception: staged payloads are written verbatim because `approval run` reads them back literally to dispatch the original command. Access control on approval payloads is filesystem mode `0o600` in a `0700` directory — persisted approval files contain raw user content by design.
 
 The release gate is `make ci`, which runs vet, golangci-lint, unit tests, race tests, and govulncheck. Schema changes must update the JSON schema and fixtures before command code changes.
 
