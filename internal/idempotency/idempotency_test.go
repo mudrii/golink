@@ -505,6 +505,212 @@ func TestFileStore_ConcurrentRecordDuringPruneDoesNotLoseEntries(t *testing.T) {
 	}
 }
 
+func TestFileStore_AcquireSerialisesAcrossInstances(t *testing.T) {
+	// Two FileStore instances at the same path simulate two golink processes.
+	// Acquire on the second instance must block until the first releases.
+	path := filepath.Join(t.TempDir(), "idempotency.jsonl")
+	a := NewFileStore(path)
+	b := NewFileStore(path)
+
+	release1, err := a.Acquire(t.Context(), "shared-key")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	acquired := make(chan struct{})
+	go func() {
+		release2, err := b.Acquire(t.Context(), "shared-key")
+		if err != nil {
+			t.Errorf("second acquire: %v", err)
+			close(acquired)
+			return
+		}
+		close(acquired)
+		if err := release2(); err != nil {
+			t.Errorf("second release: %v", err)
+		}
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("second Acquire returned before first release; cross-process lock not held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if err := release1(); err != nil {
+		t.Fatalf("first release: %v", err)
+	}
+
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Acquire did not unblock after first release")
+	}
+}
+
+func TestFileStore_AcquirePerKeyDoesNotSerialiseDistinctKeys(t *testing.T) {
+	// Distinct keys must not contend — Acquire is per-key.
+	path := filepath.Join(t.TempDir(), "idempotency.jsonl")
+	a := NewFileStore(path)
+	b := NewFileStore(path)
+
+	release1, err := a.Acquire(t.Context(), "key-A")
+	if err != nil {
+		t.Fatalf("acquire A: %v", err)
+	}
+	defer func() {
+		if err := release1(); err != nil {
+			t.Errorf("release A: %v", err)
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		release2, err := b.Acquire(t.Context(), "key-B")
+		if err != nil {
+			t.Errorf("acquire B: %v", err)
+			close(done)
+			return
+		}
+		if err := release2(); err != nil {
+			t.Errorf("release B: %v", err)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire on distinct key blocked; locks must be per-key")
+	}
+}
+
+func TestFileStore_AcquireClosesLookupRecordTOCTOU(t *testing.T) {
+	// Regression for H2-followup: two FileStore instances both Acquire→Lookup
+	// →Record the same key. Exactly ONE must observe a miss and write the
+	// entry; the other must see the cached value. Without per-key cross-
+	// process locking, both lookups race past the miss and double-record.
+	path := filepath.Join(t.TempDir(), "idempotency.jsonl")
+
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	hits := make([]bool, workers)
+
+	for i := range workers {
+		go func(i int) {
+			defer wg.Done()
+			s := NewFileStore(path)
+			release, err := s.Acquire(t.Context(), "shared-key")
+			if err != nil {
+				t.Errorf("acquire: %v", err)
+				return
+			}
+			defer func() {
+				if err := release(); err != nil {
+					t.Errorf("release: %v", err)
+				}
+			}()
+
+			_, hit, err := s.Lookup(t.Context(), "shared-key", "post create")
+			if err != nil {
+				t.Errorf("lookup: %v", err)
+				return
+			}
+			hits[i] = hit
+			if hit {
+				return
+			}
+			entry := Entry{
+				TS:        time.Now().UTC(),
+				Key:       "shared-key",
+				Command:   "post create",
+				CommandID: "cmd_x",
+				Status:    "ok",
+			}
+			if err := s.Record(t.Context(), entry); err != nil {
+				t.Errorf("record: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	final := NewFileStore(path).mustReadAll(t)
+	matching := 0
+	for _, e := range final {
+		if e.Key == "shared-key" {
+			matching++
+		}
+	}
+	if matching != 1 {
+		t.Fatalf("expected exactly 1 entry for shared-key, got %d", matching)
+	}
+
+	misses := 0
+	for _, hit := range hits {
+		if !hit {
+			misses++
+		}
+	}
+	if misses != 1 {
+		t.Fatalf("expected exactly 1 miss across %d workers, got %d", workers, misses)
+	}
+}
+
+func TestMemoryStore_AcquireSerialisesSameKey(t *testing.T) {
+	s := NewMemoryStore()
+	release1, err := s.Acquire(t.Context(), "k")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	acquired := make(chan struct{})
+	go func() {
+		release2, err := s.Acquire(t.Context(), "k")
+		if err != nil {
+			t.Errorf("second acquire: %v", err)
+			close(acquired)
+			return
+		}
+		close(acquired)
+		_ = release2()
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("MemoryStore.Acquire did not serialise same key")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if err := release1(); err != nil {
+		t.Fatalf("first release: %v", err)
+	}
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Acquire never returned after release")
+	}
+}
+
+func TestNoopStore_AcquireIsNoop(t *testing.T) {
+	s := NoopStore{}
+	release, err := s.Acquire(t.Context(), "k")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// Same key twice in a row must not block.
+	release2, err := s.Acquire(t.Context(), "k")
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	if err := release2(); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+}
+
 func TestResolvePath(t *testing.T) {
 	t.Setenv("GOLINK_IDEMPOTENCY_PATH", "/tmp/test-idempotency.jsonl")
 	got := ResolvePath()

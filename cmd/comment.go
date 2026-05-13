@@ -74,6 +74,7 @@ func newCommentAddCommand(a *app) *cobra.Command {
 				return a.approvalPending(cmd, cmdID, payload, ikey)
 			}
 
+			defer a.idempotencyAcquire(cmd.Context(), ikey)()
 			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "comment add"); hit {
 				var data output.CommentAddData
 				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {

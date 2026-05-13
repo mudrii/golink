@@ -180,20 +180,6 @@ type batchRunner struct {
 
 	outMu      sync.Mutex
 	progressMu sync.Mutex
-
-	// idemKeys serialises Lookup→Dispatch→Record for the same idempotency
-	// key within this process; cross-process coordination is out of scope.
-	idemKeys sync.Map
-}
-
-// lockIdemKey returns a release fn that holds an exclusive in-process lock on
-// key for the duration of the dispatch. Concurrent ops with the same key
-// serialise so the second observes the first's Record on its Lookup.
-func (r *batchRunner) lockIdemKey(key string) func() {
-	mu, _ := r.idemKeys.LoadOrStore(key, &sync.Mutex{})
-	m := mu.(*sync.Mutex)
-	m.Lock()
-	return m.Unlock
 }
 
 func (r *batchRunner) run(ctx context.Context, ops []batchOp, done map[int]bool, concurrency int) bool {
@@ -291,11 +277,19 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 		return "", emitErr
 	}
 
-	// Idempotency check. Hold a per-key lock so concurrent ops with the
-	// same key serialise across Lookup→Dispatch→Record.
+	// Idempotency check. Hold a per-key cross-process lock so concurrent ops
+	// with the same key — whether in this process or a separate golink
+	// invocation sharing the same store path — serialise across
+	// Lookup→Dispatch→Record and never both observe a miss.
 	if op.IdempotencyKey != "" {
-		release := r.lockIdemKey(op.IdempotencyKey)
-		defer release()
+		release, lockErr := r.istore.Acquire(ctx, op.IdempotencyKey)
+		if lockErr != nil {
+			auditID := r.a.newCommandID(cmdName, r.a.deps.Now().UTC())
+			emitErr := r.emitOpError(lineNum, op, auditID, lockErr)
+			r.a.auditMutation(r.cmd, auditID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
+			return auditID, emitErr
+		}
+		defer func() { _ = release() }()
 		cached, hit, err := r.istore.Lookup(ctx, op.IdempotencyKey, cmdName)
 		if err != nil {
 			auditID := r.a.newCommandID(cmdName, r.a.deps.Now().UTC())

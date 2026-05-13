@@ -109,6 +109,10 @@ func (a *app) runPostCreateCommand(cmd *cobra.Command, flags postCreateFlags) er
 	if a.settings.RequireApproval {
 		return a.approvalPending(cmd, cmdID, prepared.preview, ikey)
 	}
+	// Hold the per-key cross-process lock across Lookup→dispatch→Record so a
+	// concurrent golink invocation with the same idempotency key cannot
+	// also miss the cache and double-post.
+	defer a.idempotencyAcquire(cmd.Context(), ikey)()
 	if handled, err := a.writeCachedPostCreate(cmd, cmdID, ikey); handled || err != nil {
 		return err
 	}
@@ -373,6 +377,10 @@ func newPostDeleteCommand(a *app) *cobra.Command {
 				return a.approvalPending(cmd, cmdID, payload, ikey)
 			}
 
+			// Cross-process per-key lock across Lookup→dispatch→Record so a
+			// concurrent process with the same idempotency key cannot also
+			// observe a miss and re-issue the DELETE.
+			defer a.idempotencyAcquire(cmd.Context(), ikey)()
 			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post delete"); hit {
 				var data output.PostDeleteData
 				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {
@@ -478,6 +486,7 @@ func (a *app) runPostEditCommand(cmd *cobra.Command, input postEditInput) error 
 	if a.settings.RequireApproval {
 		return a.approvalPending(cmd, cmdID, preview, ikey)
 	}
+	defer a.idempotencyAcquire(cmd.Context(), ikey)()
 	if handled, err := a.writeCachedPostEdit(cmd, cmdID, ikey); handled || err != nil {
 		return err
 	}
@@ -657,6 +666,7 @@ func newPostReshareCommand(a *app) *cobra.Command {
 				return a.approvalPending(cmd, cmdID, payload, ikey)
 			}
 
+			defer a.idempotencyAcquire(cmd.Context(), ikey)()
 			if cached, hit, checkErr := a.idempotencyCheck(cmd, ikey, "post reshare"); hit {
 				var data output.PostCreateData
 				if decErr := json.Unmarshal(cached.Result, &data); decErr == nil {

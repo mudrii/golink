@@ -580,6 +580,10 @@ func (s failingIdempotencyRecordStore) Prune(context.Context, time.Duration, int
 	return nil
 }
 
+func (s failingIdempotencyRecordStore) Acquire(context.Context, string) (func() error, error) {
+	return func() error { return nil }, nil
+}
+
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {

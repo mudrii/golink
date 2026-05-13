@@ -3,6 +3,8 @@ package idempotency
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +43,9 @@ type Entry struct {
 type Store interface {
 	// Lookup returns (entry, true, nil) on a cache hit, (zero, false, nil) on a
 	// miss, and (zero, false, err) if the key was used for a different command.
+	// Lookup is cross-process serialized via the same sidecar flock that
+	// Record and Prune use so a concurrent Prune rewrite cannot present a
+	// torn view to a reader.
 	Lookup(ctx context.Context, key, command string) (Entry, bool, error)
 
 	// Record persists a new idempotency entry.
@@ -48,6 +53,14 @@ type Store interface {
 
 	// Prune removes entries older than window and caps the store at maxLines.
 	Prune(ctx context.Context, window time.Duration, maxLines int) error
+
+	// Acquire takes an exclusive cross-process lock scoped to key. The
+	// returned release function MUST be invoked (typically via defer) to
+	// free the lock. Callers SHOULD hold the lock across the full
+	// Lookup→dispatch→Record cycle so two golink processes sharing the same
+	// store path cannot both observe a miss and dispatch the same mutation
+	// twice. The lock is per-key — distinct keys do not contend.
+	Acquire(ctx context.Context, key string) (release func() error, err error)
 }
 
 // FileStore implements Store using an append-only JSONL file.
@@ -96,36 +109,52 @@ func (s *FileStore) now() time.Time {
 // Lookup scans the file for the most recent entry matching key.
 // Returns ErrKeyCommandMismatch wrapped in an error when the key exists but
 // belongs to a different command.
+//
+// The scan runs under the same sidecar flock that Record and Prune use so
+// concurrent processes serialize their reads against in-flight Prune rewrites
+// (tmp+rename) and never observe a torn view. The flock alone does NOT close
+// the cross-process Lookup→Record TOCTOU window — callers that need that
+// guarantee must hold Acquire(key) across the full Lookup→dispatch→Record
+// cycle.
 func (s *FileStore) Lookup(_ context.Context, key, command string) (Entry, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entries, err := s.readAll()
+	var (
+		found    Entry
+		hasFound bool
+	)
+	err := s.withLock(func() error {
+		entries, readErr := s.readAll()
+		if readErr != nil {
+			return fmt.Errorf("idempotency lookup: %w", readErr)
+		}
+
+		cutoff := s.now().Add(-defaultWindow)
+		for i := range entries {
+			e := entries[i]
+			if e.Key != key {
+				continue
+			}
+			if e.TS.Before(cutoff) {
+				continue
+			}
+			found = e
+			hasFound = true
+		}
+		return nil
+	})
 	if err != nil {
-		return Entry{}, false, fmt.Errorf("idempotency lookup: %w", err)
+		return Entry{}, false, err
 	}
-
-	cutoff := s.now().Add(-defaultWindow)
-	var found *Entry
-	for i := range entries {
-		e := &entries[i]
-		if e.Key != key {
-			continue
-		}
-		if e.TS.Before(cutoff) {
-			continue
-		}
-		found = e
-	}
-
-	if found == nil {
+	if !hasFound {
 		return Entry{}, false, nil
 	}
 	if found.Command != command {
 		return Entry{}, false, fmt.Errorf("%w: key %q was already used for %q (not %q); use a different key",
 			ErrKeyCommandMismatch, key, found.Command, command)
 	}
-	return *found, true, nil
+	return found, true, nil
 }
 
 // Record appends entry to the file, creating it if necessary. The append is
@@ -174,6 +203,39 @@ func (s *FileStore) Record(_ context.Context, entry Entry) error {
 		}
 		return nil
 	})
+}
+
+// Acquire takes an exclusive cross-process lock on a per-key sidecar so the
+// caller can hold the lock across Lookup→dispatch→Record without serialising
+// unrelated keys. The key is hashed (SHA-256) into the sidecar filename so
+// arbitrary key strings — including path separators or shell metacharacters —
+// cannot escape s.path's directory or collide with the global Record/Prune
+// lock.
+//
+// The returned release fn must be called exactly once, typically via defer.
+func (s *FileStore) Acquire(_ context.Context, key string) (func() error, error) {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("idempotency acquire mkdir: %w", err)
+	}
+	closer, err := filelock.Acquire(s.keyLockPath(key))
+	if err != nil {
+		return nil, fmt.Errorf("idempotency acquire: %w", err)
+	}
+	return func() error {
+		if err := closer.Close(); err != nil {
+			return fmt.Errorf("idempotency acquire release: %w", err)
+		}
+		return nil
+	}, nil
+}
+
+// keyLockPath returns the sidecar lock-file path for key. The key is hashed
+// so the filename is fixed-length, filesystem-safe, and cannot traverse out
+// of s.path's parent directory.
+func (s *FileStore) keyLockPath(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return s.path + ".key." + hex.EncodeToString(sum[:]) + ".lock"
 }
 
 // withLock acquires an exclusive cross-process lock on a sidecar file alongside
@@ -347,6 +409,9 @@ func syncDir(dir string, logger *slog.Logger) {
 type MemoryStore struct {
 	mu      sync.Mutex
 	entries []Entry
+	// keyLocks holds per-key sync.Mutex values so Acquire serialises
+	// concurrent goroutines that share the same key.
+	keyLocks sync.Map
 	// Now is overridable for testing. Defaults to time.Now when nil.
 	Now func() time.Time
 }
@@ -399,6 +464,20 @@ func (m *MemoryStore) Record(_ context.Context, entry Entry) error {
 	return nil
 }
 
+// Acquire returns a release fn that holds an exclusive in-process lock on key.
+// MemoryStore is single-process by definition, so there is no cross-process
+// guarantee to provide; the per-key mutex is enough to serialise concurrent
+// goroutines that share the same key.
+func (m *MemoryStore) Acquire(_ context.Context, key string) (func() error, error) {
+	v, _ := m.keyLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return func() error {
+		mu.Unlock()
+		return nil
+	}, nil
+}
+
 // Prune is a no-op for MemoryStore (tests control entries directly).
 func (m *MemoryStore) Prune(_ context.Context, _ time.Duration, _ int) error {
 	return nil
@@ -426,6 +505,12 @@ func (NoopStore) Record(_ context.Context, _ Entry) error { return nil }
 
 // Prune does nothing.
 func (NoopStore) Prune(_ context.Context, _ time.Duration, _ int) error { return nil }
+
+// Acquire returns an immediate no-op release; the noop store has no state to
+// protect.
+func (NoopStore) Acquire(_ context.Context, _ string) (func() error, error) {
+	return func() error { return nil }, nil
+}
 
 // ResolvePath returns the effective idempotency store path.
 // Precedence: GOLINK_IDEMPOTENCY_PATH > XDG_STATE_HOME/golink/idempotency.jsonl >

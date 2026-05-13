@@ -264,6 +264,7 @@ func runOneEntry(
 	// to attempt a fresh "post create" against a key reserved for a different
 	// command).
 	if e.IdempotencyKey != "" {
+		defer a.idempotencyAcquire(cobCtx, e.IdempotencyKey)()
 		entry, hit, checkErr := a.idempotencyCheck(cmd, e.IdempotencyKey, "post create")
 		if checkErr != nil {
 			errMsg := checkErr.Error()

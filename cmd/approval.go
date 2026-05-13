@@ -223,6 +223,10 @@ func (a *app) runApprovalRunCommand(cmd *cobra.Command, rawCommandID string) err
 	if err != nil {
 		return err
 	}
+	// Hold the per-key cross-process lock across replayApprovedIdempotency's
+	// Lookup and the downstream Record so two concurrent `approval run` calls
+	// against the same approved entry cannot both dispatch the mutation.
+	defer a.idempotencyAcquire(cmd.Context(), entry.IdempotencyKey)()
 	if handled, err := a.replayApprovedIdempotency(cmd, commandID, entry); handled || err != nil {
 		return err
 	}

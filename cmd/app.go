@@ -856,6 +856,35 @@ func (a *app) approvalPending(cmd *cobra.Command, cmdID string, payload any, ike
 	}
 }
 
+// idempotencyAcquire takes a per-key cross-process lock that the caller MUST
+// hold for the full Lookup→dispatch→Record cycle. The returned release fn is
+// safe to defer at the top of a RunE — it is invoked before the function
+// returns so the lock spans every error and success path uniformly.
+//
+// Empty key (no idempotency requested) returns a no-op release so callers do
+// not have to branch.
+//
+// Lock failures are logged at WARN and a no-op release is returned so the
+// command still runs without idempotency protection rather than failing the
+// user-visible request on a state-directory hiccup. This matches the
+// idempotencyRecord policy: idempotency is best-effort durability, not a
+// hard precondition for dispatch.
+func (a *app) idempotencyAcquire(ctx context.Context, key string) func() {
+	if key == "" {
+		return func() {}
+	}
+	release, err := a.deps.IdempotencyStore.Acquire(ctx, key)
+	if err != nil {
+		a.logger.Warn("idempotency acquire failed; proceeding without per-key lock", "error", err)
+		return func() {}
+	}
+	return func() {
+		if err := release(); err != nil {
+			a.logger.Warn("idempotency release failed", "error", err)
+		}
+	}
+}
+
 // idempotencyCheck looks up key in the idempotency store for command.
 // Returns (entry, true, nil) on a cache hit — the caller should replay
 // the cached envelope and skip the transport call.
