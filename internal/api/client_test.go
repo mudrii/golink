@@ -164,7 +164,9 @@ func TestClientHonorsRetryAfterHTTPDate(t *testing.T) {
 		switch n {
 		case 1:
 			firstAt = time.Now()
-			w.Header().Set("Retry-After", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
+			// HTTP-date resolution is 1 second, so offset by 2s and assert
+			// delta > 800ms — at worst-case truncation we still see ~1s.
+			w.Header().Set("Retry-After", time.Now().Add(2*time.Second).UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusServiceUnavailable)
 		default:
 			secondAt = time.Now()
@@ -195,7 +197,7 @@ func TestClientHonorsRetryAfterHTTPDate(t *testing.T) {
 		t.Fatalf("status = %d", resp.Status)
 	}
 	delta := secondAt.Sub(firstAt)
-	if delta < 500*time.Millisecond {
+	if delta < 800*time.Millisecond {
 		t.Fatalf("retry after %v; HTTP-date Retry-After not honored", delta)
 	}
 }
