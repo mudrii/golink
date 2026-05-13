@@ -468,6 +468,11 @@ func (m *MemoryStore) Record(_ context.Context, entry Entry) error {
 // MemoryStore is single-process by definition, so there is no cross-process
 // guarantee to provide; the per-key mutex is enough to serialise concurrent
 // goroutines that share the same key.
+//
+// The returned mutex is NOT reentrant. A single goroutine that calls Acquire
+// twice for the same key without calling release in between will deadlock.
+// Callers must structure code so each goroutine holds at most one Acquire per
+// key at any time.
 func (m *MemoryStore) Acquire(_ context.Context, key string) (func() error, error) {
 	v, _ := m.keyLocks.LoadOrStore(key, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
