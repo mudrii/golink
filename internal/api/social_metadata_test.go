@@ -145,6 +145,71 @@ func TestOfficialSocialMetadata_4xxError(t *testing.T) {
 	}
 }
 
+func TestOfficialSocialMetadata_DecodesPercentEncodedKeys(t *testing.T) {
+	// LinkedIn's batch endpoints return result/error maps keyed by the
+	// percent-encoded URN form (e.g. "urn%3Ali%3Ashare%3A123"). The caller
+	// passes plain URNs, so the adapter must normalize keys back to their
+	// decoded form before lookup.
+	o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": map[string]any{
+				"urn%3Ali%3Ashare%3A123": map[string]any{
+					"commentsSummary": map[string]any{
+						"totalFirstLevelComments": 2,
+						"aggregatedTotalComments": 4,
+					},
+					"reactionsSummary": map[string]any{
+						"reactionTypeCounts": []map[string]any{
+							{"reactionType": "LIKE", "count": 7},
+						},
+						"aggregatedTotalReactions": 7,
+					},
+					"commentsState": "ENABLED",
+				},
+			},
+			"errors": map[string]any{
+				"urn%3Ali%3Ashare%3A456": map[string]any{
+					"status":  404,
+					"message": "not found",
+				},
+			},
+		})
+	}, "")
+
+	data, err := o.SocialMetadata(t.Context(), []string{"urn:li:share:123", "urn:li:share:456"})
+	if err != nil {
+		t.Fatalf("SocialMetadata: %v", err)
+	}
+	if data.Count != 2 || len(data.Items) != 2 {
+		t.Fatalf("count = %d items = %d, want 2/2", data.Count, len(data.Items))
+	}
+
+	item1 := data.Items[0]
+	if item1.PostURN != "urn:li:share:123" {
+		t.Errorf("item1.PostURN = %q", item1.PostURN)
+	}
+	if item1.CommentCount != 2 {
+		t.Errorf("item1.CommentCount = %d, want 2 (decoded key lookup failed)", item1.CommentCount)
+	}
+	if item1.LikeCount != 7 {
+		t.Errorf("item1.LikeCount = %d, want 7 (decoded key lookup failed)", item1.LikeCount)
+	}
+	if item1.ReactionCount != 7 {
+		t.Errorf("item1.ReactionCount = %d, want 7", item1.ReactionCount)
+	}
+	if item1.CommentsState != "ENABLED" {
+		t.Errorf("item1.CommentsState = %q, want ENABLED", item1.CommentsState)
+	}
+
+	item2 := data.Items[1]
+	if item2.PostURN != "urn:li:share:456" {
+		t.Errorf("item2.PostURN = %q", item2.PostURN)
+	}
+	if item2.Error == "" {
+		t.Errorf("item2.Error should be set when error key is percent-encoded")
+	}
+}
+
 func TestOfficialSocialMetadata_EmptyURNs(t *testing.T) {
 	o, _ := newTestOfficial(t, func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("handler should not be called for empty URN list")

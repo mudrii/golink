@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -533,17 +534,30 @@ func (o *Official) SocialMetadata(ctx context.Context, urns []string) (*output.S
 		return nil, fmt.Errorf("decode social metadata: %w", err)
 	}
 
+	// LinkedIn's batch-get endpoints return the results and errors maps keyed by
+	// the percent-encoded URN form. Callers pass plain URNs, so canonicalize at
+	// the boundary: decode every map key once before lookup, otherwise every
+	// entry silently misses.
+	results, err := decodeURNKeyedMap(raw.Results)
+	if err != nil {
+		return nil, fmt.Errorf("decode social metadata results: %w", err)
+	}
+	apiErrors, err := decodeURNKeyedMap(raw.Errors)
+	if err != nil {
+		return nil, fmt.Errorf("decode social metadata errors: %w", err)
+	}
+
 	items := make([]output.SocialMetadataItem, 0, len(urns))
 	for _, urn := range urns {
 		item := output.SocialMetadataItem{PostURN: urn}
 
-		if apiErr, hasErr := raw.Errors[urn]; hasErr {
+		if apiErr, hasErr := apiErrors[urn]; hasErr {
 			item.Error = fmt.Sprintf("status %d: %s", apiErr.Status, apiErr.Message)
 			items = append(items, item)
 			continue
 		}
 
-		if result, ok := raw.Results[urn]; ok {
+		if result, ok := results[urn]; ok {
 			item.CommentCount = result.CommentsSummary.TotalFirstLevelComments
 			item.AllCommentCount = result.CommentsSummary.AggregatedTotalComments
 			item.ReactionCount = result.ReactionsSummary.AggregatedTotalReactions
@@ -992,4 +1006,22 @@ func (o *Official) ResharePost(ctx context.Context, req ResharePostRequest) (*ou
 		URL:        fmt.Sprintf("https://www.linkedin.com/feed/update/%s", id),
 		AuthorURN:  author,
 	}, nil
+}
+
+// decodeURNKeyedMap returns a copy of m re-keyed with url.PathUnescape applied
+// to each key. LinkedIn's batch endpoints return result/error maps keyed by the
+// percent-encoded URN form; callers operate on plain URNs.
+func decodeURNKeyedMap[V any](m map[string]V) (map[string]V, error) {
+	if len(m) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]V, len(m))
+	for k, v := range m {
+		decoded, err := url.PathUnescape(k)
+		if err != nil {
+			return nil, fmt.Errorf("decode urn key %q: %w", k, err)
+		}
+		out[decoded] = v
+	}
+	return out, nil
 }
