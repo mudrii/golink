@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -17,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mudrii/golink/internal/privacy"
 )
 
 const (
@@ -675,10 +678,23 @@ func readCappedBody(r io.Reader) ([]byte, error) {
 }
 
 // snippetForError returns a short, safe representation of body for inclusion
-// in an error message. Long bodies are truncated; whitespace is collapsed.
+// in an error message. Auth/userinfo bodies can carry access tokens, client
+// secrets, and member PII; we redact through privacy helpers before
+// truncating. Long bodies are truncated; whitespace is collapsed.
 func snippetForError(body []byte) string {
 	const maxLen = 256
-	s := strings.TrimSpace(string(body))
+	if len(bytes.TrimSpace(body)) == 0 {
+		return "<empty body>"
+	}
+	// Try JSON first — token endpoints return JSON. privacy.JSON strips
+	// access_token, refresh_token, client_secret, code_verifier, and known
+	// PII keys; if the body is not valid JSON it returns "REDACTED" alone
+	// (a useless snippet), so fall back to per-string redaction in that case.
+	redacted := privacy.JSON(body)
+	if string(redacted) == "REDACTED" {
+		redacted = []byte(privacy.String(string(body)))
+	}
+	s := strings.TrimSpace(string(redacted))
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) > maxLen {
 		s = s[:maxLen] + "..."

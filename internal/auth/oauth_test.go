@@ -125,6 +125,42 @@ func TestWaitForOAuthCallback(t *testing.T) {
 	}
 }
 
+func TestSnippetForError_RedactsAccessToken(t *testing.T) {
+	body := []byte(`{"access_token":"t0ps3cr3t","error":"invalid_grant"}`)
+	got := snippetForError(body)
+	if strings.Contains(got, "t0ps3cr3t") {
+		t.Fatalf("snippet leaked access token: %q", got)
+	}
+	if !strings.Contains(got, "invalid_grant") {
+		t.Fatalf("snippet dropped error code: %q", got)
+	}
+}
+
+func TestSnippetForError_RedactsClientSecret(t *testing.T) {
+	body := []byte(`{"client_secret":"sh!","error":"invalid_grant"}`)
+	got := snippetForError(body)
+	if strings.Contains(got, "sh!") {
+		t.Fatalf("snippet leaked client_secret: %q", got)
+	}
+	if !strings.Contains(got, "invalid_grant") {
+		t.Fatalf("snippet dropped error code: %q", got)
+	}
+}
+
+func TestSnippetForError_NonJSONBodyStillRedactsPII(t *testing.T) {
+	body := []byte("error contacting urn:li:person:abc123 endpoint")
+	got := snippetForError(body)
+	if strings.Contains(got, "urn:li:person:abc123") {
+		t.Fatalf("snippet leaked URN: %q", got)
+	}
+}
+
+func TestSnippetForError_EmptyBody(t *testing.T) {
+	if got := snippetForError(nil); got != "<empty body>" {
+		t.Fatalf("empty body snippet = %q", got)
+	}
+}
+
 func TestWaitForOAuthCallback_ContextCancelReturnsQuickly(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
