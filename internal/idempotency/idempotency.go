@@ -151,10 +151,22 @@ func (s *FileStore) Record(_ context.Context, entry Entry) error {
 		if err != nil {
 			return fmt.Errorf("idempotency open: %w", err)
 		}
+		// Order: write → fsync → close. fsync forces the appended line to
+		// stable storage so a kernel crash or power loss after Record returns
+		// cannot lose the entry. Sync errors are fatal — silently dropping
+		// them would defeat the durability guarantee that downstream replay
+		// logic depends on.
 		_, writeErr := f.Write(line)
+		var syncErr error
+		if writeErr == nil {
+			syncErr = f.Sync()
+		}
 		closeErr := f.Close()
 		if writeErr != nil {
 			return fmt.Errorf("idempotency write: %w", writeErr)
+		}
+		if syncErr != nil {
+			return fmt.Errorf("idempotency sync: %w", syncErr)
 		}
 		if closeErr != nil {
 			return fmt.Errorf("idempotency close: %w", closeErr)
@@ -288,10 +300,22 @@ func (s *FileStore) writeAll(entries []Entry) error {
 			break
 		}
 	}
+	// fsync the tmp file before rename so the data is durable on disk by the
+	// time the rename appears in the directory entry. Then fsync the parent
+	// directory after rename so the rename itself survives a crash. Order
+	// here is: write → fsync(tmp) → close → rename → fsync(dir).
+	var syncErr error
+	if writeErr == nil {
+		syncErr = tmp.Sync()
+	}
 	closeErr := tmp.Close()
 	if writeErr != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("idempotency write: %w", writeErr)
+	}
+	if syncErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("idempotency sync: %w", syncErr)
 	}
 	if closeErr != nil {
 		_ = os.Remove(tmpPath)
@@ -301,7 +325,30 @@ func (s *FileStore) writeAll(entries []Entry) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("idempotency rename: %w", err)
 	}
+	syncDir(dir, s.logger)
 	return nil
+}
+
+// syncDir fsyncs the directory so a preceding rename survives a crash. On
+// platforms where opening a directory for sync is not supported (notably
+// Windows; darwin/linux both accept it), this is logged as a warning rather
+// than returned as an error — the rename has already succeeded at the VFS
+// layer, and forcing failure here would block a useful write on a non-fatal
+// portability quirk.
+func syncDir(dir string, logger *slog.Logger) {
+	d, err := os.Open(dir)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("idempotency: dir open for fsync failed", "dir", dir, "err", err.Error())
+		}
+		return
+	}
+	if err := d.Sync(); err != nil {
+		if logger != nil {
+			logger.Warn("idempotency: dir fsync failed", "dir", dir, "err", err.Error())
+		}
+	}
+	_ = d.Close()
 }
 
 // MemoryStore is an in-memory Store for tests; safe for concurrent use.

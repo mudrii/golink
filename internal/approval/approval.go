@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -142,15 +143,48 @@ func (s *FileStore) Stage(_ context.Context, entry Entry) (string, error) {
 		}
 		return "", fmt.Errorf("approval write: %w", err)
 	}
-	if _, writeErr := f.Write(data); writeErr != nil {
-		_ = f.Close()
+	// Order: write → fsync(file) → close → fsync(dir). fsync forces the
+	// staged entry to stable storage before Stage returns, so a kernel crash
+	// or power loss cannot lose an approval the operator believes is staged.
+	// The directory fsync makes the newly-created filename durable. Sync
+	// errors on the file are fatal; directory fsync is best-effort because
+	// the rename/creation has already succeeded at the VFS layer.
+	_, writeErr := f.Write(data)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = f.Sync()
+	}
+	closeErr := f.Close()
+	if writeErr != nil {
 		_ = os.Remove(path)
 		return "", fmt.Errorf("approval write: %w", writeErr)
 	}
-	if closeErr := f.Close(); closeErr != nil {
+	if syncErr != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("approval sync: %w", syncErr)
+	}
+	if closeErr != nil {
 		return "", fmt.Errorf("approval close: %w", closeErr)
 	}
+	syncDir(s.dir)
 	return path, nil
+}
+
+// syncDir fsyncs the approvals directory so file creations and state
+// transitions survive a crash. Best-effort: on platforms where opening a
+// directory for sync is not supported (notably Windows), the warning is
+// logged and the call returns nil — the VFS-level operation has already
+// succeeded, and blocking on a portability quirk would defeat the purpose.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		slog.Default().Warn("approval: dir open for fsync failed", "dir", dir, "err", err.Error())
+		return
+	}
+	if err := d.Sync(); err != nil {
+		slog.Default().Warn("approval: dir fsync failed", "dir", dir, "err", err.Error())
+	}
+	_ = d.Close()
 }
 
 // List reads the directory and returns summary items for all entries.
@@ -240,6 +274,7 @@ func (s *FileStore) Grant(_ context.Context, commandID string) error {
 		}
 		return fmt.Errorf("approval grant: %w", err)
 	}
+	syncDir(s.dir)
 	return nil
 }
 
@@ -259,6 +294,7 @@ func (s *FileStore) Deny(_ context.Context, commandID string) error {
 		}
 		return fmt.Errorf("approval deny: %w", err)
 	}
+	syncDir(s.dir)
 	return nil
 }
 
@@ -321,6 +357,7 @@ func (s *FileStore) Complete(_ context.Context, commandID string) error {
 		}
 		return fmt.Errorf("approval complete: %w", err)
 	}
+	syncDir(s.dir)
 	return nil
 }
 

@@ -108,11 +108,23 @@ func (s *FileSink) Append(_ context.Context, entry Entry) error {
 	}
 	line = append(line, '\n')
 
+	// Order: write → fsync → unlock → close. fsync forces the entry to stable
+	// storage before the lock is released and the fd is closed, so a kernel
+	// crash or power loss after Append returns cannot lose the just-recorded
+	// entry. Sync errors are treated as fatal because the audit log is the
+	// source of truth; silently dropping a sync would defeat the guarantee.
 	_, writeErr := f.Write(line)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = f.Sync()
+	}
 	unlockErr := unlockFile(f)
 	closeErr := f.Close()
 	if writeErr != nil {
 		return fmt.Errorf("audit write: %w", writeErr)
+	}
+	if syncErr != nil {
+		return fmt.Errorf("audit sync: %w", syncErr)
 	}
 	if unlockErr != nil {
 		return unlockErr
