@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/mudrii/golink/internal/output"
+)
 
 func TestResolveAuditEnabled(t *testing.T) {
 	tests := []struct {
@@ -135,6 +140,68 @@ func TestSettingsValidate(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestSettingsValidateOutputMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{"empty", "", false},
+		{"text", output.ModeText, false},
+		{"json", output.ModeJSON, false},
+		{"jsonl", output.ModeJSONL, false},
+		{"compact", output.ModeCompact, false},
+		{"table", output.ModeTable, false},
+		{"invalid xml", "xml", true},
+		{"uppercase rejected", "TEXT", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := Settings{
+				Profile:   "default",
+				Transport: "official",
+				Timeout:   defaultTimeout,
+				Output:    tc.output,
+			}
+			err := s.Validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				// Error wording must match the canonical output.ValidateMode error.
+				want := output.ValidateMode(tc.output).Error()
+				if got := err.Error(); got != want {
+					t.Fatalf("error = %q, want %q", got, want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// TestSettingsValidateOutputErrorMatchesOutputPackage ensures the error message
+// stays in sync with internal/output. If output adds a new mode and config
+// hardcodes the old list, this test will fail.
+func TestSettingsValidateOutputErrorMatchesOutputPackage(t *testing.T) {
+	s := Settings{
+		Profile:   "default",
+		Transport: "official",
+		Timeout:   defaultTimeout,
+		Output:    "bogus",
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for invalid output mode")
+	}
+	if !strings.Contains(err.Error(), `got "bogus"`) {
+		t.Fatalf("expected error to surface the invalid value, got %q", err.Error())
 	}
 }
 

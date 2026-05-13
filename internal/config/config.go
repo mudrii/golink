@@ -10,6 +10,8 @@ import (
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+
+	"github.com/mudrii/golink/internal/output"
 )
 
 const (
@@ -27,14 +29,6 @@ var validTransports = map[string]struct{}{
 	"official":   {},
 	"unofficial": {},
 	"auto":       {},
-}
-
-var validOutputModes = map[string]struct{}{
-	"text":    {},
-	"json":    {},
-	"jsonl":   {},
-	"compact": {},
-	"table":   {},
 }
 
 // Settings contains merged runtime configuration.
@@ -117,16 +111,16 @@ func (l *Loader) Load() (Settings, error) {
 	var resolvedOutput string
 	switch {
 	case compact:
-		if outputFlag != "" && outputFlag != "compact" {
+		if outputFlag != "" && outputFlag != output.ModeCompact {
 			return Settings{}, fmt.Errorf("--compact and --output=%s are mutually exclusive", outputFlag)
 		}
-		resolvedOutput = "compact"
+		resolvedOutput = output.ModeCompact
 	case outputFlag != "":
 		resolvedOutput = outputFlag
 	case jsonFlag:
-		resolvedOutput = "json"
+		resolvedOutput = output.ModeJSON
 	default:
-		resolvedOutput = "text"
+		resolvedOutput = output.ModeText
 	}
 
 	auditEnabled, err := resolveAuditEnabled(l.v.GetString("audit"))
@@ -135,7 +129,7 @@ func (l *Loader) Load() (Settings, error) {
 	}
 
 	settings := Settings{
-		JSON:                 resolvedOutput == "json",
+		JSON:                 resolvedOutput == output.ModeJSON,
 		DryRun:               l.v.GetBool("dry-run"),
 		RequireApproval:      l.v.GetBool("require-approval"),
 		Verbose:              l.v.GetBool("verbose"),
@@ -196,8 +190,8 @@ func (s Settings) Validate() error {
 	}
 
 	if s.Output != "" {
-		if _, ok := validOutputModes[s.Output]; !ok {
-			return fmt.Errorf("output must be one of text|json|jsonl|compact|table")
+		if err := output.ValidateMode(s.Output); err != nil {
+			return err
 		}
 	}
 
