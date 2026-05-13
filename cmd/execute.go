@@ -58,6 +58,12 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 			dryRunFlag, _ := cmd.Flags().GetBool("dry-run")
 			effectiveDryRun := dryRunFlag || p.DryRun
 
+			// batchRunner reads r.a.settings directly across runOp's dispatch
+			// helpers, so we mutate the shared struct and restore on return.
+			// config.Settings is a value type, so originalSettings is a copy
+			// and the defer fully unwinds plan-scoped overrides. The defer
+			// also covers panics and early returns from resolveSession /
+			// resolveTransport / runOp.
 			originalSettings := a.settings
 			defer func() {
 				a.settings = originalSettings
@@ -69,7 +75,6 @@ The plan_sha256 of the executed plan is recorded in the audit log.`,
 			if p.Transport != "" {
 				a.settings.Transport = p.Transport
 			}
-			// Override dry-run in settings so downstream commands honour it.
 			if effectiveDryRun {
 				a.settings.DryRun = true
 			}
