@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mudrii/golink/internal/approval"
+	"github.com/mudrii/golink/internal/output"
 )
 
 func testEntry(id, cmd string) approval.Entry {
@@ -211,6 +212,44 @@ func TestFileStore_StageListGrantRun(t *testing.T) {
 	items2, _ := store.List(ctx)
 	if items2[0].State != approval.StateCompleted {
 		t.Errorf("expected completed, got %s", items2[0].State)
+	}
+}
+
+func TestFileStore_StageRedactsFreeText(t *testing.T) {
+	dir := t.TempDir()
+	store := approval.NewFileStore(dir)
+
+	e := approval.Entry{
+		CommandID: "cmd_post_create_redact",
+		Command:   "post create",
+		CreatedAt: time.Now().UTC(),
+		Transport: "official",
+		Profile:   "default",
+		Payload: output.PostPayloadPreview{
+			Endpoint:   "POST /rest/posts",
+			Text:       "confidential",
+			Visibility: output.Visibility("PUBLIC"),
+			AuthorURN:  "urn:li:person:abc123",
+		},
+	}
+	path, err := store.Stage(t.Context(), e)
+	if err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	text := string(raw)
+
+	for _, leaked := range []string{"confidential", "urn:li:person:abc123"} {
+		if strings.Contains(text, leaked) {
+			t.Errorf("approval file leaked %q: %s", leaked, text)
+		}
+	}
+	if !strings.Contains(text, "PUBLIC") {
+		t.Errorf("expected non-sensitive visibility to survive: %s", text)
 	}
 }
 
