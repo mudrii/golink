@@ -411,6 +411,97 @@ func TestRecordReplay_replayedBodyStableAcrossReplays(t *testing.T) {
 	}
 }
 
+func TestReplayMatchesReorderedQueryParams(t *testing.T) {
+	// Pre-write a cassette recorded against api.linkedin.com (no httptest
+	// server: we exercise the lookup key, not network IO). The recorded URL
+	// uses one query-param order; the replay request uses another. They must
+	// canonicalize to the same key so replay finds the entry.
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+	respBody := base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`))
+	// Recorded order: b first, then a.
+	line := `{"seq":1,"method":"GET","url":"https://api.linkedin.com/v2/me?b=2&a=1","body_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","response":{"status":200,"headers":{"Content-Type":["application/json"]},"body_base64":"` + respBody + `"}}` + "\n"
+	if err := os.WriteFile(cassettePath, []byte(line), 0o600); err != nil {
+		t.Fatalf("write cassette: %v", err)
+	}
+
+	replayer, err := httprecord.Wrap(nil, "", cassettePath)
+	if err != nil {
+		t.Fatalf("Wrap replay: %v", err)
+	}
+
+	// Replay with params in opposite order — must hit the cassette.
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		"https://api.linkedin.com/v2/me?a=1&b=2", http.NoBody)
+	resp, err := replayer.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("replay reordered params: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"ok":true`) {
+		t.Fatalf("unexpected body: %s", body)
+	}
+}
+
+func TestReplayStripsDefaultPort(t *testing.T) {
+	// Recorded URL has the default :443 port; replay omits it. They must
+	// canonicalize to the same lookup key.
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+	respBody := base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`))
+	line := `{"seq":1,"method":"GET","url":"https://api.linkedin.com:443/v2/me","body_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","response":{"status":200,"headers":{},"body_base64":"` + respBody + `"}}` + "\n"
+	if err := os.WriteFile(cassettePath, []byte(line), 0o600); err != nil {
+		t.Fatalf("write cassette: %v", err)
+	}
+
+	replayer, err := httprecord.Wrap(nil, "", cassettePath)
+	if err != nil {
+		t.Fatalf("Wrap replay: %v", err)
+	}
+
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		"https://api.linkedin.com/v2/me", http.NoBody)
+	resp, err := replayer.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("replay without port: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestReplayMatchesReorderedSameKeyValues(t *testing.T) {
+	// Same key, multiple values, different order. Canonicalization must sort
+	// the values so equivalent URLs match.
+	cassettePath := filepath.Join(t.TempDir(), "cassette.jsonl")
+	respBody := base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`))
+	line := `{"seq":1,"method":"GET","url":"https://api.linkedin.com/v2/me?ids=2&ids=1","body_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","response":{"status":200,"headers":{},"body_base64":"` + respBody + `"}}` + "\n"
+	if err := os.WriteFile(cassettePath, []byte(line), 0o600); err != nil {
+		t.Fatalf("write cassette: %v", err)
+	}
+
+	replayer, err := httprecord.Wrap(nil, "", cassettePath)
+	if err != nil {
+		t.Fatalf("Wrap replay: %v", err)
+	}
+
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		"https://api.linkedin.com/v2/me?ids=1&ids=2", http.NoBody)
+	resp, err := replayer.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("replay reordered same-key values: %v", err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestLoadedCassetteSaveRedactsPersonalData(t *testing.T) {
 	dir := t.TempDir()
 	inPath := filepath.Join(dir, "in.jsonl")

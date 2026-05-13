@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -86,7 +87,7 @@ func LoadCassette(path string) (*Cassette, error) {
 		}
 		e = redactEntry(e)
 		c.entries = append(c.entries, e)
-		k := replayKey{method: e.Method, url: privacy.URL(e.URL), bodySHA256: e.BodySHA256}
+		k := replayKey{method: e.Method, url: canonicalURL(privacy.URL(e.URL)), bodySHA256: e.BodySHA256}
 		c.index[k] = e.Response
 	}
 	if err := sc.Err(); err != nil {
@@ -174,7 +175,7 @@ func (rt *RecordTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	entry := Entry{
 		Seq:        rt.cassette.nextSeq(),
 		Method:     req.Method,
-		URL:        privacy.URL(req.URL.String()),
+		URL:        canonicalURL(privacy.URL(req.URL.String())),
 		BodySHA256: bodyHash,
 		Response: EntryResponse{
 			Status:  resp.StatusCode,
@@ -226,7 +227,7 @@ func (rt *ReplayTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	k := replayKey{
 		method:     req.Method,
-		url:        privacy.URL(req.URL.String()),
+		url:        canonicalURL(privacy.URL(req.URL.String())),
 		bodySHA256: bodySHA256(reqBody),
 	}
 
@@ -288,6 +289,43 @@ func Wrap(base http.RoundTripper, recordPath, replayPath string) (http.RoundTrip
 func bodySHA256(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// canonicalURL normalizes a URL so equivalent forms produce the same cassette
+// lookup key. It sorts query parameters by key and by value (for repeated
+// keys), and strips the default port for the scheme (`:443` for https,
+// `:80` for http). The path is left intact because LinkedIn URN segments are
+// case-sensitive and percent-encoding within the path can be load-bearing.
+//
+// Both record and replay sides MUST route through this function so URLs that
+// differ only in query-param order or default-port presence collide.
+func canonicalURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	if host := u.Host; host != "" {
+		scheme := strings.ToLower(u.Scheme)
+		if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host[i:], "]") {
+			port := host[i+1:]
+			if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+				u.Host = host[:i]
+			}
+		}
+	}
+
+	if u.RawQuery != "" {
+		values, err := url.ParseQuery(u.RawQuery)
+		if err == nil {
+			for k := range values {
+				slices.Sort(values[k])
+			}
+			u.RawQuery = values.Encode()
+		}
+	}
+
+	return u.String()
 }
 
 // redactResponseHeaders returns a copy of the headers with sensitive values removed.
