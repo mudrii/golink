@@ -428,60 +428,41 @@ func (a *app) metadata(cmd *cobra.Command, status output.CommandStatus) output.E
 	}
 }
 
-func (a *app) writeSuccess(cmd *cobra.Command, data any, text string) error {
-	meta := a.metadata(cmd, output.StatusOK)
+// writeEnvelope renders a success envelope. fromCache propagates the
+// idempotency replay flag onto both the JSON envelope and the base used by
+// non-JSON renderers.
+func (a *app) writeEnvelope(meta output.EnvelopeMeta, data any, text string, fromCache bool) error {
 	mode := a.settings.Output
 	if mode == output.ModeJSON {
 		envelope := output.Success(meta, data)
+		envelope.FromCache = fromCache
 		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
 			return fmt.Errorf("write stdout: %w", err)
 		}
 		return nil
 	}
 	base := output.BuildBase(meta)
+	base.FromCache = fromCache
 	if err := output.RenderSuccess(a.deps.Stdout, mode, base, data, text); err != nil {
 		return fmt.Errorf("write stdout: %w", err)
 	}
 	return nil
+}
+
+func (a *app) writeSuccess(cmd *cobra.Command, data any, text string) error {
+	return a.writeEnvelope(a.metadata(cmd, output.StatusOK), data, text, false)
 }
 
 // writeSuccessFromCache writes a success envelope with from_cache:true set on
 // the base envelope. Used when idempotency replays a stored result.
 func (a *app) writeSuccessFromCache(cmd *cobra.Command, data any, text string) error {
-	meta := a.metadata(cmd, output.StatusOK)
-	mode := a.settings.Output
-	if mode == output.ModeJSON {
-		envelope := output.Success(meta, data)
-		envelope.FromCache = true
-		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
-			return fmt.Errorf("write stdout: %w", err)
-		}
-		return nil
-	}
-	base := output.BuildBase(meta)
-	base.FromCache = true
-	if err := output.RenderSuccess(a.deps.Stdout, mode, base, data, text); err != nil {
-		return fmt.Errorf("write stdout: %w", err)
-	}
-	return nil
+	return a.writeEnvelope(a.metadata(cmd, output.StatusOK), data, text, true)
 }
 
 func (a *app) writeDryRun(cmd *cobra.Command, data any, text string) error {
 	meta := a.metadata(cmd, output.StatusOK)
 	meta.Mode = "dry_run"
-	mode := a.settings.Output
-	if mode == output.ModeJSON {
-		envelope := output.Success(meta, data)
-		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
-			return fmt.Errorf("write stdout: %w", err)
-		}
-		return nil
-	}
-	base := output.BuildBase(meta)
-	if err := output.RenderSuccess(a.deps.Stdout, mode, base, data, text); err != nil {
-		return fmt.Errorf("write stdout: %w", err)
-	}
-	return nil
+	return a.writeEnvelope(meta, data, text, false)
 }
 
 // resolveSession loads the stored session for the active profile and verifies
@@ -647,20 +628,7 @@ func (a *app) rateLimitFailure(cmd *cobra.Command, message, details string) erro
 }
 
 func (a *app) writeUnsupported(cmd *cobra.Command, payload output.UnsupportedPayload, text string) error {
-	meta := a.metadata(cmd, output.StatusUnsupported)
-	mode := a.settings.Output
-	if mode == output.ModeJSON {
-		envelope := output.Success(meta, payload)
-		if err := output.WriteJSON(a.deps.Stdout, envelope); err != nil {
-			return fmt.Errorf("write stdout: %w", err)
-		}
-		return nil
-	}
-	base := output.BuildBase(meta)
-	if err := output.RenderSuccess(a.deps.Stdout, mode, base, payload, text); err != nil {
-		return fmt.Errorf("write stdout: %w", err)
-	}
-	return nil
+	return a.writeEnvelope(a.metadata(cmd, output.StatusUnsupported), payload, text, false)
 }
 
 func (a *app) validationFailure(cmd *cobra.Command, message, details string) error {
