@@ -217,15 +217,52 @@ func (s *FileStore) Add(_ context.Context, entry Entry) error {
 		}
 		return fmt.Errorf("schedule write: %w", err)
 	}
-	if _, writeErr := f.Write(data); writeErr != nil {
-		_ = f.Close()
+	// Order: write → fsync(file) → close → fsync(dir). fsync forces the
+	// pending entry to stable storage before Add returns so a kernel crash or
+	// power loss cannot lose an entry the user believes is scheduled. The
+	// directory fsync makes the newly-created filename durable. Sync errors
+	// on the file are fatal; directory fsync is best-effort because the
+	// creation has already succeeded at the VFS layer.
+	_, writeErr := f.Write(data)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = f.Sync()
+	}
+	closeErr := f.Close()
+	if writeErr != nil {
 		_ = os.Remove(path)
 		return fmt.Errorf("schedule write: %w", writeErr)
 	}
-	if closeErr := f.Close(); closeErr != nil {
+	if syncErr != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("schedule sync: %w", syncErr)
+	}
+	if closeErr != nil {
 		return fmt.Errorf("schedule close: %w", closeErr)
 	}
+	syncDir(s.dir, s.logger)
 	return nil
+}
+
+// syncDir fsyncs dir so file creations and renames survive a crash.
+// Best-effort: on platforms where opening a directory for sync is not
+// supported (notably Windows; darwin/linux both accept it), the warning is
+// logged and the call returns — the VFS-level operation has already
+// succeeded, and blocking on a portability quirk would defeat the purpose.
+func syncDir(dir string, logger *slog.Logger) {
+	d, err := os.Open(dir)
+	if err != nil {
+		if logger != nil {
+			logger.Warn("schedule: dir open for fsync failed", "dir", dir, "err", err.Error())
+		}
+		return
+	}
+	if err := d.Sync(); err != nil {
+		if logger != nil {
+			logger.Warn("schedule: dir fsync failed", "dir", dir, "err", err.Error())
+		}
+	}
+	_ = d.Close()
 }
 
 // List returns all entries (pending/running/failed in main dir, completed in completed/).
@@ -418,6 +455,11 @@ func (s *FileStore) MarkCompleted(_ context.Context, commandID string) error {
 	if err := os.Rename(path, dst); err != nil {
 		return fmt.Errorf("schedule move completed: %w", err)
 	}
+	// Cross-directory rename — fsync both source and destination so the
+	// move survives a crash regardless of which directory entry the kernel
+	// flushes first.
+	syncDir(s.dir, s.logger)
+	syncDir(s.completedDir(), s.logger)
 	return nil
 }
 
@@ -631,19 +673,34 @@ func (s *FileStore) writeEntryAtomic(path string, entry Entry) error {
 		return fmt.Errorf("schedule temp write update: %w", err)
 	}
 	tmpPath := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("schedule write update: %w", err)
+	// Order: write → fsync(tmp) → close → rename → fsync(dir). fsync the tmp
+	// file before rename so its bytes are durable by the time the rename
+	// appears in the directory entry; fsync the parent directory afterwards
+	// so the rename itself survives a crash. Sync errors are fatal — silently
+	// dropping them would defeat the durability guarantee.
+	_, writeErr := tmp.Write(data)
+	var syncErr error
+	if writeErr == nil {
+		syncErr = tmp.Sync()
 	}
-	if err := tmp.Close(); err != nil {
+	closeErr := tmp.Close()
+	if writeErr != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("schedule close update: %w", err)
+		return fmt.Errorf("schedule write update: %w", writeErr)
+	}
+	if syncErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("schedule sync update: %w", syncErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("schedule close update: %w", closeErr)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("schedule rename update: %w", err)
 	}
+	syncDir(dir, s.logger)
 	return nil
 }
 
