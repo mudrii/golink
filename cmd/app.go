@@ -303,6 +303,10 @@ func defaultTransportFactory(deps Dependencies) TransportFactory {
 				Token: func(_ context.Context) (string, error) {
 					return strings.TrimSpace(session.AccessToken), nil
 				},
+				// httprecord cassette paths are sourced from the process env
+				// here so the api package stays env-free.
+				RecordPath: os.Getenv("GOLINK_RECORD"),
+				ReplayPath: os.Getenv("GOLINK_REPLAY"),
 			})
 			if err != nil {
 				return nil, err

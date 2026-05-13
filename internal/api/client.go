@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +32,11 @@ const (
 )
 
 // ClientConfig controls the construction of the retryable HTTP client.
+//
+// RecordPath and ReplayPath drive the httprecord cassette transport. They
+// are mutually exclusive; an empty string disables the wrapper. Callers in
+// cmd/ resolve these from the process environment (GOLINK_RECORD /
+// GOLINK_REPLAY) so the api package stays free of os.Getenv calls.
 type ClientConfig struct {
 	BaseURL       string
 	Token         func(ctx context.Context) (string, error)
@@ -44,6 +48,8 @@ type ClientConfig struct {
 	RetryWaitMax  time.Duration
 	UserAgent     string
 	RequestIDFunc func() string
+	RecordPath    string
+	ReplayPath    string
 }
 
 // Client performs authenticated LinkedIn REST requests with retry, rate-limit
@@ -74,7 +80,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 
-	// Wrap the base transport with record/replay if env vars are set.
+	// Wrap the base transport with record/replay when the caller asked for
+	// it via ClientConfig. NewClient never reads os.Getenv itself; cmd/
+	// resolves the environment.
 	baseTransport, wrapErr := httprecord.Wrap(
 		func() http.RoundTripper {
 			if cfg.HTTPClient != nil {
@@ -82,8 +90,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			}
 			return http.DefaultTransport
 		}(),
-		os.Getenv("GOLINK_RECORD"),
-		os.Getenv("GOLINK_REPLAY"),
+		cfg.RecordPath,
+		cfg.ReplayPath,
 	)
 	if wrapErr != nil {
 		return nil, fmt.Errorf("httprecord: %w", wrapErr)
@@ -106,10 +114,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	switch {
-	case os.Getenv("GOLINK_RECORD") != "":
-		logger.Info("httprecord: recording HTTP exchanges", "path", os.Getenv("GOLINK_RECORD"))
-	case os.Getenv("GOLINK_REPLAY") != "":
-		logger.Info("httprecord: replaying from cassette", "path", os.Getenv("GOLINK_REPLAY"))
+	case cfg.RecordPath != "":
+		logger.Info("httprecord: recording HTTP exchanges", "path", cfg.RecordPath)
+	case cfg.ReplayPath != "":
+		logger.Info("httprecord: replaying from cassette", "path", cfg.ReplayPath)
 	}
 	client.RetryMax = cfg.RetryMax
 	if client.RetryMax == 0 {
