@@ -352,8 +352,16 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 
 	// Record idempotency entry on success.
 	if op.IdempotencyKey != "" && cmdID != "" {
-		resultBytes, _ := json.Marshal(resultData)
-		_ = r.istore.Record(ctx, idempotency.Entry{
+		resultBytes, marshalErr := json.Marshal(resultData)
+		if marshalErr != nil {
+			// Silently dropping the marshal error degrades the idempotency
+			// cache invisibly: a replay would emit an empty data field
+			// instead of the original response. Surface via WARN so the
+			// regression is observable in logs even though we still record
+			// the (empty) entry so dedupe keeps working.
+			r.a.logger.Warn("batch: marshal idempotency result failed", "command_id", cmdID, "command", cmdName, "error", marshalErr)
+		}
+		if err := r.istore.Record(ctx, idempotency.Entry{
 			TS:         r.a.deps.Now().UTC(),
 			Key:        op.IdempotencyKey,
 			Command:    cmdName,
@@ -361,7 +369,9 @@ func (r *batchRunner) runOp(ctx context.Context, lineNum int, op batchOp) (strin
 			Status:     "ok",
 			HTTPStatus: httpStatus,
 			Result:     resultBytes,
-		})
+		}); err != nil {
+			r.a.logger.Warn("batch: idempotency record failed", "command_id", cmdID, "command", cmdName, "error", err)
+		}
 	}
 
 	emitErr := r.emitSuccess(lineNum, op, cmdID, httpStatus, resultData)
