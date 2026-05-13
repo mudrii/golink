@@ -266,19 +266,21 @@ func (s *FileStore) Get(_ context.Context, commandID string) (Entry, error) {
 	return Entry{}, fmt.Errorf("%w: %s", ErrNotFound, commandID)
 }
 
-// filenameHasCommandID returns true when fileName encodes commandID as
-// the suffix after the last hyphen in the schedule filename.
-// Expected filename format is `<timestamp>-<commandID>.json`.
+// filenameHasCommandID returns true when fileName encodes commandID after
+// the RFC3339 timestamp prefix. Expected format is
+// `<rfc3339-with-colons-as-hyphens>-<commandID>.json`; the timestamp itself
+// contains hyphens (date separators) so we anchor on the trailing "Z-" that
+// always terminates a UTC RFC3339 stamp.
 func filenameHasCommandID(fileName, commandID string) bool {
 	if !strings.HasSuffix(fileName, ".json") {
 		return false
 	}
 	base := strings.TrimSuffix(fileName, ".json")
-	last := strings.LastIndex(base, "-")
-	if last < 0 {
+	idx := strings.Index(base, "Z-")
+	if idx < 0 {
 		return base == commandID
 	}
-	return base[last+1:] == commandID
+	return base[idx+2:] == commandID
 }
 
 // Due returns pending entries with scheduled_at <= now, up to limit, sorted by scheduled_at.

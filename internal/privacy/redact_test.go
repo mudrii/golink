@@ -45,6 +45,30 @@ func TestStringRedactsLinkedInURNsAndLocalPaths(t *testing.T) {
 	}
 }
 
+func TestString_RedactsCompoundCommentURN(t *testing.T) {
+	raw := "comment urn:li:comment:(urn:li:activity:9001,99) by member"
+
+	got := String(raw)
+	if strings.Contains(got, "urn:li:comment:(urn:li:activity:9001,99)") {
+		t.Fatalf("compound URN not redacted: %s", got)
+	}
+	if !strings.Contains(got, redacted) {
+		t.Fatalf("expected REDACTED placeholder: %s", got)
+	}
+}
+
+func TestString_RedactsLinuxHomePath(t *testing.T) {
+	raw := `read /home/alice/.golink/audit.jsonl from disk`
+
+	got := String(raw)
+	if strings.Contains(got, "/home/alice") {
+		t.Fatalf("linux home path not redacted: %s", got)
+	}
+	if !strings.Contains(got, redacted) {
+		t.Fatalf("expected REDACTED placeholder: %s", got)
+	}
+}
+
 func TestFormRedactsSensitiveAndPersonalValues(t *testing.T) {
 	got := string(Form([]byte("client_secret=secret-123&author=urn%3Ali%3Aperson%3Aabc123&email=ion%40example.com&count=10&visibility=PUBLIC")))
 	values, err := url.ParseQuery(got)

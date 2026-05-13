@@ -451,6 +451,53 @@ func TestFileStore_Next(t *testing.T) {
 	}
 }
 
+func TestFilenameHasCommandID_HyphenatedID(t *testing.T) {
+	cases := []struct {
+		name      string
+		fileName  string
+		commandID string
+		want      bool
+	}{
+		{
+			name:      "matches full hyphenated suffix",
+			fileName:  "2027-01-01T09-00-00Z-post-create.json",
+			commandID: "post-create",
+			want:      true,
+		},
+		{
+			name:      "rejects partial trailing token",
+			fileName:  "2027-01-01T09-00-00Z-post-create.json",
+			commandID: "create",
+			want:      false,
+		},
+		{
+			name:      "matches simple id",
+			fileName:  "2027-01-01T09-00-00Z-fid1.json",
+			commandID: "fid1",
+			want:      true,
+		},
+		{
+			name:      "rejects different command id with same suffix",
+			fileName:  "2027-01-01T09-00-00Z-other.json",
+			commandID: "post-create",
+			want:      false,
+		},
+		{
+			name:      "rejects non-json file",
+			fileName:  "2027-01-01T09-00-00Z-fid1.txt",
+			commandID: "fid1",
+			want:      false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := filenameHasCommandID(tc.fileName, tc.commandID); got != tc.want {
+				t.Fatalf("filenameHasCommandID(%q, %q) = %v, want %v", tc.fileName, tc.commandID, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolvePath(t *testing.T) {
 	t.Setenv("GOLINK_SCHEDULE_DIR", "/tmp/sched-test")
 	p := ResolvePath()

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mudrii/golink/internal/privacy"
 )
 
 // State represents the lifecycle state of an approval entry.
@@ -129,6 +131,7 @@ func (s *FileStore) Stage(_ context.Context, entry Entry) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("approval marshal: %w", err)
 	}
+	data = privacy.JSON(data)
 
 	// O_EXCL ensures a duplicate command_id never silently overwrites an
 	// existing pending entry across processes.
