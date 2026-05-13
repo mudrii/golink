@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -189,6 +190,36 @@ func TestResolveURLEdgeCases(t *testing.T) {
 	}
 	if got, want := resolved.String(), "https://api.linkedin.test/rest/posts?q=hello%20world#frag"; got != want {
 		t.Fatalf("resolved URL = %q, want %q", got, want)
+	}
+}
+
+func TestResolveURLBlocksAbsoluteOverride(t *testing.T) {
+	var serverHits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&serverHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		BaseURL: server.URL,
+		Token: func(_ context.Context) (string, error) {
+			return "secret-token", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	_, err = client.Do(t.Context(), http.MethodGet, "https://attacker.example.com/steal", nil)
+	if err == nil {
+		t.Fatal("expected error for cross-host absolute URL, got nil")
+	}
+	if atomic.LoadInt32(&serverHits) != 0 {
+		t.Fatalf("legitimate server should not have been hit, hits = %d", serverHits)
+	}
+	if !strings.Contains(err.Error(), "cross-host") {
+		t.Fatalf("expected cross-host error, got: %v", err)
 	}
 }
 

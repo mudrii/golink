@@ -277,6 +277,12 @@ func (c *Client) resolveURL(relativePath string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse relative path: %w", err)
 	}
+	// Reject absolute URLs that would steer requests to another host —
+	// url.ResolveReference would otherwise honor them and leak the bearer
+	// token attached to the LinkedIn-bound request.
+	if ref.IsAbs() && ref.Host != "" && ref.Host != c.base.Host {
+		return nil, fmt.Errorf("refusing to resolve cross-host url: %s", ref.Host)
+	}
 	return c.base.ResolveReference(ref), nil
 }
 
