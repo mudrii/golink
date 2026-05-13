@@ -23,10 +23,13 @@ func newRootCommand(a *app) (*cobra.Command, error) {
 
 			a.settings = settings
 			a.logger = newLogger(settings.Verbose, a.deps.Stderr)
-			if !settings.Audit {
+			switch {
+			case !settings.Audit:
 				// Opt-out always wins, even over an injected sink.
 				a.deps.AuditSink = audit.NoopSink{}
-			} else if a.deps.AuditSink == nil {
+			case !a.auditSinkInjected:
+				// Default NoopSink from normalizeDependencies — upgrade to a
+				// real FileSink now that the audit path is resolved.
 				a.deps.AuditSink = audit.NewFileSink(settings.AuditPath)
 			}
 			if settings.Transport == "unofficial" && !settings.AcceptUnofficialRisk {

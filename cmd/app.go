@@ -79,6 +79,11 @@ type app struct {
 	settings   config.Settings
 	logger     *slog.Logger
 	activePlan *plan.Plan
+	// auditSinkInjected records whether deps.AuditSink came from the caller
+	// (true) or was defaulted to audit.NoopSink during normalization (false).
+	// PersistentPreRunE uses this to decide whether to upgrade the default
+	// NoopSink to a FileSink once settings are loaded.
+	auditSinkInjected bool
 }
 
 type commandFailure struct {
@@ -103,8 +108,10 @@ func Execute(ctx context.Context, buildInfo BuildInfo) int {
 
 // ExecuteContext runs golink with injected dependencies for tests or embedding.
 func ExecuteContext(ctx context.Context, args []string, deps Dependencies, buildInfo BuildInfo) int {
+	auditInjected := deps.AuditSink != nil
 	normalized := normalizeDependencies(deps)
 	application := newApp(buildInfo, normalized, args)
+	application.auditSinkInjected = auditInjected
 
 	rootCmd, err := newRootCommand(application)
 	if err != nil {
@@ -265,6 +272,12 @@ func normalizeDependencies(deps Dependencies) Dependencies {
 	}
 	if deps.ScheduleStore == nil {
 		deps.ScheduleStore = schedule.NewFileStore("")
+	}
+	if deps.AuditSink == nil {
+		// Default to NoopSink so call sites never have to nil-check.
+		// PersistentPreRunE upgrades this to a FileSink once settings are
+		// loaded, unless the caller has opted out via GOLINK_AUDIT=off.
+		deps.AuditSink = audit.NoopSink{}
 	}
 
 	return deps
@@ -799,9 +812,6 @@ func (a *app) auditMutation(cmd *cobra.Command, commandID, status, mode, request
 // auditMutationWithAuthor is like auditMutation but also records an optional
 // authorURN in the audit entry (used when posting as an organization).
 func (a *app) auditMutationWithAuthor(cmd *cobra.Command, commandID, status, mode, requestID string, httpStatus int, errorCode string, dryRunPreview []byte, authorURN string) {
-	if a.deps.AuditSink == nil {
-		return
-	}
 	entry := audit.Entry{
 		TS:         a.deps.Now().UTC(),
 		Profile:    a.settings.Profile,
