@@ -40,6 +40,32 @@ func negativeSchemaFixtures() []negativeSchemaFixture {
 				}
 			}`),
 		},
+		{
+			// A schedule.run result entry must use one of the three terminal
+			// buckets (succeeded/failed/skipped). Anything else — e.g. the
+			// lifecycle state "running" — must be rejected by the schema so
+			// the typed ScheduleRunStatus enum cannot silently drift.
+			name: "schedule run invalid result status",
+			payload: []byte(`{
+				"status": "ok",
+				"command_id": "cmd_schedule_run_bad_status_01",
+				"command": "schedule run",
+				"transport": "official",
+				"generated_at": "2026-04-17T12:00:00Z",
+				"data": {
+					"ran": 1,
+					"succeeded": 0,
+					"failed": 0,
+					"skipped": 0,
+					"results": [
+						{
+							"command_id": "cmd_post_create_01",
+							"status": "running"
+						}
+					]
+				}
+			}`),
+		},
 	}
 }
 

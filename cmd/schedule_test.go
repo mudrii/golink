@@ -699,7 +699,7 @@ func TestScheduleRun_FailingEntryIncrementsRetryCount(t *testing.T) {
 	if data.Failed != 1 {
 		t.Errorf("want failed=1, got %d", data.Failed)
 	}
-	if len(data.Results) != 1 || data.Results[0].Status != "failed" {
+	if len(data.Results) != 1 || data.Results[0].Status != output.ScheduleRunStatusFailed {
 		t.Errorf("want results[0].status=failed, got %+v", data.Results)
 	}
 
@@ -821,10 +821,10 @@ func TestScheduleRun_SkippedEntryDoesNotCountAsFailureOrTriggerFailFast(t *testi
 	if len(data.Results) != 2 {
 		t.Fatalf("want 2 results, got %d", len(data.Results))
 	}
-	if data.Results[0].Status != "skipped" {
+	if data.Results[0].Status != output.ScheduleRunStatusSkipped {
 		t.Fatalf("first result status = %q, want skipped", data.Results[0].Status)
 	}
-	if data.Results[1].Status != "succeeded" {
+	if data.Results[1].Status != output.ScheduleRunStatusSucceeded {
 		t.Fatalf("second result status = %q, want succeeded", data.Results[1].Status)
 	}
 }
@@ -874,10 +874,10 @@ func TestRunOneEntry_IdempotencyKeyCommandMismatchFails(t *testing.T) {
 	if data.Ran != 1 || len(data.Results) != 1 {
 		t.Fatalf("unexpected run payload: %+v", data)
 	}
-	if data.Results[0].Status == "succeeded" {
+	if data.Results[0].Status == output.ScheduleRunStatusSucceeded {
 		t.Fatalf("entry must not succeed on idempotency key/command mismatch: %+v", data.Results[0])
 	}
-	if data.Results[0].Status != "failed" {
+	if data.Results[0].Status != output.ScheduleRunStatusFailed {
 		t.Fatalf("entry status = %q, want failed", data.Results[0].Status)
 	}
 	if !strings.Contains(strings.ToLower(data.Results[0].Error), "idempotency") &&

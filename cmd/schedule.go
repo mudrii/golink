@@ -215,9 +215,9 @@ func runScheduledEntries(ctx context.Context, a *app, cmd *cobra.Command, entrie
 		result, err := runOneEntry(ctx, a, cmd, entries[i])
 		results = append(results, result)
 		switch result.Status {
-		case "skipped":
+		case output.ScheduleRunStatusSkipped:
 			skipped++
-		case "failed":
+		case output.ScheduleRunStatusFailed:
 			failed++
 		default:
 			succeeded++
@@ -253,7 +253,7 @@ func runOneEntry(
 		// claimed it). Report as skipped; no audit entry since we didn't act.
 		return output.ScheduleRunResult{
 			CommandID: e.CommandID,
-			Status:    "skipped",
+			Status:    output.ScheduleRunStatusSkipped,
 			Error:     fmt.Sprintf("cannot transition to running: %v", err),
 		}, nil
 	}
@@ -271,7 +271,7 @@ func runOneEntry(
 			a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
-				Status:    "failed",
+				Status:    output.ScheduleRunStatusFailed,
 				Error:     errMsg,
 			}, checkErr
 		}
@@ -285,7 +285,7 @@ func runOneEntry(
 			a.auditMutation(cmd, cmdID, "ok", "normal", entry.RequestID, entry.HTTPStatus, "", nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
-				Status:    "succeeded",
+				Status:    output.ScheduleRunStatusSucceeded,
 				PostURN:   postURN,
 			}, nil
 		}
@@ -298,7 +298,7 @@ func runOneEntry(
 		a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeUnauthorized), nil)
 		return output.ScheduleRunResult{
 			CommandID: e.CommandID,
-			Status:    "failed",
+			Status:    output.ScheduleRunStatusFailed,
 			Error:     errMsg,
 		}, err
 	}
@@ -318,7 +318,7 @@ func runOneEntry(
 			a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
-				Status:    "failed",
+				Status:    output.ScheduleRunStatusFailed,
 				Error:     errMsg,
 			}, statErr
 		}
@@ -329,7 +329,7 @@ func runOneEntry(
 			a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
-				Status:    "failed",
+				Status:    output.ScheduleRunStatusFailed,
 				Error:     initErr.Error(),
 			}, initErr
 		}
@@ -338,7 +338,7 @@ func runOneEntry(
 			a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 			return output.ScheduleRunResult{
 				CommandID: e.CommandID,
-				Status:    "failed",
+				Status:    output.ScheduleRunStatusFailed,
 				Error:     uploadErr.Error(),
 			}, uploadErr
 		}
@@ -355,7 +355,7 @@ func runOneEntry(
 		a.auditMutation(cmd, cmdID, "error", "normal", "", 0, string(output.ErrorCodeTransport), nil)
 		return output.ScheduleRunResult{
 			CommandID: e.CommandID,
-			Status:    "failed",
+			Status:    output.ScheduleRunStatusFailed,
 			Error:     errMsg,
 		}, err
 	}
@@ -378,7 +378,7 @@ func runOneEntry(
 
 	return output.ScheduleRunResult{
 		CommandID: e.CommandID,
-		Status:    "succeeded",
+		Status:    output.ScheduleRunStatusSucceeded,
 		PostURN:   summary.ID,
 	}, nil
 }

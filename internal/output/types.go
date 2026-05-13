@@ -563,12 +563,25 @@ type ScheduleListData struct {
 	Counts ScheduleListCounts  `json:"counts"`
 }
 
+// ScheduleRunStatus is the result-bucketing enum for one entry in a
+// schedule.run response. Distinct from schedule.State: the underlying entry
+// transitions through pending/running/completed/failed/cancelled, but the
+// per-entry run result only reports the terminal outcome bucket.
+type ScheduleRunStatus string
+
+// Schedule run result status values.
+const (
+	ScheduleRunStatusSucceeded ScheduleRunStatus = "succeeded"
+	ScheduleRunStatusFailed    ScheduleRunStatus = "failed"
+	ScheduleRunStatusSkipped   ScheduleRunStatus = "skipped"
+)
+
 // ScheduleRunResult is one entry in the run results slice.
 type ScheduleRunResult struct {
-	CommandID string `json:"command_id"`
-	Status    string `json:"status"`
-	PostURN   string `json:"post_urn,omitempty"`
-	Error     string `json:"error,omitempty"`
+	CommandID string            `json:"command_id"`
+	Status    ScheduleRunStatus `json:"status"`
+	PostURN   string            `json:"post_urn,omitempty"`
+	Error     string            `json:"error,omitempty"`
 }
 
 // ScheduleRunData is the payload for schedule run.
