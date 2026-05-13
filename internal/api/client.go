@@ -131,7 +131,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if client.RetryWaitMax == 0 {
 		client.RetryWaitMax = 8 * time.Second
 	}
-	client.Backoff = retryablehttp.LinearJitterBackoff
+	client.Backoff = backoffWithRetryAfter
 	client.Logger = nil
 	client.CheckRetry = func(ctx context.Context, resp *http.Response, respErr error) (bool, error) {
 		if ctx.Err() != nil {
@@ -382,6 +382,40 @@ func firstHeader(header http.Header, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// backoffWithRetryAfter honours the server's Retry-After header on 429/503
+// responses, falling back to LinearJitterBackoff otherwise. Retry-After may be
+// either a non-negative integer number of seconds (RFC 9110 §10.2.3) or an
+// HTTP-date; both forms are parsed. No upper bound is imposed — the client's
+// configured timeout (and the caller's context) remain the safety net.
+func backoffWithRetryAfter(minWait, maxWait time.Duration, attempt int, resp *http.Response) time.Duration {
+	if resp != nil &&
+		(resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode == http.StatusServiceUnavailable) {
+		if d := parseRetryAfter(resp.Header.Get("Retry-After")); d > 0 {
+			return d
+		}
+	}
+	return retryablehttp.LinearJitterBackoff(minWait, maxWait, attempt, resp)
+}
+
+// parseRetryAfter decodes a Retry-After header value. It returns 0 for the
+// empty string, malformed values, or HTTP-dates already in the past.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func normalizeRateReset(raw string) string {

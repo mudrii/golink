@@ -104,6 +104,102 @@ func TestClientRetriesOn429And5xx(t *testing.T) {
 	}
 }
 
+func TestClientHonorsRetryAfterSeconds(t *testing.T) {
+	// Given a server that returns 429 with Retry-After: 1 on the first call
+	// then 200 on the second, the retryable client must wait at least the
+	// requested duration before retrying — not the LinearJitterBackoff
+	// configured for ordinary 5xx waits.
+	var calls atomic.Int32
+	var firstAt, secondAt time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		switch n {
+		case 1:
+			firstAt = time.Now()
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+		default:
+			secondAt = time.Now()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		BaseURL:      server.URL,
+		RetryMax:     2,
+		RetryWaitMin: time.Millisecond,
+		RetryWaitMax: 5 * time.Millisecond,
+		Token: func(_ context.Context) (string, error) {
+			return "t", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	resp, err := client.Do(t.Context(), http.MethodGet, "/rest/x", nil)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d", resp.Status)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected 2 calls, got %d", calls.Load())
+	}
+	delta := secondAt.Sub(firstAt)
+	if delta < 900*time.Millisecond {
+		t.Fatalf("retry after %v; Retry-After: 1 not honored (RetryWaitMax was 5ms)", delta)
+	}
+}
+
+func TestClientHonorsRetryAfterHTTPDate(t *testing.T) {
+	// Same property but Retry-After expressed as an HTTP-date.
+	var calls atomic.Int32
+	var firstAt, secondAt time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		switch n {
+		case 1:
+			firstAt = time.Now()
+			w.Header().Set("Retry-After", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			secondAt = time.Now()
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		BaseURL:      server.URL,
+		RetryMax:     2,
+		RetryWaitMin: time.Millisecond,
+		RetryWaitMax: 5 * time.Millisecond,
+		Token: func(_ context.Context) (string, error) {
+			return "t", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	resp, err := client.Do(t.Context(), http.MethodGet, "/rest/x", nil)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	if resp.Status != http.StatusOK {
+		t.Fatalf("status = %d", resp.Status)
+	}
+	delta := secondAt.Sub(firstAt)
+	if delta < 500*time.Millisecond {
+		t.Fatalf("retry after %v; HTTP-date Retry-After not honored", delta)
+	}
+}
+
 func TestClientDecodesError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Restli-Id", "req-err")
