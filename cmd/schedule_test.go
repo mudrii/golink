@@ -828,3 +828,60 @@ func TestScheduleRun_SkippedEntryDoesNotCountAsFailureOrTriggerFailFast(t *testi
 		t.Fatalf("second result status = %q, want succeeded", data.Results[1].Status)
 	}
 }
+
+// TestRunOneEntry_IdempotencyKeyCommandMismatchFails asserts that when an
+// idempotency key was previously recorded for a different command, the
+// scheduled run fails loudly instead of silently re-running. Finding H6.
+func TestRunOneEntry_IdempotencyKeyCommandMismatchFails(t *testing.T) {
+	sched := schedule.NewMemoryStore()
+	ctx := t.Context()
+	if err := sched.Add(ctx, schedule.Entry{
+		CommandID:      "mismatch-run",
+		ScheduledAt:    fixedNow().Add(-time.Minute),
+		CreatedAt:      fixedNow(),
+		State:          schedule.StatePending,
+		Profile:        "default",
+		Transport:      "official",
+		IdempotencyKey: "k1",
+		Request:        schedule.Request{Text: "mismatch text", Visibility: "PUBLIC"},
+	}); err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+
+	// Pre-record an idempotency entry for the same key but a different command.
+	istore := idempotency.NewMemoryStore()
+	if err := istore.Record(ctx, idempotency.Entry{
+		TS:         time.Now().UTC(),
+		Key:        "k1",
+		Command:    "post delete",
+		CommandID:  "earlier-post-delete",
+		HTTPStatus: 204,
+		RequestID:  "req-earlier",
+	}); err != nil {
+		t.Fatalf("record idempotency: %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	deps := newScheduleTestDeps(sched)
+	deps.Stdout = stdout
+	deps.IdempotencyStore = istore
+
+	// Exit 0 — schedule run reports per-entry status; the entry itself is
+	// expected to be "failed", not "succeeded".
+	_ = ExecuteContext(ctx, []string{"--json", "schedule", "run"}, deps, BuildInfo{})
+
+	data := decodeScheduleRun(t, stdout)
+	if data.Ran != 1 || len(data.Results) != 1 {
+		t.Fatalf("unexpected run payload: %+v", data)
+	}
+	if data.Results[0].Status == "succeeded" {
+		t.Fatalf("entry must not succeed on idempotency key/command mismatch: %+v", data.Results[0])
+	}
+	if data.Results[0].Status != "failed" {
+		t.Fatalf("entry status = %q, want failed", data.Results[0].Status)
+	}
+	if !strings.Contains(strings.ToLower(data.Results[0].Error), "idempotency") &&
+		!strings.Contains(strings.ToLower(data.Results[0].Error), "mismatch") {
+		t.Fatalf("error message should mention idempotency mismatch, got %q", data.Results[0].Error)
+	}
+}

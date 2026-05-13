@@ -234,9 +234,23 @@ func runOneEntry(
 		}, nil
 	}
 
-	// Idempotency check before creating.
+	// Idempotency check before creating. Route through idempotencyCheck so
+	// ErrKeyCommandMismatch surfaces as a validation failure for this entry
+	// instead of being silently swallowed (which previously caused the entry
+	// to attempt a fresh "post create" against a key reserved for a different
+	// command).
 	if e.IdempotencyKey != "" {
-		entry, hit, _ := a.deps.IdempotencyStore.Lookup(cobCtx, e.IdempotencyKey, "post create")
+		entry, hit, checkErr := a.idempotencyCheck(cmd, e.IdempotencyKey, "post create")
+		if checkErr != nil {
+			errMsg := checkErr.Error()
+			_ = a.deps.ScheduleStore.MarkFailed(cobCtx, e.CommandID, errMsg, a.deps.Now().UTC())
+			a.auditMutation(cmd, cmdID, "validation_error", "normal", "", 0, string(output.ErrorCodeValidation), nil)
+			return output.ScheduleRunResult{
+				CommandID: e.CommandID,
+				Status:    "failed",
+				Error:     errMsg,
+			}, checkErr
+		}
 		if hit {
 			postURN := cachedPostURN(entry)
 			if postURN == "" {
