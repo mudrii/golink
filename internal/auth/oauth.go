@@ -225,6 +225,7 @@ func CompleteLogin(
 			userInfo = &UserInfo{Sub: memberURNFromProfileID(profileID)}
 		}
 	}
+	userInfo.Sub = memberURNFromProfileID(userInfo.Sub)
 
 	session := &Session{
 		Profile:        profile,

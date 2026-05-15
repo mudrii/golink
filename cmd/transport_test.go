@@ -177,12 +177,17 @@ func (f *fakeTransport) ListOrganizations(_ context.Context) (*output.OrgListDat
 
 func authenticatedStore(t *testing.T) auth.Store {
 	t.Helper()
+	return authenticatedStoreWithMember(t, "urn:li:person:abc123")
+}
+
+func authenticatedStoreWithMember(t *testing.T, memberURN string) auth.Store {
+	t.Helper()
 	store := auth.NewMemoryStore()
 	if err := store.SaveSession(t.Context(), auth.Session{
 		Profile:     "default",
 		Transport:   "official",
 		AccessToken: "token-xyz",
-		MemberURN:   "urn:li:person:abc123",
+		MemberURN:   memberURN,
 		ProfileID:   "abc123",
 		Name:        "Ion Mudreac",
 		Email:       "ion@example.com",
@@ -692,6 +697,29 @@ func TestPostCreateImageDryRun(t *testing.T) {
 	}
 	if payload.Data.WouldPost.WouldUpload.PlaceholderURN != "urn:li:image:<to-be-uploaded>" {
 		t.Fatalf("placeholder_urn = %q", payload.Data.WouldPost.WouldUpload.PlaceholderURN)
+	}
+}
+
+func TestPostCreateDryRunIncludesAuthorURN(t *testing.T) {
+	code, stdout, stderr := executeTestCommand(t,
+		[]string{"--json", "--dry-run", "post", "create", "--text", "Hello from test"},
+		testDepsOptions{store: authenticatedStoreWithMember(t, "urn:li:person:rawSub")})
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr)
+	}
+	output.ValidateEnvelopeRoundTrip(t, schemaPath(t), stdout.Bytes())
+	var payload struct {
+		Data struct {
+			WouldPost struct {
+				AuthorURN string `json:"author_urn"`
+			} `json:"would_post"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.Data.WouldPost.AuthorURN != "urn:li:person:rawSub" {
+		t.Fatalf("author_urn = %q", payload.Data.WouldPost.AuthorURN)
 	}
 }
 
