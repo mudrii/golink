@@ -104,6 +104,7 @@ func (a *app) runPostCreateCommand(cmd *cobra.Command, flags postCreateFlags) er
 		return err
 	}
 	if a.settings.DryRun {
+		prepared.preview.AuthorURN = a.resolvePostCreateAuthorForDryRun(cmd, prepared.asOrg)
 		return a.writePostCreateDryRun(cmd, cmdID, prepared)
 	}
 	if a.settings.RequireApproval {
@@ -175,6 +176,17 @@ func (a *app) preparePostCreate(cmd *cobra.Command, cmdID string, flags postCrea
 		}
 	}
 	return preparedPostCreate{text: text, asOrg: asOrg, imagePath: imagePath, request: request, preview: preview}, nil
+}
+
+func (a *app) resolvePostCreateAuthorForDryRun(cmd *cobra.Command, asOrg string) string {
+	if strings.TrimSpace(asOrg) != "" {
+		return asOrg
+	}
+	session, err := a.resolveSession(cmd)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(session.MemberURN)
 }
 
 func (a *app) writePostCreateDryRun(cmd *cobra.Command, cmdID string, prepared preparedPostCreate) error {

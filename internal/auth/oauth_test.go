@@ -547,6 +547,57 @@ func TestCompleteLoginOAuth2UsesClientSecret(t *testing.T) {
 	}
 }
 
+func TestCompleteLogin_NormalizesMemberURNFromRawUserinfoSub(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(TokenResponse{
+			AccessToken: "token-123",
+			ExpiresIn:   3600,
+			Scope:       "openid profile email w_member_social_feed",
+		})
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(UserInfo{
+			Sub:  "CDNB3twQyu",
+			Name: "Raw Sub User",
+		})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	request, err := BuildLoginRequest(t.Context(), "client-123", 0, []string{"openid", "profile", "email"})
+	if err != nil {
+		t.Fatalf("build login request: %v", err)
+	}
+
+	now := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	callbackDone := fireOAuthCallbackWhenReady(t, ctx, request)
+
+	session, err := CompleteLogin(ctx, request, "default", "official", LoginFlowOptions{
+		HTTPClient:  server.Client(),
+		Interactive: false,
+		Now:         func() time.Time { return now },
+		TokenURL:    server.URL + "/oauth/token",
+		UserInfoURL: server.URL + "/userinfo",
+	})
+	if err != nil {
+		t.Fatalf("complete login: %v", err)
+	}
+	if session.MemberURN != "urn:li:person:CDNB3twQyu" {
+		t.Fatalf("unexpected member urn: %q", session.MemberURN)
+	}
+	if session.ProfileID != "CDNB3twQyu" {
+		t.Fatalf("unexpected profile id: %q", session.ProfileID)
+	}
+	if err := <-callbackDone; err != nil {
+		t.Fatalf("callback get: %v", err)
+	}
+}
+
 func TestCompleteLogin_UsesManualMemberURNWhenUserInfoUnavailable(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
